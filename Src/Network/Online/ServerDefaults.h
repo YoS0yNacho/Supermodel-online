@@ -4,13 +4,13 @@
 #include <cstdint>
 namespace Online {
 inline constexpr uint16_t DefaultRelayPort = 1970;
-inline constexpr const char* DefaultRelayHost = "onlinetest-useast.viewdns.net";
-inline constexpr const char* DefaultRelayEndpoint = "onlinetest-useast.viewdns.net:1970";
+inline constexpr const char* DefaultRelayHost = "pl.supermodel.juanalmada.com";
+inline constexpr const char* DefaultRelayEndpoint = "pl.supermodel.juanalmada.com:1970";
 inline constexpr const char* DefaultRelayEndpoints[] = {
-  DefaultRelayEndpoint, "onlinetest.viewdns.net:1970"
+  DefaultRelayEndpoint, "onlinetest-useast.viewdns.net:1970", "onlinetest.viewdns.net:1970"
 };
 inline constexpr const char* DefaultRelayServers =
-    "onlinetest-useast.viewdns.net:1970,onlinetest.viewdns.net:1970";
+    "pl.supermodel.juanalmada.com:1970,onlinetest-useast.viewdns.net:1970,onlinetest.viewdns.net:1970";
 
 }
 #endif
