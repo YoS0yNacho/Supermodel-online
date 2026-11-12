@@ -2,6 +2,7 @@
 #ifndef INCLUDED_ONLINE_LOBBYCLIENT_H
 #define INCLUDED_ONLINE_LOBBYCLIENT_H
 #include "RaceStandings.h"
+#include "ServerDefaults.h"
 #include "RoomSettings.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
 #include <array>
@@ -19,9 +20,6 @@ inline constexpr unsigned MaxPlayers(unsigned game) { return game < 2 ? 16u : ga
 // Both Rally entries use the exact same, unmodified owner archive.
 inline constexpr const char* RomGame(unsigned game){return game==6?"srally2":game<GameCount?Games[game]:"";}
 inline constexpr size_t MaxChatLength = 159;
-inline constexpr uint16_t DefaultRelayPort = 1970;
-inline constexpr const char* DefaultRelayHost = "onlinetest.viewdns.net";
-inline constexpr const char* DefaultRelayEndpoint = "onlinetest.viewdns.net:1970";
 inline constexpr const char* DefaultPlayerName = "Player";
 
 struct Member { uint32_t id = 0; std::string name; uint32_t carNumber = 0; };

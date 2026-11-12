@@ -20,8 +20,8 @@ int main(int argc,char**argv) {
   assert(argc==2);uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
   {
     std::string defHost; uint16_t defPort=0;
-    assert(std::string(Online::DefaultRelayHost)=="onlinetest.viewdns.net");
-    assert(std::string(Online::DefaultRelayEndpoint)=="onlinetest.viewdns.net:1970");
+    assert(std::string(Online::DefaultRelayHost)=="onlinetest-useast.viewdns.net");
+    assert(std::string(Online::DefaultRelayEndpoint)=="onlinetest-useast.viewdns.net:1970");
     assert(Online::DefaultRelayPort==1970);
     assert(std::string(Online::DefaultPlayerName)=="Player");
     assert(RelayProtocol::ParseEndpoint(Online::DefaultRelayEndpoint,defHost,defPort)&&defHost==Online::DefaultRelayHost&&defPort==Online::DefaultRelayPort);

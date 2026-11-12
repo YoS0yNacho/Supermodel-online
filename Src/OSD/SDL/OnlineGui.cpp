@@ -4,26 +4,13 @@
 #include "Pkgs/imgui/imgui.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <filesystem>
 
 namespace {
-std::string TrimAscii(const char* text) {
-  if (!text) return {};
-  const std::string s(text);
-  const auto first = s.find_first_not_of(" \t\r\n");
-  if (first == std::string::npos) return {};
-  const auto last = s.find_last_not_of(" \t\r\n");
-  return s.substr(first, last - first + 1);
-}
 bool ParseEndpointField(const char* text, std::string& normalized, std::string& host, uint16_t& port) {
-  std::string candidate = TrimAscii(text);
-  if (candidate.empty()) return false;
-  if (candidate.find(':') == std::string::npos) {
-    candidate += ":" + std::to_string(unsigned(Online::DefaultRelayPort));
-  }
-  if (!RelayProtocol::ParseEndpoint(candidate, host, port)) return false;
-  normalized = host + ":" + std::to_string(unsigned(port));
-  return true;
+  return text && Online::ServerList::Normalize(text, normalized) &&
+      RelayProtocol::ParseEndpoint(normalized, host, port);
 }
 bool HasPrintableText(const char* text) {
   if (!text) return false;
@@ -61,7 +48,7 @@ bool OnlineGui::PollLaunch(const std::string& dir) {
     std::string normalized, host; uint16_t port;
     autoConnectPending=false;
     if(ParseEndpointField(endpoint,normalized,host,port) && HasPrintableText(player)) {error.clear();client.Connect(normalized,player,Available(dir),true);}
-    else error="Enter the relay as host or host:port, for example onlinetest.viewdns.net:1970.";
+    else error="Enter the relay as host or host:port, for example onlinetest-useast.viewdns.net:1970.";
   }
   const auto s=client.Get();
   if(!s.launch) return false;
@@ -74,15 +61,54 @@ void OnlineGui::Draw(const std::string& dir) {
   const auto s=client.Get();const bool busy=s.connected||s.connecting;
   const float scale=ImGui::GetFontSize()/13.0f;
   std::string normalized, host; uint16_t port;
-  const bool endpointValid=ParseEndpointField(endpoint,normalized,host,port);
-  const bool playerValid=HasPrintableText(player);
   ImGui::TextUnformatted("Online lobbies");
   ImGui::BeginDisabled(busy);
-  ImGui::SetNextItemWidth(195*scale);
+  ImGui::SetNextItemWidth(360*scale);
+  if (ImGui::BeginCombo("Saved servers", endpoint)) {
+    for (const auto& saved : servers.Entries()) {
+      const bool selected = saved == endpoint;
+      if (ImGui::Selectable(saved.c_str(), selected)) {
+        std::snprintf(endpoint, sizeof(endpoint), "%s", saved.c_str());
+        cliRelayOverride = false;
+        saveIdentityRequested = true;
+        error.clear();
+      }
+      if (selected) ImGui::SetItemDefaultFocus();
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SameLine();
+  std::string saveEndpoint;
+  const bool canSave = Online::ServerList::Normalize(endpoint, saveEndpoint);
+  ImGui::BeginDisabled(!canSave);
+  if (ImGui::Button("Save server")) {
+    if (servers.Contains(saveEndpoint) || servers.Add(saveEndpoint)) {
+      std::snprintf(endpoint, sizeof(endpoint), "%s", saveEndpoint.c_str());
+      cliRelayOverride = false;
+      saveIdentityRequested = true;
+      error.clear();
+    } else error = "Saved server list is full (32). Remove a custom server first.";
+  }
+  ImGui::EndDisabled();
+  ImGui::SameLine();
+  ImGui::BeginDisabled(!servers.Contains(endpoint) || Online::ServerList::IsDefault(endpoint));
+  if (ImGui::Button("Remove server") && servers.Remove(endpoint)) {
+    std::snprintf(endpoint, sizeof(endpoint), "%s", Online::DefaultRelayEndpoint);
+    cliRelayOverride = false;
+    saveIdentityRequested = true;
+    error.clear();
+  }
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+    ImGui::SetTooltip("The two default servers stay first. Custom servers can be removed.");
+  ImGui::SetNextItemWidth(240*scale);
   if (ImGui::InputText("Relay IP:port",endpoint,sizeof(endpoint))) cliRelayOverride=false;
   ImGui::SameLine(0.0f, 16.0f*scale);
   ImGui::SetNextItemWidth(150*scale);ImGui::InputText("Player name",player,sizeof(player));
   ImGui::EndDisabled();
+  // Revalidate after widgets so Connect uses the endpoint edited this frame.
+  const bool endpointValid=ParseEndpointField(endpoint,normalized,host,port);
+  const bool playerValid=HasPrintableText(player);
   ImGui::SameLine(0.0f, 16.0f*scale);
   if(!busy) {
     ImGui::BeginDisabled(!endpointValid||!playerValid);
@@ -90,6 +116,8 @@ void OnlineGui::Draw(const std::string& dir) {
       autoConnectPending=false;error.clear();folder=dir;
       lastChatScope=~0u;lastChatSeq=0;
       saveIdentityRequested=true;
+      if (!cliRelayOverride) servers.Add(normalized);
+      std::snprintf(endpoint, sizeof(endpoint), "%s", normalized.c_str());
       client.Connect(normalized,player,Available(dir),true);
     }
     ImGui::EndDisabled();

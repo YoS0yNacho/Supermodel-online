@@ -5,6 +5,32 @@ settings/game-selection GUI. The **Online** tab uses the relay for lobby control
 and chat. Gameplay uses the relay by default, with an optional creator-hosted
 TCP/UDP path.
 
+## Saved servers
+
+The Online tab has a **Saved servers** dropdown. The built-in servers always
+appear first, in this order:
+
+1. `onlinetest-useast.viewdns.net:1970`
+2. `onlinetest.viewdns.net:1970`
+
+Choose one, enter your player name, and click **Connect**. To add a server,
+enter its hostname or IPv4 address in **Relay IP:port** and click **Save server**.
+The port defaults to `1970` when omitted. Custom servers can be removed with
+**Remove server**; the two built-in entries are retained. Disconnect before
+changing servers. This is a selection list, not automatic failover.
+
+Server additions, removals and dropdown selections are saved immediately in
+`Config/Supermodel.ini` (or the platform's active config path). Connecting to a
+manually entered custom server also remembers it. Up to 32 entries are kept,
+including the defaults; equivalent case/port spellings are deduplicated.
+
+The global `OnlineServers` setting stores the comma-separated ordered list;
+`OnlineRelay` remains the selected server for compatibility with existing INIs.
+A legacy custom `OnlineRelay` is added to the list on load, and the previous
+selection is respected. New configurations select the first built-in server.
+A command-line `-relay=...` override stays session-only unless you explicitly
+save that endpoint or choose a saved entry in the GUI.
+
 ## Start the updated relay once
 
 Use the bundled `relay.py` from the repository root. It is standalone and

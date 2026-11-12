@@ -2,9 +2,11 @@
 #ifndef INCLUDED_ONLINEGUI_H
 #define INCLUDED_ONLINEGUI_H
 #include "Network/Online/LobbyClient.h"
+#include "Network/Online/ServerList.h"
 struct OnlineGui {
   Online::LobbyClient client;
-  char endpoint[256] = "onlinetest.viewdns.net:1970";
+  Online::ServerList servers;
+  char endpoint[256] = "onlinetest-useast.viewdns.net:1970";
   char player[32] = "Player";
   char title[64] = "My lobby";
   char chatInput[160] = "";

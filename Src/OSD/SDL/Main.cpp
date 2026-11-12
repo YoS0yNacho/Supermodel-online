@@ -1749,7 +1749,8 @@ Util::Config::Node DefaultConfig()
   config.Set("SimulateNet", true, "Network");
   config.Set("AsyncNet", false, "Network");
   config.Set<std::string>("NetRelay", "", "Network", "", "");
-  config.Set<std::string>("OnlineRelay", "onlinetest.viewdns.net:1970", "Online", "", "");
+  config.Set<std::string>("OnlineRelay", Online::DefaultRelayEndpoint, "Online", "", "");
+  config.Set<std::string>("OnlineServers", Online::DefaultRelayServers, "Online", "", "");
   config.Set<std::string>("OnlinePlayer", "Player", "Online", "", "");
   config.Set("PortIn", unsigned(NetProtocol::DEFAULT_PORT), "Network");
   config.Set("PortOut", unsigned(1971), "Network");

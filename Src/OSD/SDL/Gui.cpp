@@ -269,7 +269,7 @@ struct PerGameState
 static bool IsPerGameKey(const std::string& key)
 {
     static const std::set<std::string> globalOnly = {
-        "ROMDirectory", "GameXMLFile", "OnlineRelay", "OnlinePlayer",
+        "ROMDirectory", "GameXMLFile", "OnlineRelay", "OnlineServers", "OnlinePlayer",
         "NetRoomHornet", "NetRoomRealPlayers", "NetRoomNoCollisions",
         "NetSrally2Eight", "NetNativeRoomOptions", "NetNativeCarNumber",
         "NetSpectate", "NetRoomSecretCars"
@@ -290,9 +290,8 @@ static std::string SanitizeOnlineIniValue(const std::string& raw, const char* fa
 
 static void LoadOnlineSettingsFromConfig(OnlineGui& online, const Util::Config::Node& config)
 {
-    const std::string endpoint = SanitizeOnlineIniValue(
-        config["OnlineRelay"].ValueAsDefault<std::string>(Online::DefaultRelayEndpoint),
-        Online::DefaultRelayEndpoint);
+    online.servers.Load(config);
+    const std::string endpoint = Online::ServerList::Selected(config);
     const std::string player = SanitizeOnlineIniValue(
         config["OnlinePlayer"].ValueAsDefault<std::string>(Online::DefaultPlayerName),
         Online::DefaultPlayerName);
@@ -302,6 +301,7 @@ static void LoadOnlineSettingsFromConfig(OnlineGui& online, const Util::Config::
 
 static void StoreOnlineSettingsToConfig(const OnlineGui& online, Util::Config::Node& config)
 {
+    online.servers.Store(config);
     if (!online.cliRelayOverride)
         config.Set("OnlineRelay", SanitizeOnlineIniValue(online.endpoint, Online::DefaultRelayEndpoint));
     config.Set("OnlinePlayer", SanitizeOnlineIniValue(online.player, Online::DefaultPlayerName));
