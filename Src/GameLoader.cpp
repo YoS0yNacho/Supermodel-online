@@ -283,15 +283,18 @@ static bool PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
   std::map<std::string, Game::Platform> platforms
   {
     { "",                 Game::PLATFORM_MODEL3 },  // default to Model 3
-    { "Sega Model 3",     Game::PLATFORM_MODEL3 },
-    { "Real3D PRO-1000",  Game::PLATFORM_PRO1000 },
-    { "Sega Model 1",     Game::PLATFORM_MODEL1 },
-    { "Sega Model 2",     Game::PLATFORM_MODEL2 }
+    { "sega model 3",     Game::PLATFORM_MODEL3 },
+    { "real3d pro-1000",  Game::PLATFORM_PRO1000 },
+    { "sega model 1",     Game::PLATFORM_MODEL1 },
+    { "sega model 2",     Game::PLATFORM_MODEL2 }
   };
   std::string platform = game_node["hardware/platform"].ValueAsDefault<std::string>("");
-  if (platforms.find(platform) == platforms.end())
+  // Existing game databases also use "Real3D Pro-1000". Match platform names
+  // case-insensitively so its valid 1100 stepping is not checked as Model 3.
+  auto platform_it = platforms.find(Util::ToLower(platform));
+  if (platform_it == platforms.end())
     ErrorLog("Unknown platform '%s' for '%s'. Defaulting to Sega Model 3.", platform.c_str(), game->name.c_str());
-  game->platform = platforms[platform];
+  game->platform = platform_it == platforms.end() ? Game::PLATFORM_MODEL3 : platform_it->second;
   // The stepping must be a stepping of the platform. The PRO-1000 default is
   // the PRO-1100 and the Model 2 default is the Model 2A.
   std::map<std::string, Game::Stepping> model3_steppings
