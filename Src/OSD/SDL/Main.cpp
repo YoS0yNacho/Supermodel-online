@@ -392,6 +392,8 @@ static void DestroyGLScreen()
   {
     SDL_GL_DeleteContext(SDL_GL_GetCurrentContext());
     SDL_DestroyWindow(s_window);
+    // A later online session must be able to create its own window.
+    s_window = nullptr;
   }
 }
 
