@@ -1,4 +1,4 @@
-name: Build and Release
+name: supermodel-online release
 
 on:
   push:
@@ -30,14 +30,6 @@ jobs:
         with:
           path: artifacts
 
-      - name: Get version
-        id: version
-        run: |
-          # There is no build in this job, so take it from the Linux package's name
-          FILE=$(basename artifacts/Supermodel-Linux/supermodel-*-linux.tar.gz)
-          VERSION=${FILE#supermodel-}
-          echo "version=${VERSION%-linux.tar.gz}" >> $GITHUB_OUTPUT
-
       - name: Debug downloaded artifacts
         run: |
           echo "=== Downloaded artifacts structure ==="
@@ -47,8 +39,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "v${{ steps.version.outputs.version }}"
-          name: "Supermodel v${{ steps.version.outputs.version }}"
+          tag_name: "supermodel-online-${{ github.sha }}"
+          name: "supermodel-online"
           files: |
             artifacts/*/*.zip
             artifacts/*/*.tar.gz
