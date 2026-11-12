@@ -146,9 +146,9 @@ public:
    *
    * Parameters:
    *    port        TCP port.
-   *    helloText   Text that this side sends in Hello on each connection.
+   *    helloText   Text sent in Hello; listen=false makes this an outbound-only client.
    */
-  CNetServer(uint16_t port, const std::string &helloText);
+  CNetServer(uint16_t port, const std::string &helloText, bool listen = true);
   ~CNetServer(void);
 
 private:
@@ -165,6 +165,7 @@ private:
   bool AddConnection(const std::shared_ptr<CTCPConnection> &connection);
   void RemoveConnection(const std::shared_ptr<CTCPConnection> &connection);
 
+  const bool m_listen;
   const uint16_t m_port;
   const std::string m_helloText;
   std::shared_ptr<Handlers> m_handlers;

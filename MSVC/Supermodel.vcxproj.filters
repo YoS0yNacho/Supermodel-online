@@ -593,6 +593,36 @@
     <ClCompile Include="..\Src\Model3\SimNetBoard.cpp">
       <Filter>Source Files\Model3</Filter>
     </ClCompile>
+    <ClCompile Include="..\Src\Network\Online\LobbyClient.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\GameNetBoard.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\GameModel3.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Lemans24\Lemans24NetBoard.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Lemans24\Lemans24Model3.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Scud\ScudNetBoard.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Scud\ScudModel3.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Srally2\Srally2NetBoard.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Daytona2\NetBoardHooks.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Daytona2\Model3Hooks.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
     <ClCompile Include="..\Src\OSD\SDL\Crosshair.cpp">
       <Filter>Source Files\OSD\SDL</Filter>
     </ClCompile>
@@ -618,6 +648,12 @@
       <Filter>Source Files\Pkgs\imgui</Filter>
     </ClCompile>
     <ClCompile Include="..\Src\OSD\SDL\Gui.cpp">
+      <Filter>Source Files\OSD\SDL</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\OSD\SDL\OnlineGui.cpp">
+      <Filter>Source Files\OSD\SDL</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\OSD\SDL\InGameChat.cpp">
       <Filter>Source Files\OSD\SDL</Filter>
     </ClCompile>
     <ClCompile Include="..\Src\Pkgs\imgui\imgui_impl_sdl2.cpp">
@@ -1063,6 +1099,138 @@
     <ClInclude Include="..\Src\Network\TCPConnection.h">
       <Filter>Header Files\Network</Filter>
     </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Collision.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Daytona2CpuPrediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Daytona2Prediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Daytona2Relay.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Daytona2StartSync.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Hornet.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\NetBoardState.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\RaceOptions.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Daytona2\TimedSegment.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Lemans24\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Lemans24\Prediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Model3State.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\NativeLinkPacing.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\NativeRaceMembership.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\NativeSessionSettings.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\NetBoardState.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\RaceStart.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\Collision.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\Prediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\RaceOptions.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\SecretCars.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\MultiStartResearch.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\PpcEntryPackingResearch.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\Prediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\ResearchBuild.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Srally2\StartAssistResearch.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\UdpPresentationPolicy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\LobbyClient.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\LobbyReturn.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\PlayerHost.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\PlayerRoom.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\RaceStandings.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\RoomDirectory.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\RoomSettings.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Online\SessionPolicy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\RelayProtocol.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\RelayUdpClient.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\RelayUdpHost.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\RelayUdpWire.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\RelayUpnp.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
     <ClInclude Include="..\Src\Graphics\IRender3D.h">
       <Filter>Header Files\Graphics</Filter>
     </ClInclude>
@@ -1154,6 +1322,12 @@
       <Filter>Header Files\Graphics\New</Filter>
     </ClInclude>
     <ClInclude Include="..\Src\OSD\SDL\Gui.h">
+      <Filter>Header Files\OSD\SDL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\OSD\SDL\InGameChat.h">
+      <Filter>Header Files\OSD\SDL</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\OSD\SDL\OnlineGui.h">
       <Filter>Header Files\OSD\SDL</Filter>
     </ClInclude>
     <ClInclude Include="..\Src\Pkgs\imgui\imconfig.h">

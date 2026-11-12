@@ -20,10 +20,11 @@
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
 
-#include <chrono>
 #include <thread>
 #include "Supermodel.h"
 #include "SimNetBoard.h"
+#include "Network/RelayProtocol.h"
+#include "Network/Games/Daytona2/TimedSegment.h"
 #include <OSD/Thread.h>
 
  // these make 16-bit read/writes much neater
@@ -31,6 +32,17 @@
 #define CommRAM16 *(uint16_t*)&CommRAM
 
 static const uint64_t netGUID = 0x5bf177da34872;
+// Never silently mix frame-locked and asynchronous cabinets.
+static const uint64_t asyncNetGUID = 0x5bf177da34873;
+
+namespace
+{
+uint64_t AsyncNowUs()
+{
+	return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+}
 
 inline bool CSimNetBoard::IsGame(const char* gameName)
 {
@@ -83,15 +95,38 @@ Result CSimNetBoard::Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr)
 		return ErrorLog("Game not recognized or supported");
 
 	m_state = State::start;
+	m_async = m_config["AsyncNet"].ValueAsDefault<bool>(false);
+	InitializeGameNet();
 
 	//netsocks
 	port_in = m_config["PortIn"].ValueAs<unsigned>();
 	port_out = m_config["PortOut"].ValueAs<unsigned>();
 	addr_out = m_config["AddressOut"].ValueAs<std::string>();
 
+	const auto centralRelay = m_config["NetRelay"].ValueAsDefault<std::string>("");
+	const auto gameRelay = m_config["NetGameRelay"].ValueAsDefault<std::string>("");
+	const auto relay = centralRelay.empty() ? std::string() : gameRelay.empty() ? centralRelay : gameRelay;
+	m_relay = !relay.empty();
+	if (m_relay && (!m_gameNet.Enabled() ||
+		!RelayProtocol::ParseEndpoint(relay,addr_out,port_out)))
+		return ErrorLog("Relay requires a supported exact-ROM async HLE game and HOST:PORT.");
+	const auto lobbyTicket = m_config["NetRelayTicket"].ValueAsDefault<std::string>("");
+	uint8_t parsedTicket[16];
+	if (!lobbyTicket.empty() && (!m_relay || !RelayProtocol::ParseTicket(lobbyTicket,parsedTicket)))
+		return ErrorLog("Invalid online lobby ticket; reconnect through the Online tab.");
+	if (m_relay) InfoLog("Relay: connecting to %s:%u; waiting for authorized lobby channels (no client listen port)",addr_out.c_str(),unsigned(port_out));
+
 	if (!m_server)
 		return ErrorLog("Net board requires the network server.");
-	m_link = std::make_unique<CNetBoardLink>(m_server, addr_out, port_out);
+	m_link = std::make_unique<CNetBoardLink>(m_server, addr_out, port_out, m_relay, m_gameNet.ProtocolGUID(asyncNetGUID), lobbyTicket);
+	// Register handlers before starting the listener.
+	if (m_gameNet.Enabled())
+	{
+		m_gameNet.m_linkInitTime = std::chrono::steady_clock::now();
+		m_server->Start();
+		// Connect in the background while ROM setup continues; no guest state is accessed here.
+		m_connectThread = std::thread(&CSimNetBoard::ConnectProc, this);
+	}
 
 	return Result::OKAY;
 }
@@ -105,18 +140,14 @@ void CSimNetBoard::RunFrame(void)
 	{
 	case State::start:
 		if (!m_connected && !m_connectThread.joinable())
-			m_connectThread = std::thread([this]
-			{
-				Thread::SetCurrentName("SimNetBoardConnect");
-				ConnectProc();
-			});
+			m_connectThread = std::thread(&CSimNetBoard::ConnectProc, this);
 		m_status0 = 0;
 		m_status1 = IsGame("dirtdvls") ? 0x4004 : 0xe000;
 		m_state = State::init;
 		break;
 
 	case State::init:
-		memset(CommRAM, 0, 0x20000);
+		memset(Buffer, 0, 0x20000); // clear from the allocation base, not the current bank
 		if (m_gameType == GameType::one)
 		{
 			if (m_status0 & 0x8000)				// has main board changed this register?
@@ -142,6 +173,11 @@ void CSimNetBoard::RunFrame(void)
 		break;
 
 	case State::testing:
+		if (m_async)
+		{
+			RunAsyncTesting();
+			break;
+		}
 		if (m_gameType == GameType::one)
 		{
 			m_status0 += 1; // type 1 games require this to be incremented every frame
@@ -465,22 +501,27 @@ void CSimNetBoard::RunFrame(void)
 		m_counter++;
 		CommRAM16[0x6] = FLIPENDIAN16(m_counter);
 		
-		// we only send what we need to; helps cut down on bandwidth
-		// each machine has to receive back its own data (TODO: copy this data manually?)
-		for (int i = 0; i < m_numMachines; i++)
+		if (m_async)
+			RunAsyncExchange();
+		else
 		{
-			m_link->Send(CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
-			auto& recv_data = m_link->Receive();
-			if (recv_data.empty())
+			// we only send what we need to; helps cut down on bandwidth
+			// each machine has to receive back its own data (TODO: copy this data manually?)
+			for (int i = 0; i < m_numMachines; i++)
 			{
-				// link broken - send an "empty" packet to alert other machines
-				m_link->Send(nullptr, 0);
-				m_state = State::error;
-				if (m_gameType == GameType::one)
-					m_status1 = 0x40;			// send "link broken" message to mainboard
-				break;
+				m_link->Send(CommRAM + 0x100 + i * m_segmentSize, m_segmentSize);
+				auto& recv_data = m_link->Receive();
+				if (recv_data.empty())
+				{
+					// link broken - send an "empty" packet to alert other machines
+					m_link->Send(nullptr, 0);
+					m_state = State::error;
+					if (m_gameType == GameType::one)
+						m_status1 = 0x40;			// send "link broken" message to mainboard
+					break;
+				}
+				memcpy(CommRAM + 0x100 + (i + 1) * m_segmentSize, recv_data.data(), recv_data.size());
 			}
-			memcpy(CommRAM + 0x100 + (i + 1) * m_segmentSize, recv_data.data(), recv_data.size());
 		}
 
 		// swap CommRAM banks
@@ -505,15 +546,502 @@ void CSimNetBoard::RunFrame(void)
 	}
 }
 
+// These routines only poll the transport and copy bounded, complete snapshots.
+// There is deliberately no extra HLE worker touching RAM or register state.
+void CSimNetBoard::AsyncError(const char* reason)
+{
+	m_onlineFailed.store(true);
+	ErrorLog("Async net board: %s", reason);
+	m_link->Send(nullptr, 0); // propagate failure around the ring once
+	m_state = State::error;
+	m_gameNet.OnFailure();
+	m_asyncInFlight = false;
+	m_asyncInFlightCount = 0;
+	m_asyncUnackedFromPeer = 0;
+	if (m_gameType == GameType::one)
+		m_status1 = 0x40;
+	else if (IsGame("dirtdvls"))
+		m_status1 = 0x8085;
+}
+
+bool CSimNetBoard::AsyncTimedOut()
+{
+	// Wall time, not emulated frames: fast-forward must not cause false timeouts.
+	if (std::chrono::steady_clock::now() - m_asyncProgress < std::chrono::seconds(30))
+		return false;
+	AsyncError("no link progress for 30 seconds; restart all linked instances");
+	return true;
+}
+
+void CSimNetBoard::RunAsyncTesting()
+{
+	if (m_gameType == GameType::one)
+		m_status0++; // firmware heartbeat must continue during network setup
+	if (!m_connected || (m_relay && !m_relayNativeReady))
+		return;
+
+	const bool typeOne = m_gameType == GameType::one;
+	const size_t countSize = typeOne ? 1 : 2;
+	if (m_asyncPhase == AsyncPhase::start)
+	{
+		const uint16_t role = RAM16[typeOne ? 0x400 : 0x200];
+		const unsigned relayRole = m_relay ? (m_gameInfo.name == "srally2" ? m_link->RelayIndex() : (m_link->RelayIndex()==0 ? 0u : 1u)) : 0u;
+		if (m_relay && role != relayRole)
+		{ char detail[160]; snprintf(detail,sizeof(detail),"native relay role mismatch: expected %u, received %u",relayRole,unsigned(role)); AsyncError(detail); return; }
+		m_asyncMaster = role == 0;
+		m_asyncRelay = !typeOne && role >= 0x8000;
+		m_asyncIndex[0] = m_asyncIndex[1] = 0;
+		m_asyncCount[0] = m_asyncCount[1] = 0;
+		m_asyncGUID = m_gameNet.AsyncProtocolGUID(asyncNetGUID);
+		m_asyncProgress = std::chrono::steady_clock::now();
+		if (m_asyncMaster)
+			m_link->Send(&m_asyncGUID, sizeof(m_asyncGUID));
+		m_asyncPhase = AsyncPhase::guid;
+	}
+
+	// At most four handshake messages per emulated frame, even on loopback.
+	for (unsigned budget = 0; budget < 4; budget++)
+	{
+		std::vector<uint8_t> data;
+		const auto result = m_link->TryReceive(data);
+		if (result == CNetBoardLink::ReceiveResult::Pending)
+		{
+			AsyncTimedOut();
+			return;
+		}
+		if (result == CNetBoardLink::ReceiveResult::Closed)
+		{
+			AsyncError("link closed during setup");
+			return;
+		}
+		m_asyncProgress = std::chrono::steady_clock::now();
+		const bool guidPhase = m_asyncPhase == AsyncPhase::guid || m_asyncPhase == AsyncPhase::verify;
+		if (data.size() != (guidPhase ? sizeof(m_asyncGUID) : countSize))
+		{
+			AsyncError("invalid setup packet size (all peers must use the same mode/build)");
+			return;
+		}
+
+		switch (m_asyncPhase)
+		{
+		case AsyncPhase::guid:
+			memcpy(&m_asyncGUID, data.data(), sizeof(m_asyncGUID));
+			if (m_asyncGUID != (m_gameNet.AsyncProtocolGUID(asyncNetGUID)))
+				m_asyncGUID = 0;
+			m_link->Send(&m_asyncGUID, sizeof(m_asyncGUID));
+			// Ordered TCP permits pipelining while the GUID is verified.
+			if (m_asyncMaster && m_gameNet.Enabled() && m_asyncGUID)
+				m_link->Send(m_asyncIndex, countSize);
+			m_asyncPhase = AsyncPhase::verify;
+			break;
+
+		case AsyncPhase::verify:
+			memcpy(&m_asyncGUID, data.data(), sizeof(m_asyncGUID));
+			if (m_asyncGUID != (m_gameNet.AsyncProtocolGUID(asyncNetGUID)))
+				m_asyncGUID = 0;
+			if (!m_asyncMaster)
+				m_link->Send(&m_asyncGUID, sizeof(m_asyncGUID));
+			if (!m_asyncGUID)
+			{
+				AsyncError("mode/build mismatch; AsyncNet, exact ROM and entry-sync protocol must match on all peers");
+				return;
+			}
+			if (m_asyncMaster && !m_gameNet.Enabled())
+				m_link->Send(m_asyncIndex, countSize);
+			m_asyncPhase = AsyncPhase::index;
+			break;
+
+		case AsyncPhase::index:
+			if (m_asyncMaster)
+			{
+				memcpy(m_asyncCount, data.data(), countSize);
+				m_link->Send(m_asyncCount, countSize);
+			}
+			else
+			{
+				memcpy(m_asyncIndex, data.data(), countSize);
+				if (m_asyncIndex[0] == 255 || (!typeOne && m_asyncIndex[1] == 255))
+				{
+					AsyncError("too many linked machines");
+					return;
+				}
+				m_asyncIndex[0]++;
+				if (!typeOne && !m_asyncRelay)
+					m_asyncIndex[1]++;
+				m_link->Send(m_asyncIndex, countSize);
+			}
+			m_asyncPhase = AsyncPhase::count;
+			break;
+
+		case AsyncPhase::count:
+			if (!m_asyncMaster)
+			{
+				memcpy(m_asyncCount, data.data(), countSize);
+				m_link->Send(m_asyncCount, countSize);
+			}
+			else if (memcmp(m_asyncCount, data.data(), countSize) != 0)
+			{
+				AsyncError("inconsistent machine count");
+				return;
+			}
+			FinishAsyncTesting();
+			return;
+
+		case AsyncPhase::start:
+			return; // handled above
+		}
+	}
+}
+
+void CSimNetBoard::FinishAsyncTesting()
+{
+	const bool typeOne = m_gameType == GameType::one;
+	const unsigned total = m_asyncCount[0]; // number of OTHER machines
+	if ((!total && (port_in != port_out || addr_out != "127.0.0.1")) ||
+		total == 255 || m_asyncIndex[0] > total ||
+		(!typeOne && (m_asyncCount[1] > total || m_asyncIndex[1] > m_asyncCount[1])))
+	{
+		AsyncError("invalid machine count; configure exactly one master in the ring");
+		return;
+	}
+
+	if (m_relay && (total+1 != m_link->RelayCount() || m_asyncIndex[0] != m_link->RelayIndex()))
+	{ AsyncError("relay roster does not match verified native ring"); return; }
+	if (m_relay && m_link)
+		SetTickRate(m_link->RelayTickRate());
+	m_numMachines = uint8_t(total + 1);
+	m_segmentSize = RAM16[typeOne ? 0x404 : 0x204];
+	// Local segment plus one segment per machine must fit in ONE CommRAM bank.
+	if (!m_segmentSize || 0x100u + (unsigned(m_numMachines) + 1) * m_segmentSize > 0x10000u)
+	{
+		AsyncError("invalid segment size or too many machines for CommRAM");
+		return;
+	}
+
+	if (typeOne)
+	{
+		m_status0 = 0;
+		m_status1 = 0x2021 + total * 0x20 + m_asyncIndex[0];
+		CommRAM16[0x0] = RAM16[0x400];
+		CommRAM16[0x2] = total;
+		CommRAM16[0x4] = m_asyncIndex[0];
+		CommRAM16[0xa] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize - 1);
+		CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x402] - m_segmentSize + 0x200);
+	}
+	else
+	{
+		uint8_t playableIndex = m_asyncIndex[1];
+		if (m_asyncRelay && !IsGame("dirtdvls"))
+			playableIndex |= 0x80;
+		m_status0 = 5;
+		m_status1 = IsGame("dirtdvls") ?
+			(m_asyncCount[1] << 4) | playableIndex | 0x7400 :
+			(m_asyncCount[1] << 8) | playableIndex;
+		CommRAM16[0x0] = RAM16[0x200];
+		CommRAM16[0x2] = (m_asyncCount[1] << 8) | total;
+		CommRAM16[0x4] = (playableIndex << 8) | m_asyncIndex[0];
+		CommRAM16[0xa] = FLIPENDIAN16(RAM16[0x206]);
+		CommRAM16[0xe] = FLIPENDIAN16(RAM16[0x206] + 0x80);
+	}
+	m_counter = 0;
+	CommRAM16[0x6] = 0;
+	CommRAM16[0x8] = FLIPENDIAN16(0x100 + m_segmentSize);
+	CommRAM16[0xc] = FLIPENDIAN16(0x100);
+
+	m_asyncWorking.assign(size_t(m_numMachines) * m_segmentSize, 0);
+	m_asyncLatest = m_asyncWorking;
+	m_asyncWorkingAgeUs.assign(m_numMachines, 0);
+	m_asyncWorkingUncertaintyUs.assign(m_numMachines, Dayto2pe::MaxTimingUncertaintyUs);
+	m_asyncWorkingReceiveUs.assign(m_numMachines, 0);
+	m_asyncLatestAgeUs = m_asyncWorkingAgeUs;
+	m_asyncLatestUncertaintyUs = m_asyncWorkingUncertaintyUs;
+	m_asyncLatestSourceUs.assign(m_numMachines, 0);
+	m_asyncLastClockPingUs = 0;
+	m_asyncInFlightCount = 0;
+	m_asyncUnackedFromPeer = 0;
+	m_tickPhase = FrameMilliHz();
+	m_asyncLastSendUs = 0;
+	m_asyncLastSentSourceUs = 0;
+	m_asyncSendFrames.clear();
+	m_asyncLastSent.clear();
+	m_asyncProgress = std::chrono::steady_clock::now();
+	if (!ConfigureGameNet()) return;
+	m_asyncInFlight = false;
+	m_state = State::ready;
+}
+
+void CSimNetBoard::SetTickRate(unsigned hz)
+{
+	const unsigned clamped = std::clamp(hz, 5u, 60u);
+	if (m_tickRateHz != clamped)
+	{
+		m_tickRateHz = clamped;
+		m_gameNet.nativePacing.Reset();
+		m_tickPhase = FrameMilliHz();
+		m_gameNet.SetTickRate(m_tickRateHz);
+		InfoLog("Async net board: update tick rate set to %u Hz", m_tickRateHz);
+	}
+}
+
+void CSimNetBoard::RunAsyncExchange()
+{
+	if (m_relay && m_link)
+	{
+		const unsigned linkHz = m_link->RelayTickRate();
+		if (linkHz != m_tickRateHz)
+			SetTickRate(linkHz);
+	}
+	// UDP keeps one latest snapshot while TCP is backlogged.
+	if (m_relay && m_link && m_link->UdpActive())
+	{
+		const uint64_t udpNow = AsyncNowUs();
+		if (udpNow >= m_udpNextSendUs)
+		{
+			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize);
+			const uint64_t interval = 1000000ULL / m_tickRateHz;
+			m_udpNextSendUs = m_udpNextSendUs && udpNow - m_udpNextSendUs < interval
+				? m_udpNextSendUs + interval : udpNow + interval;
+		}
+	}
+	TickStartSync();
+	if (m_state == State::error) return;
+	m_gameNet.OnFrame();
+	const unsigned frameMilliHz = FrameMilliHz();
+	const uint64_t nowUs = AsyncNowUs();
+	const unsigned exchangeHz = NativeExchangeTickRate(nowUs);
+	if(exchangeHz != m_exchangeRateHz) {
+		m_exchangeRateHz=exchangeHz;
+		m_tickPhase=frameMilliHz; // Prompt first exchange, no accumulated catch-up burst.
+	}
+	m_tickPhase = Online::AccumulateTick(m_tickPhase, exchangeHz, frameMilliHz);
+	const bool tickDue = (m_tickPhase >= frameMilliHz);
+	if (m_gameNet.UseTimedSegments())
+	{
+		// Refresh the direct-neighbour clock for sample-age estimates.
+		const int64_t clockRttUs = m_link->GetIncomingClock().rtt;
+		const uint64_t clockPingIntervalUs = std::max<uint64_t>(500000ULL, uint64_t(std::max<int64_t>(0, clockRttUs)));
+		if (nowUs < m_asyncLastClockPingUs || nowUs - m_asyncLastClockPingUs >= clockPingIntervalUs)
+		{
+			m_link->RefreshIncomingClock();
+			m_asyncLastClockPingUs = nowUs;
+		}
+		// Pace ring snapshots with bounded queues; forward peer hops immediately.
+		constexpr unsigned MaxInFlight = 48;
+		constexpr unsigned MaxUnackedFromPeer = 30;
+		constexpr uint64_t SendPacingUs = 14500;
+		const uint64_t minSpacingUs = exchangeHz >= 60u ? SendPacingUs : (850000ULL / exchangeHz);
+		const bool spacingReady = m_asyncLastSendUs == 0 ||
+			(nowUs >= m_asyncLastSendUs && (nowUs - m_asyncLastSendUs) >= minSpacingUs);
+		const bool idle = !m_asyncInFlight && m_asyncInFlightCount == 0;
+		const bool idleReady = idle && tickDue && (exchangeHz >= 60u || !m_relay || spacingReady);
+		const bool payloadChanged = m_asyncLastSent.size() != m_segmentSize ||
+			memcmp(CommRAM + 0x100, m_asyncLastSent.data(), m_segmentSize) != 0;
+		const bool canPipeline = m_numMachines > 1 && !m_gameNet.m_startWaiting &&
+			payloadChanged && tickDue && m_asyncInFlightCount < MaxInFlight &&
+			m_asyncUnackedFromPeer < MaxUnackedFromPeer && spacingReady;
+		if (idleReady || canPipeline)
+		{
+			m_tickPhase = Online::ConsumeTick(m_tickPhase, frameMilliHz);
+			const uint64_t sourceStampUs = (nowUs > m_asyncLastSentSourceUs) ? nowUs : (m_asyncLastSentSourceUs + 1);
+			m_asyncLastSentSourceUs = sourceStampUs;
+			auto wire = Dayto2pe::MakeTimedSegment(CommRAM + 0x100, m_segmentSize, nowUs, uint32_t(FrameDurationUs() + 0.5), sourceStampUs);
+			m_link->Send(wire.data(), wire.size());
+			m_asyncLastSent.assign(CommRAM + 0x100, CommRAM + 0x100 + m_segmentSize);
+			m_asyncLastSendUs = nowUs;
+			m_asyncSendFrames.push_back(m_gameNet.m_predictionFrame);
+			if (idle)
+			{
+				m_gameNet.OnExchangeStarted();
+				m_asyncProgress = std::chrono::steady_clock::now();
+			}
+			++m_asyncInFlightCount;
+			++m_asyncUnackedFromPeer;
+			m_asyncInFlight = true;
+		}
+
+		const unsigned maxBudget = 8u * unsigned(m_numMachines) + 16u + m_gameNet.ControlBudget();
+		for (unsigned budget = 0; budget < maxBudget; budget++)
+		{
+			std::vector<uint8_t> data;
+			const auto result = m_link->TryReceive(data);
+			if (result == CNetBoardLink::ReceiveResult::Pending)
+			{
+				if (AsyncTimedOut())
+					return;
+				break;
+			}
+			if (result == CNetBoardLink::ReceiveResult::Data && m_gameNet.IsControlPacket(data.size()))
+			{
+				ReceiveStartToken(data);
+				if (m_state == State::error) return;
+				continue; // control token is NOT a ROM segment
+			}
+
+			uint32_t incomingHops = 0;
+			if (result == CNetBoardLink::ReceiveResult::Closed ||
+				!Dayto2pe::ReadTimedSegmentHops(data, m_segmentSize, incomingHops) ||
+				incomingHops >= m_numMachines)
+			{
+				char detail[160];
+				snprintf(detail, sizeof(detail),
+					"link broken or invalid timed-segment size (received=%zu expected=%zu segment=%u result=%d hops=%u)",
+					data.size(), sizeof(Dayto2pe::TimedSegmentHeader) + m_segmentSize, unsigned(m_segmentSize),
+					int(result), unsigned(incomingHops));
+				AsyncError(detail);
+				return;
+			}
+
+			const uint64_t measurementNowUs = AsyncNowUs();
+			const auto clock = m_link->GetIncomingClock();
+			const uint64_t clockAge = clock.received <= measurementNowUs ? measurementNowUs - clock.received : UINT64_MAX;
+			if (!Dayto2pe::AdvanceTimedSegment(data, m_segmentSize, measurementNowUs, clock.offset,
+				clock.rtt, clockAge))
+			{
+				AsyncError("invalid timed-segment metadata");
+				return;
+			}
+			const uint8_t* payload = nullptr;
+			uint64_t ageUs = 0, uncertaintyUs = Dayto2pe::MaxTimingUncertaintyUs;
+			if (!Dayto2pe::ReadTimedSegment(data, m_segmentSize, payload, ageUs, uncertaintyUs))
+			{
+				AsyncError("invalid timed-segment payload");
+				return;
+			}
+
+			m_asyncProgress = std::chrono::steady_clock::now();
+			m_asyncUnackedFromPeer = 0;
+
+			// Forward peer segments without waiting for the self-echo.
+			if (incomingHops + 1 < m_numMachines)
+				m_link->Send(data.data(), data.size());
+
+			const size_t offset = size_t(incomingHops) * m_segmentSize;
+			memcpy(m_asyncLatest.data() + offset, payload, m_segmentSize);
+			m_asyncLatestAgeUs[incomingHops] = ageUs;
+			m_asyncLatestUncertaintyUs[incomingHops] = uncertaintyUs;
+			uint64_t sourceUs = 0;
+			Dayto2pe::ReadTimedSegmentSourceUs(data, m_segmentSize, sourceUs);
+			m_asyncLatestSourceUs[incomingHops] = sourceUs;
+			m_asyncWorkingReceiveUs[incomingHops] = measurementNowUs;
+
+			if (incomingHops + 1 == m_numMachines)
+			{
+				if (!m_asyncSendFrames.empty())
+				{
+					m_gameNet.m_asyncRoundStartFrame = m_asyncSendFrames.front();
+					m_asyncSendFrames.pop_front();
+				}
+				if (m_asyncInFlightCount > 0)
+					--m_asyncInFlightCount;
+				m_asyncInFlight = m_asyncInFlightCount > 0;
+				RecordGameSnapshot();
+				if (m_gameNet.m_preserveRingSelfEcho &&
+					m_link->QueueSize() <= 3u * size_t(m_numMachines))
+				{
+					// Preserve round-consistent slots for Sega Rally 2 barriers.
+					break;
+				}
+			}
+		}
+	}
+	else
+	{
+		if (!m_asyncInFlight && tickDue)
+		{
+			m_tickPhase = Online::ConsumeTick(m_tickPhase, frameMilliHz);
+			m_link->Send(CommRAM + 0x100, m_segmentSize);
+			m_gameNet.OnExchangeStarted();
+			m_asyncReceived = 0;
+			m_asyncInFlight = true;
+			m_asyncProgress = std::chrono::steady_clock::now();
+		}
+
+		// Bound work per frame. In particular, never spin waiting for a packet.
+		for (unsigned budget = 0; budget < unsigned(m_numMachines) + m_gameNet.ControlBudget(); budget++)
+		{
+			std::vector<uint8_t> data;
+			const auto result = m_link->TryReceive(data);
+			if (result == CNetBoardLink::ReceiveResult::Pending)
+			{
+				if (AsyncTimedOut())
+					return;
+				break;
+			}
+			if (result == CNetBoardLink::ReceiveResult::Data && m_gameNet.IsControlPacket(data.size()))
+			{
+				ReceiveStartToken(data);
+				if (m_state == State::error) return;
+				continue;
+			}
+			if (result == CNetBoardLink::ReceiveResult::Closed || data.size() != m_segmentSize)
+			{
+				char detail[160];
+				snprintf(detail, sizeof(detail),
+					"link broken or invalid segment size (received=%zu expected=%zu result=%d slot=%u)",
+					data.size(), size_t(m_segmentSize), int(result), unsigned(m_asyncReceived));
+				AsyncError(detail);
+				return;
+			}
+
+			m_asyncProgress = std::chrono::steady_clock::now();
+			const size_t offset = size_t(m_asyncReceived) * m_segmentSize;
+			memcpy(m_asyncWorking.data() + offset, data.data(), m_segmentSize);
+			if (++m_asyncReceived == m_numMachines)
+			{
+				m_asyncWorking.swap(m_asyncLatest);
+				RecordGameSnapshot();
+				m_asyncInFlight = false;
+				break;
+			}
+			m_link->Send(data.data(), data.size()); // raw ring segment
+		}
+	}
+
+	// Refresh both receive banks before the bank swap.
+	memcpy(CommRAM + 0x100 + m_segmentSize, m_asyncLatest.data(), m_asyncLatest.size());
+	ApplyGamePrediction();
+	// Preserve the native self-echo for games with ring barriers.
+	if (m_gameNet.ImmediateSelfEcho())
+		memcpy(CommRAM + 0x100 + size_t(m_numMachines) * m_segmentSize,
+			CommRAM + 0x100, m_segmentSize);
+}
+
 void CSimNetBoard::Reset(void)
 {
 	// if netboard was active, send an "empty" packet so the other machines don't get stuck waiting for data
-	if (m_state == State::ready)
+	if (m_state == State::ready ||
+		(m_async && m_state == State::testing && m_asyncPhase != AsyncPhase::start))
 	{
+		InfoLog("Async net board: Reset during %s/phase %u sends the empty flush packet around the ring",
+			m_state == State::ready ? "ready" : "testing", unsigned(m_asyncPhase));
 		m_link->Send(nullptr, 0);
-		m_link->Receive();
+		if (!m_async)
+			m_link->Receive();
 	}
 
+	m_udpNextSendUs = 0;
+	m_udpLogged = false;
+	m_asyncPhase = AsyncPhase::start;
+	m_asyncInFlight = false;
+	m_asyncInFlightCount = 0;
+	m_asyncUnackedFromPeer = 0;
+	m_tickPhase = FrameMilliHz();
+	m_asyncLastSendUs = 0;
+	m_asyncLastSentSourceUs = 0;
+	m_asyncSendFrames.clear();
+	m_asyncReceived = 0;
+	ResetStartSync();
+	m_asyncLastSent.clear();
+	m_asyncWorking.clear();
+	m_asyncLatest.clear();
+	m_asyncLatestSourceUs.clear();
+	m_gameNet.ResetPresentation();
+	if (m_async && Buffer)
+	{
+		m_commbank = false;
+		CommRAM = Buffer;
+		externalCommRAM = Buffer + 0x10000;
+	}
 	m_running = false;
 	m_state = State::start;
 }
@@ -531,6 +1059,10 @@ bool CSimNetBoard::IsRunning(void)
 void CSimNetBoard::GetGame(const Game& gameInfo)
 {
 	m_gameInfo = gameInfo;
+	// Emulate the busy/complete sequence expected by Sega Rally 2 link status.
+	m_commandPort = (gameInfo.name == "srally2" || gameInfo.name == "srally2p" ||
+		gameInfo.name == "srally2pa" || gameInfo.name == "srally2dx");
+	m_commandPoll = 0;
 }
 
 void CSimNetBoard::ConnectProc(void)
@@ -543,19 +1075,23 @@ void CSimNetBoard::ConnectProc(void)
 	// wait until the output connection to the next machine is open
 	while (!m_link->Connect())
 	{
-		if (m_quit)
+		if (m_quit || (m_relay && m_link->RelayIndex()==-2))
 			return;
+		std::this_thread::sleep_for(std::chrono::milliseconds(20)); // do not spin if a peer has not started yet
 	}
 
 	// wait until the previous machine has linked
 	while (!m_link->Connected())
 	{
-		if (m_quit)
+		if (m_quit || (m_relay && m_link->RelayIndex()==-2))
 			return;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		// Retry during initial setup if a proxy accepts before its destination is ready.
+		m_link->Connect();
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	}
 
 	printf("Successfully connected.\n");
+	LogGameTransportReady();
 
 	m_connected = true;
 }
@@ -600,6 +1136,11 @@ uint16_t CSimNetBoard::ReadIORegister(unsigned reg)
 	case 0x00:
 		return m_IRQ2ack;
 	case 0x88:
+		if (m_commandPort)
+		{
+			if (m_commandPoll < 2) { ++m_commandPoll; return uint16_t(m_status0 | 0x8000); }
+			return 0;
+		}
 		return m_status0;
 	case 0x8a:
 		return m_status1;
@@ -618,6 +1159,11 @@ void CSimNetBoard::WriteIORegister(unsigned reg, uint16_t data)
 		break;
 	case 0x88:
 		m_status0 = data;
+		if (m_commandPort)
+		{
+			InfoLog("srally2 link board: command %04x", data);
+			m_commandPoll = 0;
+		}
 		break;
 	case 0x8a:
 		m_status1 = data;

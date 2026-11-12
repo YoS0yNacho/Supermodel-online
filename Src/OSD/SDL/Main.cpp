@@ -97,6 +97,8 @@
 #include "Model3/Model3.h"
 #include "Pro1000/Pro1000.h"
 #include "Network/NetServer.h"
+#include "Network/RelayProtocol.h"
+#include "Network/Games/Policy.h"
 #include "Graphics/Pro1000Render2D.h"
 #include "Model1/Model1.h"
 #include "Model2/Model2.h"
@@ -109,11 +111,16 @@
 #include "Sound/MPEG/MpegAudio.h"
 
 #include <iostream>
+#include <filesystem>
+#include <cctype>
 #include "Util/BMPFile.h"
 
 #include "Crosshair.h"
 #include "OSD/ConfigFile.h"
 #include "Gui.h"
+#include "Network/Online/SessionPolicy.h"
+#include "Network/Online/LobbyReturn.h"
+#include "InGameChat.h"
 
 
 /******************************************************************************
@@ -127,6 +134,10 @@ static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::
 static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Log) << "Supermodel.log";
 
 static Util::Config::Node s_runtime_config("Global");
+static bool s_returnToLobby = false;
+static std::string s_returnRelay;
+static std::string s_sessionDirectoryRelay, s_returnNotice;
+static std::shared_ptr<Online::PlayerHost> s_playerHost;
 
 
 /******************************************************************************
@@ -790,6 +801,11 @@ static void LoadState(IEmulator *Emu, std::string file_path = std::string())
 
 static void SaveNVRAM(IEmulator *Emu)
 {
+  if (!s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty())
+  {
+    InfoLog("Relay: keeping native session roles out of disk NVRAM.");
+    return;
+  }
   CBlockFile  NVRAM;
 
   std::string file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::NVRAM) << Emu->GetGame().name << ".nv";
@@ -868,6 +884,7 @@ static void PrintGLError(GLenum error)
 ******************************************************************************/
 
 static CInputs *videoInputs = NULL;
+static InGameChat s_inGameChat;
 static uint32_t currentInputs = 0;
 
 bool BeginFrameVideo()
@@ -880,6 +897,7 @@ void EndFrameVideo()
   // Show crosshairs for light gun games
   if (videoInputs)
     s_crosshair->Update(currentInputs, videoInputs, xOffset, yOffset, xRes, yRes);
+  s_inGameChat.RenderOverlay();
 
   // Swap the buffers
   SDL_GL_SwapWindow(s_window);
@@ -1067,6 +1085,15 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
   // Emulate!
   fpsFramesElapsed = 0;
   prevFPSTicks = SDL_GetPerformanceCounter();
+  {
+    const std::string relay = s_runtime_config["NetRelay"].ValueAsDefault<std::string>("");
+    const std::string ticket = s_runtime_config["NetRelayTicket"].ValueAsDefault<std::string>("");
+    std::string player = s_runtime_config["NetRelayPlayer"].ValueAsDefault<std::string>("");
+    if (player.empty()) player = s_runtime_config["OnlinePlayer"].ValueAsDefault<std::string>("Player");
+    if (!relay.empty() && !ticket.empty() &&
+        s_inGameChat.Init(s_window, SDL_GL_GetCurrentContext(), relay, ticket, player, s_playerHost))
+      Inputs->GetInputSystem()->SetPollConsumesEvents(false);
+  }
   quit = false;
   paused = false;
   dumpTimings = false;
@@ -1082,12 +1109,44 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
     // Poll the inputs
     if (!Inputs->Poll(&game, xOffset, yOffset, xRes, yRes))
       quit = true;
+    if (s_inGameChat.IsActive())
+    {
+      bool suppressKeyboard = false;
+      const bool wasTyping = s_inGameChat.IsTyping();
+      if (!s_inGameChat.ProcessEvents(suppressKeyboard)) quit = true;
+      Inputs->GetInputSystem()->SetKeyboardSuppressed(suppressKeyboard);
+      if (s_runtime_config["FullScreen"].ValueAs<bool>() && wasTyping != s_inGameChat.IsTyping())
+        Inputs->GetInputSystem()->SetMouseVisibility(s_inGameChat.IsTyping());
+    }
+
+    if (!quit && !s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty())
+    {
+      auto* model = dynamic_cast<CModel3*>(Emu);
+      auto* board = model ? model->GetNetBoard() : nullptr;
+      if ((board && board->OnlineSessionFailed()) || s_inGameChat.ReturnToLobbyRequested())
+      {
+        s_returnToLobby = true;
+        s_returnRelay = Online::ReturnRelay(s_sessionDirectoryRelay,
+            s_runtime_config["NetRelay"].ValueAs<std::string>());
+        s_returnNotice = s_returnRelay != s_runtime_config["NetRelay"].ValueAs<std::string>()
+            ? "Self-hosted session ended. Reconnecting to the previous relay/server. Start a new room to race again."
+            : "Online session ended. Reconnecting to the previous relay/server. Start a new room to race again.";
+        InfoLog("Online session ended; returning to the launcher.");
+        break;
+      }
+    }
 
     // Render if paused, otherwise run a frame
     if (paused)
       Emu->RenderFrame();
     else
       Emu->RunFrame();
+    if (s_inGameChat.IsActive())
+    {
+      auto* model = dynamic_cast<CModel3*>(Emu);
+      s_inGameChat.UpdateStanding(model ? Online::ReadNativeStanding(*model, model->GetGame().name)
+                                        : Online::NativeStanding{});
+    }
 
     // Window resized or maximized: when its new size has stayed the same for
     // a few frames (not every step of a drag), the renderers are created
@@ -1370,7 +1429,8 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
       Emu->ClearNVRAM();
       puts("NVRAM cleared.");
     }
-    else if (Inputs->uiToggleFrLimit->Pressed())
+    else if (Inputs->uiToggleFrLimit->Pressed() &&
+             s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty())
     {
       // Toggle frame limiting
       s_runtime_config.Get("Throttle").SetValue(!s_runtime_config["Throttle"].ValueAs<bool>());
@@ -1439,6 +1499,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
 
   // Close audio
   CloseAudio();
+  Inputs->GetInputSystem()->SetKeyboardSuppressed(false);
+  Inputs->GetInputSystem()->SetPollConsumesEvents(true);
+  s_inGameChat.Shutdown();
 
   // Shut down renderers
   delete Render2D;
@@ -1449,6 +1512,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
 
   // Quit with an error
 QuitError:
+  s_inGameChat.Shutdown();
   delete Render2D;
   delete Render3D;
   delete superAA;
@@ -1558,6 +1622,11 @@ static void LogConfig(const Util::Config::Node &config)
   InfoLog("Runtime configuration:");
   for (auto &child: config)
   {
+    if (child.Key() == "NetRelayTicket")
+    {
+      InfoLog("  NetRelayTicket=<session-only>");
+      continue;
+    }
     if (child.Empty())
       InfoLog("  %s=<empty>", child.Key().c_str());
     else
@@ -1676,6 +1745,10 @@ Util::Config::Node DefaultConfig()
   // SCSI TCP bridge). PortOut and AddressOut give the next net board machine.
   config.Set("Network", false, "Network");
   config.Set("SimulateNet", true, "Network");
+  config.Set("AsyncNet", false, "Network");
+  config.Set<std::string>("NetRelay", "", "Network", "", "");
+  config.Set<std::string>("OnlineRelay", "onlinetest.viewdns.net:1970", "Online", "", "");
+  config.Set<std::string>("OnlinePlayer", "Player", "Online", "", "");
   config.Set("PortIn", unsigned(NetProtocol::DEFAULT_PORT), "Network");
   config.Set("PortOut", unsigned(1971), "Network");
   config.Set<std::string>("AddressOut", "127.0.0.1", "Network", "", "");
@@ -2007,6 +2080,8 @@ static void Help(void)
   puts("  -net                    Enable net board");
   puts("  -simulate-netboard      Simulate the net board [Default]");
   puts("  -emulate-netboard       Emulate the net board (requires -no-threads)");
+  puts("  -async-netboard         Use asynchronous net-board exchange");
+  puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
          "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
   printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
@@ -2085,6 +2160,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-port-in",               "PortIn"                  },
     { "-port-out",              "PortOut"                 },
     { "-address-out",           "AddressOut"              },
+    { "-relay",                 "NetRelay"                },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };
@@ -2134,6 +2210,8 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-net",                 { "Network",          true } },
     { "-no-net",              { "Network",          false } },
     { "-simulate-netboard",   { "SimulateNet",      true } },
+    { "-async-netboard",      { "AsyncNet",         true } },
+    { "-sync-netboard",       { "AsyncNet",         false } },
     { "-emulate-netboard",    { "SimulateNet",      false } },
     { "-no-force-feedback",   { "ForceFeedback",    false } },
     { "-force-feedback",      { "ForceFeedback",    true } },
@@ -2347,8 +2425,10 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
  *
  * Program entry point.
  */
-int main(int argc, char **argv)
+static int RunSession(int argc, char **argv)
 {
+  s_sessionDirectoryRelay.clear();
+  struct ClearPlayerHost { ~ClearPlayerHost() { s_playerHost.reset(); } } clearPlayerHost;
   // Handled before anything else so that only the version is printed and nothing
   // is written to disk. The packaging scripts rely on this output.
   for (int i = 1; i < argc; i++)
@@ -2380,19 +2460,76 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  if (loadGUI) {
-      // Load up what settings we have so far. The complete file is passed to the GUI,
-      // which edits only the global section and preserves any game-specific sections.
-      // Editing the game-specific sections themselves is not supported atm but we can
-      // look at this later.
-      Util::Config::Node fileConfig("Global");
-      Util::Config::FromINIFile(&fileConfig, s_configFilePath);
+  Util::Config::Node launcherFile("Global"), launcherGlobal("Global"), launcherGame("Global"), launcherConfig("Global");
+  Util::Config::FromINIFile(&launcherFile, s_configFilePath);
+  Util::Config::MergeINISections(&launcherGlobal, DefaultConfig(), launcherFile);
+  const std::string requestedRom = cmd_line.rom_files.empty() ? "" : cmd_line.rom_files.front();
+  std::string requestedGame = std::filesystem::path(requestedRom).stem().string();
+  std::transform(requestedGame.begin(), requestedGame.end(), requestedGame.begin(),
+      [](unsigned char c) { return char(std::tolower(c)); });
+  if (!requestedGame.empty())
+    Util::Config::MergeINISections(&launcherGame, launcherGlobal, launcherFile[requestedGame]);
+  else
+    launcherGame = launcherGlobal;
+  Util::Config::MergeINISections(&launcherConfig, launcherGame, cmd_line.config);
 
-      cmd_line.rom_files = RunGUI(s_configFilePath, fileConfig);
+  GuiOptions guiOptions;
+  guiOptions.returnNotice = s_returnNotice;
+  s_returnNotice.clear();
+  guiOptions.relay = launcherConfig["NetRelay"].ValueAsDefault<std::string>("");
+  guiOptions.asyncEnabled = launcherConfig["AsyncNet"].ValueAsDefault<bool>(false);
+  guiOptions.gameXML = launcherConfig["GameXMLFile"].ValueAs<std::string>();
+  guiOptions.romFile = requestedRom;
 
-      if (cmd_line.rom_files.empty()) {
-          return 0;
-      }
+  const bool utilityMode = cmd_line.print_help || cmd_line.print_games || cmd_line.print_gl_info ||
+      cmd_line.config_inputs || cmd_line.print_inputs;
+  if (!utilityMode && !guiOptions.relay.empty())
+  {
+    std::string host; uint16_t port;
+    if (!RelayProtocol::ParseEndpoint(guiOptions.relay, host, port))
+    {
+      ErrorLog("Invalid relay endpoint: use host:port with a port from 1 to 65535.");
+      return 1;
+    }
+    loadGUI = true;
+  }
+
+  if (loadGUI)
+  {
+    cmd_line.config.Set("NetRoomSecretCars", false);
+    cmd_line.config.Set("NetRoomHornet", false);
+    cmd_line.config.Set("NetRoomRealPlayers", false);
+    cmd_line.config.Set("NetRoomNoCollisions", false);
+    cmd_line.config.Set("NetSrally2Eight", false);
+    cmd_line.config.Set("NetNativeRoomOptions", 0u);
+    cmd_line.config.Set("NetNativeCarNumber", 0u);
+    auto gui = RunGUI(s_configFilePath, launcherFile, guiOptions);
+    if (gui.failed) return 1;
+    cmd_line.rom_files = std::move(gui.rom_files);
+
+    cmd_line.config.Set("NetRelay", std::string());
+    cmd_line.config.Set("NetGameRelay", std::string());
+    cmd_line.config.Set("NetRelayTicket", std::string());
+    cmd_line.config.Set("NetRelayPlayer", std::string());
+    if (gui.online)
+    {
+      cmd_line.config.Set("NetRoomSecretCars", gui.secretCars);
+      cmd_line.config.Set("NetRoomHornet", gui.hornet);
+      cmd_line.config.Set("NetRoomRealPlayers", gui.realPlayers);
+      cmd_line.config.Set("NetRoomNoCollisions", gui.noCollisions);
+      cmd_line.config.Set("NetSrally2Eight", gui.rallyEight);
+      cmd_line.config.Set("NetNativeRoomOptions", gui.nativeRoomOptions);
+      cmd_line.config.Set("NetNativeCarNumber", gui.nativeCarNumber);
+      cmd_line.config.Set("NetSpectate", gui.spectate);
+      cmd_line.config.Set("AsyncNet", true);
+      s_playerHost = gui.playerHost;
+      s_sessionDirectoryRelay = gui.directoryRelay;
+      cmd_line.config.Set("NetGameRelay", gui.gameRelay);
+      cmd_line.config.Set("NetRelay", gui.relay);
+      cmd_line.config.Set("NetRelayTicket", gui.ticket);
+      cmd_line.config.Set("NetRelayPlayer", gui.player);
+    }
+    if (cmd_line.rom_files.empty()) return 0;
   }
 
   // Create logger as specified by command line
@@ -2463,6 +2600,24 @@ int main(int argc, char **argv)
     else
       config4 = config3;
     Util::Config::MergeINISections(&s_runtime_config, config4, cmd_line.config);  // apply command line overrides once more
+  }
+  if (!s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty())
+  {
+    if (!s_runtime_config["AsyncNet"].ValueAsDefault<bool>(false))
+    {
+      ErrorLog("-relay requires AsyncNet=true; use -async-netboard or launch from Online.");
+      return 1;
+    }
+    std::string host; uint16_t port;
+    if (!GameNetwork::IsSupportedGame(game.name) ||
+        !RelayProtocol::ParseEndpoint(s_runtime_config["NetRelay"].ValueAs<std::string>(), host, port))
+    {
+      ErrorLog("-relay requires a supported Model 3 online game and a valid host:port endpoint.");
+      return 1;
+    }
+    s_runtime_config.Set("Network", true);
+    s_runtime_config.Set("SimulateNet", true);
+    Online::EnforceRelayTiming(s_runtime_config);
   }
   LogConfig(s_runtime_config);
 
@@ -2595,8 +2750,12 @@ int main(int argc, char **argv)
   // the PRO-1000. If it cannot listen, emulation continues.
   if (game.platform == Game::PLATFORM_PRO1000 || (game.netboard_present && s_runtime_config["Network"].ValueAs<bool>()))
   {
-    netServer = std::make_shared<CNetServer>(s_runtime_config["PortIn"].ValueAs<unsigned>(), "Supermodel " + SupermodelVersion() + " (" + game.name + ")");
-    netServer->Start();
+    netServer = std::make_shared<CNetServer>(s_runtime_config["PortIn"].ValueAs<unsigned>(),
+        "Supermodel " + SupermodelVersion() + " (" + game.name + ")",
+        s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty());
+    if (!(GameNetwork::IsSupportedGame(game.name) && s_runtime_config["SimulateNet"].ValueAs<bool>() &&
+          s_runtime_config["AsyncNet"].ValueAsDefault<bool>(false)))
+      netServer->Start();
   }
 
   // Console input is created only when something reads it: the emulated
@@ -2649,6 +2808,9 @@ Exit:
   delete Inputs;
   delete Outputs;
   delete s_crosshair;
+  s_inGameChat.Shutdown();
+  s_crosshair = nullptr;
+  videoInputs = nullptr;
   DestroyGLScreen();
   SDL_Quit();
 
@@ -2660,3 +2822,21 @@ Exit:
   return exitCode;
 }
 
+int main(int argc, char **argv)
+{
+  std::vector<std::string> args;
+  for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
+  const auto originalArgs = args;
+  for (;;)
+  {
+    std::vector<char*> raw;
+    for (auto& arg : args) raw.push_back(&arg[0]);
+    raw.push_back(nullptr);
+    s_returnToLobby = false;
+    const int result = RunSession(int(args.size()), raw.data());
+    if (!s_returnToLobby) return result;
+    args = originalArgs;
+    args.emplace_back("-relay=" + s_returnRelay);
+    args.emplace_back("-async-netboard");
+  }
+}

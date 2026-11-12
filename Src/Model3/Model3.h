@@ -45,6 +45,7 @@
 #include "CPU/PowerPC/ppc.h"
 #include "Model3/INetBoard.h"
 #include "Network/NetServer.h"
+#include "Network/Games/Model3State.h"
 #include "Util/NewConfig.h"
 #include "Graphics/SuperAA.h"
 #include "OSD/Thread.h"
@@ -314,6 +315,11 @@ private:
   CPCIBus     PCIBus;         // Model 3's PCI bus
   C53C810     SCSI;           // NCR 53C810 SCSI controller
   CRTC72421   RTC;            // Epson RTC-72421 real-time clock
+  GameNetwork::Model3State m_gameNetwork;
+  bool HoldForGameNetwork();
+  bool HoldForDaytonaNetwork();
+  bool HoldForScudNetwork();
+  bool HoldForLemans24Network();
   C93C46      EEPROM;         // 93C46 EEPROM
   CTileGen    TileGen;        // Sega 2D tile generator
   CReal3D     GPU;            // Real3D graphics hardware

@@ -213,6 +213,14 @@
  */
 
 #include "Model3.h"
+#include "Network/Games/Scud/SecretCars.h"
+#include "Network/Games/Scud/RaceOptions.h"
+#include "Network/Games/Scud/Collision.h"
+#include "Network/Games/Daytona2/Hornet.h"
+#include "Network/Games/Daytona2/RaceOptions.h"
+#include "Network/Games/Daytona2/Collision.h"
+#include "Network/Games/Srally2/ResearchBuild.h"
+#include "Network/Games/Srally2/PpcEntryPackingResearch.h"
 
 #include <chrono>
 #include <system_error>
@@ -2011,6 +2019,14 @@ void CModel3::RunFrame(void)
 {
   UINT32 start = GetTicks();
 
+  if (HoldForGameNetwork())
+  {
+    RenderFrame();
+    timings.frameTicks = GetTicks() - start;
+    ++timings.frameId;
+    return;
+  }
+
   // See if currently running multi-threaded
   if (m_multiThreaded)
   {
@@ -2104,6 +2120,53 @@ static unsigned GetCPUClockFrequencyInHz(const Game &game, Util::Config::Node &c
 
 void CModel3::RunMainBoardFrame(void)
 {
+  if (m_game.name == "daytona2" && m_config["NetRoomHornet"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = Daytona2Hornet::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == Daytona2Hornet::Result::Applied)
+      InfoLog("Daytona USA 2: enabled the room's Hornet option");
+  }
+  if (m_game.name == "scudplus" && m_config["NetRoomSecretCars"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = ScudPlusSecretCars::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == ScudPlusSecretCars::Result::Applied)
+      InfoLog("Scud Plus: enabled the room's Secret Cars option");
+  }
+  if ((m_game.name == "daytona2" || m_game.name == "dayto2pe") &&
+      m_config["NetRoomRealPlayers"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = Daytona2RaceOptions::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == Daytona2RaceOptions::Result::Applied)
+      InfoLog("Daytona USA 2: enabled real-players-only for this room");
+  }
+  if ((m_game.name == "scud" || m_game.name == "scudplus") &&
+      m_config["NetRoomRealPlayers"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = ScudRaceOptions::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == ScudRaceOptions::Result::Applied)
+      InfoLog("Scud Race: enabled real-players-only for this room");
+  }
+  if ((m_game.name == "daytona2" || m_game.name == "dayto2pe") &&
+      m_config["NetRoomNoCollisions"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = Daytona2Collision::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == Daytona2Collision::Result::Applied)
+      InfoLog("Daytona USA 2: disabled car-to-car collisions for this room");
+  }
+  if ((m_game.name == "scud" || m_game.name == "scudplus") &&
+      m_config["NetRoomNoCollisions"].ValueAsDefault<bool>(false) &&
+      !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
+  {
+    const auto result = ScudCollision::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == ScudCollision::Result::Applied)
+      InfoLog("Scud Race: disabled car-to-car collisions for this room");
+  }
+
 	UINT32 start = GetTicks();
 
 	/* 
@@ -2842,6 +2905,17 @@ Result CModel3::Init(const Game &game, const ROMSet &rom_set)
     rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 0], 128*0x100000);
   size_t crom_size = rom_set.get_rom("crom").size;
   rom_set.get_rom("crom").CopyTo(&crom[8*0x100000 - crom_size], crom_size);
+  if (Srally2Research::Selected(m_config) && game.name == "srally2")
+  {
+    const auto result = Srally2::EightPlayerPpcResearch::ApplyBigEndianCrom(
+        crom, crom_size, game.name.c_str(), true);
+    if (result != Srally2::EightPlayerPpcResearch::Result::Applied)
+    {
+      ErrorLog("Sega Rally 2 8-player ROM patch mismatch; refusing to boot.");
+      return Result::FAIL;
+    }
+    InfoLog("Sega Rally 2: applied the selected 8-player ROM patch.");
+  }
   if (crom_size < 8*0x100000)
     rom_set.get_rom("banked_crom").CopyTo(&crom[0], 8*0x100000 - crom_size);
   if (rom_set.get_rom("sound_samples").size <= 8*0x100000)

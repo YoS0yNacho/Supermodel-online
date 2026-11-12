@@ -2431,7 +2431,7 @@ CInputSystem::CKeyInputSource::CKeyInputSource(CInputSystem *system, int kbdNum,
 
 bool CInputSystem::CKeyInputSource::GetValueAsSwitch(bool &val) const
 {
-  if (!m_system->IsKeyPressed(m_kbdNum, m_keyIndex))
+  if (m_system->IsKeyboardSuppressed() || !m_system->IsKeyPressed(m_kbdNum, m_keyIndex))
     return false;
   val = true;
   return true;
@@ -2439,7 +2439,7 @@ bool CInputSystem::CKeyInputSource::GetValueAsSwitch(bool &val) const
 
 bool CInputSystem::CKeyInputSource::GetValueAsAnalog(int &val, int minVal, int offVal, int maxVal)
 {
-  if (m_system->IsKeyPressed(m_kbdNum, m_keyIndex))
+  if (!m_system->IsKeyboardSuppressed() && m_system->IsKeyPressed(m_kbdNum, m_keyIndex))
     m_val = min<int>(m_maxVal, m_val + m_incr);
   else
     m_val = max<int>(0, m_val - m_decr);

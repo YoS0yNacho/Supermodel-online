@@ -263,3 +263,16 @@ C93C46::~C93C46(void)
 {	
 	DebugLog("Destroyed 93C46 EEPROM\n");
 }
+
+std::array<UINT16,64> C93C46::GetImage() const
+{
+  std::array<UINT16,64> image;
+  memcpy(image.data(), regs, sizeof(regs));
+  return image;
+}
+
+void C93C46::SetImage(const std::array<UINT16,64>& image)
+{
+  memcpy(regs, image.data(), sizeof(regs));
+  Reset();
+}

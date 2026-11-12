@@ -119,6 +119,13 @@ public:
     return m_roundTripTime;
   }
 
+  struct ClockSample { int64_t offset = 0; int64_t rtt = -1; uint64_t received = 0; };
+  ClockSample GetClockSample(void) const
+  {
+    std::lock_guard<std::mutex> lock(m_clockMutex);
+    return m_clockSample;
+  }
+
   ~CTCPConnection(void);
 
 private:
@@ -149,6 +156,10 @@ private:
   std::atomic<bool> m_closeRequested;
   std::atomic<int64_t> m_roundTripTime;
   std::atomic<uint64_t> m_lastPingTime;  // microseconds
+  mutable std::mutex m_clockMutex;
+  ClockSample m_clockSample;
+  std::deque<ClockSample> m_clockWindow;
+  std::deque<uint64_t> m_pendingPings;
 
   // Server thread only
   std::vector<uint8_t> m_receiveBuffer;

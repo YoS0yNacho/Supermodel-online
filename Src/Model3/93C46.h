@@ -30,6 +30,7 @@
 
 #include "BlockFile.h"
 #include "Types.h"
+#include <array>
 
 /*
  * C93C46:
@@ -39,6 +40,8 @@
 class C93C46
 {
 public:
+  std::array<UINT16,64> GetImage() const;
+  void SetImage(const std::array<UINT16,64>& image);
 	/*
 	 * SaveState(SaveState):
 	 *

@@ -46,6 +46,9 @@
 #include "OSD/ConfigFile.h"
 #include "Main.h"
 #include "Gui.h"
+#include "OnlineGui.h"
+#include "Network/RelayProtocol.h"
+#include "Network/Online/RoomSettings.h"
 
 #ifdef _WIN32
     #include "../Src/OSD/Windows/DirectInputSystem.h"
@@ -265,7 +268,43 @@ struct PerGameState
 // Settings that only make sense globally (used before a game is chosen)
 static bool IsPerGameKey(const std::string& key)
 {
-    return key != "ROMDirectory" && key != "GameXMLFile";
+    static const std::set<std::string> globalOnly = {
+        "ROMDirectory", "GameXMLFile", "OnlineRelay", "OnlinePlayer",
+        "NetRoomHornet", "NetRoomRealPlayers", "NetRoomNoCollisions",
+        "NetSrally2Eight", "NetNativeRoomOptions", "NetNativeCarNumber",
+        "NetSpectate", "NetRoomSecretCars"
+    };
+    return globalOnly.find(key) == globalOnly.end();
+}
+
+static std::string SanitizeOnlineIniValue(const std::string& raw, const char* fallback)
+{
+    std::string out;
+    out.reserve(raw.size());
+    for (unsigned char c : raw)
+        if (c >= 32 && c != 127 && c != '"' && c != ';') out.push_back(char(c));
+    const auto first = out.find_first_not_of(" \t");
+    if (first == std::string::npos) return fallback ? std::string(fallback) : std::string();
+    return out.substr(first, out.find_last_not_of(" \t") - first + 1);
+}
+
+static void LoadOnlineSettingsFromConfig(OnlineGui& online, const Util::Config::Node& config)
+{
+    const std::string endpoint = SanitizeOnlineIniValue(
+        config["OnlineRelay"].ValueAsDefault<std::string>(Online::DefaultRelayEndpoint),
+        Online::DefaultRelayEndpoint);
+    const std::string player = SanitizeOnlineIniValue(
+        config["OnlinePlayer"].ValueAsDefault<std::string>(Online::DefaultPlayerName),
+        Online::DefaultPlayerName);
+    std::snprintf(online.endpoint, sizeof(online.endpoint), "%s", endpoint.c_str());
+    std::snprintf(online.player, sizeof(online.player), "%s", player.c_str());
+}
+
+static void StoreOnlineSettingsToConfig(const OnlineGui& online, Util::Config::Node& config)
+{
+    if (!online.cliRelayOverride)
+        config.Set("OnlineRelay", SanitizeOnlineIniValue(online.endpoint, Online::DefaultRelayEndpoint));
+    config.Set("OnlinePlayer", SanitizeOnlineIniValue(online.player, Online::DefaultPlayerName));
 }
 
 // The GUI's own settings: the ones with a value range, which the controls are built from
@@ -745,8 +784,11 @@ static void AddKeys(Util::Config::Node& config, KeyBindState& kb, const std::vec
     BindKeys(config, kb, openPopup);
 }
 
-static void DrawButtonOptions(Util::Config::Node& config, int& selectedGameIndex, bool& exit, bool& saveSettings, std::shared_ptr<CInputs>& inputs, bool closeRequested, bool& exitPromptOpen, PerGameState& perGame, const Game& selectedGame)
+static void DrawButtonOptions(Util::Config::Node& config, int& selectedGameIndex, bool& exit, bool& saveSettings, std::shared_ptr<CInputs>& inputs, bool closeRequested, bool& exitPromptOpen, PerGameState& perGame, const Game& selectedGame, OnlineGui& online)
 {
+    const auto onlineSnap = online.client.Get();
+    const bool onlineBusy = onlineSnap.connected || onlineSnap.connecting;
+    ImGui::BeginDisabled(onlineBusy);
     if (ImGui::Button("Load game")) {
 
         if (selectedGameIndex < 0) {
@@ -756,6 +798,7 @@ static void DrawButtonOptions(Util::Config::Node& config, int& selectedGameIndex
             exit = true;
         }
     }
+    ImGui::EndDisabled();
 
     if (ImGui::BeginPopupModal("Load game", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
 
@@ -792,6 +835,10 @@ static void DrawButtonOptions(Util::Config::Node& config, int& selectedGameIndex
             }
             else {
                 config = DefaultConfig();
+                if (!onlineBusy) {
+                    online.cliRelayOverride = false;
+                    LoadOnlineSettingsFromConfig(online, config);
+                }
             }
             inputs = nullptr; // rebuilt from the new settings when Key bindings is next shown
             ImGui::CloseCurrentPopup(); 
@@ -1143,7 +1190,7 @@ static Game GetGame(const std::map<std::string, Game>& games, int selectedGameIn
     return {};
 }
 
-static void GUI(const ImGuiIO& io, Util::Config::Node& globalConfig, const std::map<std::string, Game>& games, const std::set<std::string>& ownedZips, int& selectedGameIndex, bool& exit, bool& saveSettings, SDL_Window* window, std::shared_ptr<CInputs>& inputs, KeyBindState& kb, CalibrationState& cal, bool closeRequested, bool& exitPromptOpen, PerGameState& perGame)
+static void GUI(const ImGuiIO& io, Util::Config::Node& globalConfig, const std::map<std::string, Game>& games, const std::set<std::string>& ownedZips, int& selectedGameIndex, bool& exit, bool& saveSettings, SDL_Window* window, std::shared_ptr<CInputs>& inputs, KeyBindState& kb, CalibrationState& cal, bool closeRequested, bool& exitPromptOpen, PerGameState& perGame, OnlineGui& online)
 {
     ImVec4 clear_color = ImVec4(0.0f, 0.5f, 192/255.f, 1.00f);
 
@@ -1236,7 +1283,7 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& globalConfig, const std::
     ImGui::EndChild();
 
     // draw button options
-    DrawButtonOptions(globalConfig, selectedGameIndex, exit, saveSettings, inputs, closeRequested, exitPromptOpen, perGame, GetGame(games, selectedGameIndex));
+    DrawButtonOptions(globalConfig, selectedGameIndex, exit, saveSettings, inputs, closeRequested, exitPromptOpen, perGame, GetGame(games, selectedGameIndex), online);
 
     // the tabs edit the selected game's settings when per game settings are on, otherwise the global ones
     Util::Config::Node& config = perGame.game.empty() ? globalConfig : perGame.config;
@@ -1246,6 +1293,10 @@ static void GUI(const ImGuiIO& io, Util::Config::Node& globalConfig, const std::
 
     // draw the tabbed options
     if (ImGui::BeginTabBar("MyTabBar", ImGuiTabBarFlags_FittingPolicyResizeDown)) {
+        if (ImGui::BeginTabItem("Online")) {
+            online.Draw(globalConfig["ROMDirectory"].ValueAs<std::string>());
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("Core")) {
             UpdateTempValues(config, "Core", true);
             CreateControls(config, "Core");
@@ -1391,7 +1442,7 @@ static float GetDPIScale()
 #endif
 }
 
-std::vector<std::string> RunGUI(const std::string& configPath, const Util::Config::Node& fileConfig)
+GuiResult RunGUI(const std::string& configPath, const Util::Config::Node& fileConfig, const GuiOptions& options)
 {
     // Our own copy of the complete config file. The GUI only ever edits the global
     // section but the game-specific sections are carried along so that they survive
@@ -1403,11 +1454,18 @@ std::vector<std::string> RunGUI(const std::string& configPath, const Util::Confi
     // has to be done here: copying a node does not preserve them.
     Util::Config::Node config("Global");
     Util::Config::MergeINISections(&config, DefaultConfig(), fullConfig);
+    if (!options.romFile.empty()) {
+        std::error_code ec;
+        const auto rom = std::filesystem::absolute(options.romFile, ec);
+        if (!ec) config.Set<std::string>("ROMDirectory", rom.parent_path().string(), "Core", "", "");
+    }
+    if (!options.gameXML.empty()) config.Set("GameXMLFile", options.gameXML);
+    GuiResult failed; failed.failed = true;
 
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO) < 0) {
         std::cerr << "SDL could not initialize! Error: " << SDL_GetError() << std::endl;
-        return {};
+        return failed;
     }
 
     // Set OpenGL attributes
@@ -1423,11 +1481,11 @@ std::vector<std::string> RunGUI(const std::string& configPath, const Util::Confi
 
     // Create SDL window
     s_uiScale = GetDPIScale();
-    SDL_Window* window = SDL_CreateWindow("SuperSetup", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, int(950 * s_uiScale), int(600 * s_uiScale), window_flags);
+    SDL_Window* window = SDL_CreateWindow("SuperSetup", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, int(950 * s_uiScale), int(740 * s_uiScale), window_flags);
     if (!window) {
         std::cerr << "Window could not be created! Error: " << SDL_GetError() << std::endl;
         SDL_Quit();
-        return {};
+        return failed;
     }
 
     // Create OpenGL context
@@ -1436,7 +1494,7 @@ std::vector<std::string> RunGUI(const std::string& configPath, const Util::Confi
         std::cerr << "OpenGL context could not be created! Error: " << SDL_GetError() << std::endl;
         SDL_DestroyWindow(window);
         SDL_Quit();
-        return {};
+        return failed;
     }
 
     SDL_GL_MakeCurrent(window, glContext);
@@ -1471,8 +1529,30 @@ std::vector<std::string> RunGUI(const std::string& configPath, const Util::Confi
     auto& games = loader.GetGames();
     std::string scannedRomDirectory = config["ROMDirectory"].ValueAs<std::string>();
     std::set<std::string> ownedZips = ScanRomZips(scannedRomDirectory);
-    int selectedGame = -1;  // -1 means no selection
-    std::vector<std::string> romFiles;
+    int selectedGame = -1;
+    GuiResult result;
+    OnlineGui online;
+    LoadOnlineSettingsFromConfig(online, config);
+    online.returnNotice = options.returnNotice;
+    online.autoConnectPending = !options.relay.empty();
+    if (!options.relay.empty()) {
+        online.cliRelayOverride = true;
+        std::string host; uint16_t port;
+        if (RelayProtocol::ParseEndpoint(options.relay, host, port))
+            std::snprintf(online.endpoint, sizeof(online.endpoint), "%s:%u", host.c_str(), unsigned(port));
+        else
+            online.error = "Invalid relay endpoint; correct the address and port.";
+    }
+    const auto requestedGame = ToLowerStr(std::filesystem::path(options.romFile).stem().string());
+    for (unsigned i = 0; i < Online::GameCount; ++i) {
+        if (requestedGame != Online::Games[i]) continue;
+        online.game = int(i);
+        int row = 0;
+        for (const auto& entry : games) {
+            if (entry.second.name == requestedGame) selectedGame = row;
+            ++row;
+        }
+    }
     std::string path;
 
     // Main loop
@@ -1512,23 +1592,46 @@ std::vector<std::string> RunGUI(const std::string& configPath, const Util::Confi
             selectedGame = -1;
         }
 
-        GUI(io, config, games, ownedZips, selectedGame, exit, saveSettings, window, inputs, kb, cal, closeRequested, exitPromptOpen, perGame);
+        GUI(io, config, games, ownedZips, selectedGame, exit, saveSettings, window, inputs, kb, cal, closeRequested, exitPromptOpen, perGame, online);
+        StoreOnlineSettingsToConfig(online, config);
+        if (online.saveIdentityRequested) {
+            online.saveIdentityRequested = false;
+            StoreOnlineSettingsToConfig(online, fullConfig);
+            Util::Config::WriteINIFile(configPath, fullConfig, TimestampedConfigFileComment("Updated Online settings from GUI."));
+        }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
-
         SDL_GL_SwapWindow(window);
 
-        if (exit) {
+        if (!exit && online.PollLaunch(romDirectory)) {
+            result.secretCars = online.launch.game == 3 && (online.launch.roomOptions & 1) != 0;
+            result.hornet = NativeRoomSettings::HasHornet(online.launch.game, online.launch.roomOptions);
+            result.realPlayers = NativeRoomSettings::HasRealPlayers(online.launch.game, online.launch.roomOptions);
+            result.noCollisions = NativeRoomSettings::HasNoCollisions(online.launch.game, online.launch.roomOptions);
+            result.rallyEight = online.launch.game == 6;
+            result.nativeRoomOptions = online.launch.roomOptions;
+            result.nativeCarNumber = online.launch.carNumber;
+            result.spectate = online.spectate;
+            result.directoryRelay = online.launch.directoryEndpoint;
+            result.online = true;
+            result.gameRelay = online.launch.gameEndpoint;
+            result.playerHost = online.launch.playerHost;
+            result.relay = online.launch.endpoint;
+            result.ticket = online.launch.ticket;
+            result.player = online.player;
+            result.rom_files.emplace_back((std::filesystem::path(romDirectory) /
+                (std::string(Online::RomGame(online.launch.game)) + ".zip")).string());
             break;
         }
+        if (exit) break;
     }
 
     path = GetRomPath(selectedGame, games, config["ROMDirectory"].ValueAs<std::string>());
-    if (!path.empty()) {
-        romFiles.emplace_back(path);
-    }
+    if (!result.online && !path.empty())
+        result.rom_files.emplace_back(path);
     
     if (saveSettings) {
+        StoreOnlineSettingsToConfig(online, config);
         // Fold the edited global settings back into the complete config so that the
         // game-specific sections are preserved by the write
         Util::Config::CopyINISection(&fullConfig, config);
@@ -1552,5 +1655,5 @@ exitNoSave:
     SDL_DestroyWindow(window);
     SDL_Quit();
 
-    return romFiles;
+    return result;
 }

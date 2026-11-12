@@ -642,6 +642,7 @@ protected:
 
   // Whether Poll drains the SDL event queue (see SetPollConsumesEvents)
   bool m_pollConsumesEvents = true;
+  bool m_suppressKeyboard = false;
 
   /*
    * Constructs an input system with the given name.
@@ -996,6 +997,8 @@ public:
    * Poll drains the SDL event queue by default. A host with its own event loop (the GUI) turns this off.
    */
   void SetPollConsumesEvents(bool consume) { m_pollConsumesEvents = consume; }
+  void SetKeyboardSuppressed(bool suppress) { m_suppressKeyboard = suppress; }
+  bool IsKeyboardSuppressed() const { return m_suppressKeyboard; }
 
   void PrintDevices();
 

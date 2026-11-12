@@ -26,6 +26,8 @@
 #include "Types.h"
 #include "Game.h"
 #include "BlockFile.h"
+namespace Dayto2pe { struct CpuRouting; }
+namespace Scud { struct Routing; }
 
 class INetBoard
 {
@@ -36,6 +38,18 @@ public:
 
 	virtual void SaveState(CBlockFile* SaveState) = 0;
 	virtual void LoadState(CBlockFile* SaveState) = 0;
+
+  virtual void SetRaceParticipants(uint32_t) {}
+  virtual uint32_t NativeEntryParticipants() const { return 0; }
+  virtual bool HoldForRaceStart(bool, bool = false) { return false; }
+  virtual void SetScudRouting(const Scud::Routing&) {}
+  virtual void SetDaytona2CpuRouting(const Dayto2pe::CpuRouting&) {}
+  virtual bool OnlineSessionFailed() { return false; }
+  virtual int RelayCabinetIndex() { return -1; }
+  virtual unsigned SyncCabinetCount() const { return 0; }
+  virtual int SyncCabinetIndex() const { return -1; }
+  virtual bool Srally2PeersReady() const { return false; }
+  virtual void SetRelayNativeReady() {}
 
 	virtual void RunFrame(void) = 0;
 	virtual void Reset(void) = 0;

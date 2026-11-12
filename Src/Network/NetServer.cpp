@@ -296,7 +296,7 @@ void CNetServer::ThreadFunction(void)
 bool CNetServer::Start(void)
 {
   if (m_thread.joinable())
-    return m_listenSocket != nullptr;
+    return !m_listen || m_listenSocket != nullptr;
 
   if (SDLNet_Init() != 0)
   {
@@ -308,7 +308,7 @@ bool CNetServer::Start(void)
 
   IPaddress address;
   TCPsocket listenSocket = nullptr;
-  if (SDLNet_ResolveHost(&address, nullptr, m_port) == 0)
+  if (m_listen && SDLNet_ResolveHost(&address, nullptr, m_port) == 0)
     listenSocket = SDLNet_TCP_Open(&address);
   if (listenSocket)
   {
@@ -316,16 +316,17 @@ bool CNetServer::Start(void)
     SDLNet_TCP_AddSocket(static_cast<SDLNet_SocketSet>(m_socketSet), listenSocket);
     LogInfo("Network: Listening on TCP port %u.", m_port);
   }
-  else
+  else if (m_listen)
     ErrorLog("Network: Unable to listen on TCP port %u: %s", m_port, SDLNet_GetError());
 
   m_running = true;
   m_thread = std::thread(&CNetServer::ThreadFunction, this);
-  return listenSocket != nullptr;
+  return !m_listen || listenSocket != nullptr;
 }
 
-CNetServer::CNetServer(uint16_t port, const std::string &helloText)
-  : m_port(port),
+CNetServer::CNetServer(uint16_t port, const std::string &helloText, bool listen)
+  : m_listen(listen),
+    m_port(port),
     m_helloText(helloText),
     m_handlers(std::make_shared<Handlers>()),
     m_running(false)

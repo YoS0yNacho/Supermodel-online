@@ -29,6 +29,10 @@
 
 #include "OSD/Logger.h"
 #include <cstring>
+#include <random>
+#include "Network/RelayProtocol.h"
+#include "Network/RelayUdpClient.h"
+#include "Network/Games/Policy.h"
 
 namespace NetBoardProtocol
 {
@@ -106,10 +110,45 @@ std::vector<uint8_t> &CNetBoardLink::Receive(void)
   return m_received;
 }
 
+CNetBoardLink::ReceiveResult CNetBoardLink::TryReceive(std::vector<uint8_t> &data)
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  if (m_queue.empty())
+  {
+    if (!LinkBroken())
+      return ReceiveResult::Pending;
+    ErrorLog("Net board: link reported broken (input=%d inputOpen=%d outputOpen=%d) - treating as closed",
+      m_input ? 1 : 0, (m_input && m_input->IsOpen()) ? 1 : 0, (m_output && m_output->IsOpen()) ? 1 : 0);
+    return ReceiveResult::Closed;
+  }
+  data = std::move(m_queue.front());
+  m_queue.pop_front();
+  return data.empty() ? ReceiveResult::Closed : ReceiveResult::Data;
+}
+
+CTCPConnection::ClockSample CNetBoardLink::GetIncomingClock()
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_input ? m_input->GetClockSample() : CTCPConnection::ClockSample();
+}
+
+void CNetBoardLink::RefreshIncomingClock()
+{
+  std::shared_ptr<CTCPConnection> input;
+  { std::lock_guard<std::mutex> lock(m_mutex); input = m_input; }
+  if (input) input->Ping();
+}
+
 bool CNetBoardLink::CheckDataAvailable(void)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
   return !m_queue.empty();
+}
+
+size_t CNetBoardLink::QueueSize(void)
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  return m_queue.size();
 }
 
 
@@ -119,6 +158,7 @@ bool CNetBoardLink::CheckDataAvailable(void)
 
 bool CNetBoardLink::Connect(void)
 {
+  if (m_relay) return ConnectRelay();
   {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (m_output && m_output->IsOpen())
@@ -136,7 +176,8 @@ bool CNetBoardLink::Connect(void)
 bool CNetBoardLink::Connected(void)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
-  return m_input && m_output && m_output->IsOpen();
+  return m_input && m_input->IsOpen() && m_output && m_output->IsOpen() &&
+    (!m_relay || (!m_relayFailed && m_relayAssigned[0] && m_relayAssigned[1]));
 }
 
 bool CNetBoardLink::OnJoin(const std::shared_ptr<CTCPConnection> &connection)
@@ -168,16 +209,31 @@ bool CNetBoardLink::OnData(const std::shared_ptr<CTCPConnection> &connection, co
 void CNetBoardLink::OnDisconnect(const std::shared_ptr<CTCPConnection> &connection)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
+  if (m_relay && (connection == m_input || connection == m_output))
+  {
+    m_relayFailed = true;
+    ErrorLog("Relay: connection lost; restart all clients and create a new Online lobby.");
+  }
   if (connection == m_input)
     m_input.reset();
   m_condition.notify_all();   // also for the output connection
 }
 
-CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port)
+CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay, uint64_t relayGUID, const std::string& lobbyTicket)
   : m_server(std::move(server)),
     m_address(address),
-    m_port(port)
+    m_port(port), m_relay(relay), m_relayGUID(relayGUID), m_lobbyTicket(lobbyTicket)
 {
+  if (m_relay)
+  {
+    std::random_device random;
+    for (auto& nonce : m_relayNonce) nonce = (uint64_t(random()) << 32) | random();
+    m_udpHandler = m_server->RegisterHandler(RelayProtocol::UdpConfig::ID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
+    m_udpHostHandler = m_server->RegisterHandler(RelayProtocol::UdpHostConfigID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
+    m_relayTickRateHandler = m_server->RegisterHandler(RelayProtocol::TickRate::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayTickRate(c,p,n); });
+    m_relayReadyHandler = m_server->RegisterHandler(RelayProtocol::Ready::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayReady(c,p,n); });
+    m_relayErrorHandler = m_server->RegisterHandler(RelayProtocol::Error::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayError(c,p,n); });
+  }
   m_joinHandler = m_server->RegisterHandler(JoinMessage::ID, [this](const std::shared_ptr<CTCPConnection> &connection, const uint8_t *, size_t size)
   {
     return size == sizeof(JoinMessage) && OnJoin(connection);
@@ -194,9 +250,151 @@ CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::stri
 
 CNetBoardLink::~CNetBoardLink(void)
 {
+  m_udpHandler.Reset();
+  m_udpHostHandler.Reset();
+  m_relayTickRateHandler.Reset();
+  m_relayReadyHandler.Reset();
+  m_relayErrorHandler.Reset();
   m_joinHandler.Reset();
   m_dataHandler.Reset();
   m_disconnectHandler.Reset();
+  m_udp.reset(); // all callbacks are quiescent before destroying the UDP worker
   if (m_output)
     m_output->Close();
+  if (m_relay && m_input) m_input->Close();
+}
+
+
+// Two outbound sockets preserve the existing bidirectional peer clock paths:
+// local channel 0 <-> next cabinet channel 1, with opaque framed forwarding.
+bool CNetBoardLink::ConnectRelay()
+{
+  for (unsigned channel=0; channel<2; ++channel)
+  {
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      if (m_relayFailed) return false;
+      const auto& c = channel ? m_input : m_output;
+      if (c && c->IsOpen()) continue;
+    }
+    auto c = m_server->Connect(m_address,m_port);
+    if (!c) return false;
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      (channel ? m_input : m_output) = c;
+    }
+    RelayProtocol::Join join;
+    join.channel=channel;
+    join.guid=m_relayGUID;
+    memcpy(join.nonce,m_relayNonce,sizeof(join.nonce));
+    if (m_lobbyTicket.empty()) { if (!c->Send(join)) return false; }
+    else {
+      RelayProtocol::HybridJoin online;
+      online.channel=join.channel;online.guid=join.guid;
+      memcpy(online.nonce,join.nonce,sizeof(join.nonce));
+      if (!RelayProtocol::ParseTicket(m_lobbyTicket,online.ticket) || !c->Send(online)) return false;
+    }
+  }
+  return true;
+}
+int CNetBoardLink::RelayIndex()
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  if (m_relayFailed) return -2;
+  return m_relayAssigned[0] && m_relayAssigned[1] ? int(m_relayIndex) : -1;
+}
+unsigned CNetBoardLink::RelayCount()
+{
+  std::lock_guard<std::mutex> lock(m_mutex); return m_relayCount;
+}
+bool CNetBoardLink::OnRelayTickRate(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
+{
+  if (size != sizeof(RelayProtocol::TickRate)) return false;
+  RelayProtocol::TickRate info; memcpy(&info, p, size);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
+  if (info.version != RelayProtocol::Version ||
+      info.tickRate < RelayProtocol::MinTickRate || info.tickRate > RelayProtocol::MaxTickRate ||
+      channel > 1 || m_relayAssigned[channel] || m_relayTickRateSeen[channel] || m_relayFailed) return false;
+  const unsigned other = channel ^ 1;
+  if (m_relayTickRateSeen[other] && m_relayTickRate.load(std::memory_order_relaxed) != info.tickRate) return false;
+  m_relayTickRate.store(info.tickRate, std::memory_order_release);
+  m_relayTickRateSeen[channel] = true;
+  return true;
+}
+bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
+{
+  if (size != sizeof(RelayProtocol::Ready)) return false;
+  RelayProtocol::Ready ready; memcpy(&ready,p,size);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
+  unsigned maxPlayers = m_relayGUID==Srally2Research::Guid?8u:0u;
+  for (const char* game : {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24"})
+    if (GameNetwork::GUID(game) == m_relayGUID) maxPlayers = GameNetwork::MaxCabinets(game);
+  if (ready.version!=RelayProtocol::Version || ready.count<2 || ready.count>maxPlayers || ready.index>=ready.count ||
+      channel>1 || ready.channel!=channel || m_relayAssigned[channel] || m_relayFailed ||
+      (m_udp && (m_udp->Index()!=ready.index || m_udp->Count()!=ready.count)) ||
+      (m_relayCount && (m_relayCount!=ready.count || m_relayIndex!=ready.index))) return false;
+  m_relayIndex=ready.index; m_relayCount=ready.count; m_relayAssigned[channel]=true;
+  if (m_relayAssigned[0] && m_relayAssigned[1])
+    InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz",
+      ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed));
+  m_condition.notify_all(); return true;
+}
+bool CNetBoardLink::OnRelayError(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
+{
+  if(size!=sizeof(RelayProtocol::Error)) return false;
+  RelayProtocol::Error error;memcpy(&error,p,size);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  if(c!=m_input && c!=m_output) return false;
+  m_relayFailed=true;
+  if (error.code==6) ErrorLog("Relay: direct/manual-start connections are no longer supported; update Supermodel and open the Online GUI.");
+  else ErrorLog("Relay: rejected (code %u); restart clients and create a new Online lobby.",error.code);
+  c->Close(); // valid relay error: close deliberately, not a malformed protocol message
+  m_condition.notify_all();return true;
+}
+
+
+bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const uint8_t* p,size_t n)
+{
+ if(n<sizeof(RelayProtocol::UdpConfig)) return false;
+ RelayProtocol::UdpConfig cfg;std::memcpy(&cfg,p,sizeof(cfg));
+ const bool hosted=cfg.id==RelayProtocol::UdpHostConfigID;
+ if(!hosted && n!=sizeof(cfg)) return false;
+ std::lock_guard<std::mutex> lock(m_mutex);
+ if(c!=m_output || m_udp || m_relayFailed || m_relayAssigned[0] || cfg.version!=1 || !cfg.port || cfg.port>65535 || cfg.count<2 || cfg.count>16 || cfg.index>=cfg.count) return false;
+ bool nonzero=false;for(auto b:cfg.token) nonzero|=b!=0;if(!nonzero) return false;
+ size_t size=m_relayGUID==Srally2Research::Guid?2048u:0u;
+ if(m_relayGUID==Srally2Research::Guid && cfg.count>8)return false;
+ for(const char* game:{"daytona2","dayto2pe","scud","scudplus","srally2","lemans24"})
+  if(GameNetwork::GUID(game)==m_relayGUID) { size=GameNetwork::PacketSize(game);if(cfg.count>GameNetwork::MaxCabinets(game)) return false; }
+ if(!size) return false;
+ std::string host;uint16_t unused;
+ if(!RelayProtocol::ParseEndpoint(c->GetPeerName(),host,unused)) return false;
+ RelayUdp::HostConfig hc;
+ if(hosted) {
+  if(n<56) return false;
+  uint32_t port=0,tick=0,count=0;std::memcpy(&hc.ip,p+40,4);std::memcpy(&port,p+44,4);std::memcpy(&tick,p+48,4);std::memcpy(&count,p+52,4);
+  if(!hc.ip || port<1024 || port>65535 || tick<5 || tick>60 || count!=(cfg.index==0?cfg.count:0) || n!=56+20*count) return false;
+  hc.port=uint16_t(port);hc.tickRate=tick;
+  for(unsigned i=0;i<count;++i) { RelayUdp::HostPeer peer;std::memcpy(&peer.ip,p+56+20*i,4);std::memcpy(peer.token.data(),p+60+20*i,16);hc.peers.push_back(peer); }
+  if(count && std::memcmp(hc.peers[0].token.data(),cfg.token,16)) return false;
+ }
+ m_udp=std::make_unique<CRelayUdpClient>(host,uint16_t(cfg.port),cfg.token,cfg.index,cfg.count,size,hosted?&hc:nullptr);
+ InfoLog("Relay UDP r15 candidate: presentation fast lane configured (UDP port %u); native ring/control remain TCP",cfg.port);
+ return true;
+}
+void CNetBoardLink::SendPresentation(const void* p,size_t n)
+{
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->Submit(p,n);
+}
+bool CNetBoardLink::LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs)
+{
+ std::lock_guard<std::mutex> lock(m_mutex);
+ CRelayUdpClient::Sample s;if(!m_udp || m_relayFailed || !m_udp->Latest(origin,s)) return false;
+ raw=std::move(s.raw);sourceUs=s.sourceUs;receivedUs=s.receivedUs;return true;
+}
+bool CNetBoardLink::UdpActive()
+{
+ std::lock_guard<std::mutex> lock(m_mutex);return m_udp && !m_relayFailed && m_udp->Active();
 }

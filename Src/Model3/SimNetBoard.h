@@ -24,8 +24,11 @@
 #define INCLUDED_SIMNETBOARD_H
 
 #include <cstdint>
+#include <chrono>
 #include "NetBoardLink.h"
 #include "INetBoard.h"
+#include "Network/Online/SessionPolicy.h"
+#include "Network/Games/NetBoardState.h"
 
 enum class State
 {
@@ -54,12 +57,28 @@ public:
 
 	Result Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr);
 	void RunFrame(void);
+	bool OnlineSessionFailed() override { return m_relay && (m_onlineFailed.load() || (m_link && m_link->RelayIndex() == -2)); }
+	int RelayCabinetIndex() override { return m_link ? m_link->RelayIndex() : -1; }
+	unsigned SyncCabinetCount() const override { return m_numMachines; }
+  int SyncCabinetIndex() const override { return m_state==State::ready ? int(m_asyncIndex[0]) : -1; }
+	bool Srally2PeersReady() const override;
+	void SetRelayNativeReady() override { m_relayNativeReady = true; }
+  void SetRaceParticipants(uint32_t mask) override { m_gameNet.m_nativeParticipants=mask; }
+  uint32_t NativeEntryParticipants() const override { return m_gameNet.lemans24.entry.locked; }
+	bool HoldForRaceStart(bool atGate, bool nativeEntry = false) override;
+	void SetDaytona2CpuRouting(const Dayto2pe::CpuRouting& routing) override { m_gameNet.daytona.m_cpuRouting = routing; }
+	void SetScudRouting(const Scud::Routing& r) override { m_gameNet.scud.routing=r; }
+	void SetTickRate(unsigned hz);
+	unsigned GetTickRate() const { return m_tickRateHz; }
 	void Reset(void);
 
 	bool IsAttached(void);
 	bool IsRunning(void);
 
 	void GetGame(const Game& gameInfo);
+	// Sega Rally 2 drives the link board through a command/status port (IO
+	// register 0x88): a command is written and then polled until bit 15 clears.
+	bool IsCommandPortMode() const { return m_commandPort; }
 
 	uint8_t ReadCommRAM8(unsigned addr);
 	uint16_t ReadCommRAM16(unsigned addr);
@@ -102,12 +121,75 @@ private:
 	uint16_t m_segmentSize = 0;
 
 	bool m_attached = false;
+
+	// srally2 command/status port emulation (see Src/Network/Games/Srally2/Policy.h)
+	bool m_commandPort = false;
+	unsigned m_commandPoll = 0;
 	bool m_running = false;
 
 	uint16_t m_IRQ2ack = 0;
 	uint16_t m_status0 = 0;	// ioreg 0x88
 	uint16_t m_status1 = 0;	// ioreg 0x8a
+	unsigned m_poll = 0;
 	bool m_commbank = false;
+
+	// Async state is owned exclusively by the emulation thread. Socket I/O is
+	// already performed by CNetServer/CTCPConnection, never against guest RAM.
+	std::atomic<bool> m_onlineFailed{false};
+	bool m_relay = false, m_relayNativeReady = false;
+	unsigned FrameMilliHz() const { return Online::FrameMilliHz(m_relay); }
+	double FrameDurationUs() const { return Online::FrameDurationUs(m_relay); }
+	bool m_async = false;
+	enum class AsyncPhase { start, guid, verify, index, count };
+	AsyncPhase m_asyncPhase = AsyncPhase::start;
+	bool m_asyncMaster = false;
+	bool m_asyncRelay = false;
+	uint8_t m_asyncIndex[2] = {};
+	uint8_t m_asyncCount[2] = {};
+	uint64_t m_asyncGUID = 0;
+	unsigned m_asyncReceived = 0;
+	bool m_asyncInFlight = false;
+	unsigned m_asyncInFlightCount = 0, m_asyncUnackedFromPeer = 0;
+	unsigned m_tickRateHz = 60, m_tickPhase = 60000;
+	unsigned m_exchangeRateHz = 60; // Reliable origin pacing; negotiated/UDP rate stays separate.
+	uint64_t m_asyncLastSendUs = 0, m_asyncLastSentSourceUs = 0;
+	std::deque<uint64_t> m_asyncSendFrames;
+	std::vector<uint8_t> m_asyncLastSent;
+	std::vector<uint8_t> m_asyncWorking;
+	std::vector<uint8_t> m_asyncLatest;
+	// Per-source timestamp measurements published atomically with a complete ring.
+	std::vector<uint64_t> m_asyncWorkingAgeUs, m_asyncWorkingUncertaintyUs, m_asyncWorkingReceiveUs;
+	std::vector<uint64_t> m_asyncLatestAgeUs, m_asyncLatestUncertaintyUs, m_asyncLatestSourceUs;
+	uint64_t m_asyncLastClockPingUs = 0;
+	std::chrono::steady_clock::time_point m_asyncProgress;
+
+	GameNetwork::NetBoardState m_gameNet;
+	void InitializeGameNet();
+	bool ConfigureGameNet();
+	uint64_t m_udpNextSendUs = 0;
+	bool m_udpLogged = false;
+	const uint8_t* PresentationSource(size_t,std::vector<uint8_t>&,double&,double&,uint64_t* = nullptr);
+	void ApplyGamePrediction();
+	void ApplyDaytonaPrediction();
+	void ConfigureScudPrediction();
+	void ApplyScudPrediction();
+	void ConfigureSrally2Prediction();
+	void ApplySrally2Prediction();
+	void ConfigureLemans24Prediction();
+	void ApplyLemans24Prediction();
+	void RecordGameSnapshot();
+	void LogGameTransportReady();
+	void TickStartSync();
+	void ReceiveStartToken(const std::vector<uint8_t>& data);
+	void SendStartToken(uint32_t kind, uint64_t maxRTT = 0);
+	void ResetStartSync();
+
+	void RunAsyncTesting();
+	void FinishAsyncTesting();
+	void RunAsyncExchange();
+	unsigned NativeExchangeTickRate(uint64_t nowUs);
+	void AsyncError(const char* reason);
+	bool AsyncTimedOut();
 
 	inline bool IsGame(const char* gameName);
 	void ConnectProc(void);

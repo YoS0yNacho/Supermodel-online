@@ -41,14 +41,16 @@
  * Threads
  * -------
  * Receive() waits until data arrives or the link is broken. The net boards
- * operate in lock step, so this is necessary. The CNetServer thread receives
- * the messages and puts them in a queue for Receive().
+ * normally operate in lock step. Async HLE uses TryReceive() instead, leaving
+ * emulation free to advance while a ring exchange is pending. The CNetServer
+ * thread receives messages and puts them in the same queue for both APIs.
  */
 
 #ifndef INCLUDED_NETBOARDLINK_H
 #define INCLUDED_NETBOARDLINK_H
 
 #include "Network/NetServer.h"
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -56,6 +58,8 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+class CRelayUdpClient;
 
 class CNetBoardLink
 {
@@ -72,6 +76,14 @@ public:
 
   // True if the input and the output connections are open
   bool Connected(void);
+  // -1: waiting for operator; -2: failed; otherwise immutable relay index.
+  int RelayIndex();
+  unsigned RelayCount();
+  unsigned RelayTickRate() const { return m_relayTickRate.load(std::memory_order_acquire); }
+  bool IsRelay() const { return m_relay; }
+  void SendPresentation(const void*,size_t);
+  bool LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs);
+  bool UdpActive();
 
   /*
    * Send(data, length):
@@ -92,8 +104,17 @@ public:
    */
   std::vector<uint8_t> &Receive(void);
 
+  // Never waits for network data. Pending leaves data unchanged; Closed also
+  // covers an empty (link-broken) packet. Only one thread may consume data.
+  enum class ReceiveResult { Pending, Data, Closed };
+  ReceiveResult TryReceive(std::vector<uint8_t> &data);
+
   // True if Receive() can return data immediately
   bool CheckDataAvailable(void);
+  size_t QueueSize(void);
+
+  CTCPConnection::ClockSample GetIncomingClock();
+  void RefreshIncomingClock();
 
   /*
    * CNetBoardLink(server, address, port):
@@ -103,10 +124,17 @@ public:
    *    address   Address of the next machine.
    *    port      Port of the next machine.
    */
-  CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port);
+  CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay = false, uint64_t relayGUID = 0, const std::string& lobbyTicket = "");
   ~CNetBoardLink(void);
 
 private:
+  bool ConnectRelay();
+  bool OnUdpConfig(const std::shared_ptr<CTCPConnection>&,const uint8_t*,size_t);
+  std::unique_ptr<CRelayUdpClient> m_udp;
+  CNetServer::Registration m_udpHandler, m_udpHostHandler;
+  bool OnRelayTickRate(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
+  bool OnRelayReady(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
+  bool OnRelayError(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool LinkBroken(void) const;
   bool OnJoin(const std::shared_ptr<CTCPConnection> &connection);
   bool OnData(const std::shared_ptr<CTCPConnection> &connection, const uint8_t *message, size_t size);
@@ -115,6 +143,15 @@ private:
   std::shared_ptr<CNetServer> m_server;
   const std::string m_address;
   const uint16_t m_port;
+  const bool m_relay;
+  const uint64_t m_relayGUID;
+  const std::string m_lobbyTicket;
+  uint64_t m_relayNonce[2] = {};
+  bool m_relayAssigned[2] = {};
+  bool m_relayTickRateSeen[2] = {};
+  bool m_relayFailed = false;
+  unsigned m_relayIndex = 0, m_relayCount = 0;
+  std::atomic<unsigned> m_relayTickRate{60};
 
   std::mutex m_mutex;
   std::condition_variable m_condition;
@@ -123,6 +160,7 @@ private:
   std::deque<std::vector<uint8_t>> m_queue;
   std::vector<uint8_t> m_received;      // last block that Receive() returned
 
+  CNetServer::Registration m_relayTickRateHandler, m_relayReadyHandler, m_relayErrorHandler;
   CNetServer::Registration m_joinHandler;
   CNetServer::Registration m_dataHandler;
   CNetServer::Registration m_disconnectHandler;

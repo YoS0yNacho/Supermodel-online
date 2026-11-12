@@ -214,6 +214,18 @@ SRC_FILES = \
 	Src/Model3/NetBoard.cpp \
 	Src/Model3/NetBoardLink.cpp \
 	Src/Model3/SimNetBoard.cpp \
+	Src/OSD/SDL/OnlineGui.cpp \
+	Src/OSD/SDL/InGameChat.cpp \
+	Src/Network/Online/LobbyClient.cpp \
+	Src/Network/Games/GameNetBoard.cpp \
+	Src/Network/Games/GameModel3.cpp \
+	Src/Network/Games/Lemans24/Lemans24NetBoard.cpp \
+	Src/Network/Games/Lemans24/Lemans24Model3.cpp \
+	Src/Network/Games/Scud/ScudNetBoard.cpp \
+	Src/Network/Games/Scud/ScudModel3.cpp \
+	Src/Network/Games/Srally2/Srally2NetBoard.cpp \
+	Src/Network/Games/Daytona2/NetBoardHooks.cpp \
+	Src/Network/Games/Daytona2/Model3Hooks.cpp \
 	$(PLATFORM_SRC_FILES)
 
 ifeq (,$(findstring -DSUPERMODEL_OSX,$(PLATFORM_CXXFLAGS)))

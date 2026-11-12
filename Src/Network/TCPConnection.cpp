@@ -93,8 +93,19 @@ bool CTCPConnection::Send(std::vector<uint8_t> message)
 void CTCPConnection::Ping(void)
 {
   uint64_t now = GetMicroseconds();
+  {
+    std::lock_guard<std::mutex> lock(m_clockMutex);
+    if (!m_pendingPings.empty() && now <= m_pendingPings.back()) now = m_pendingPings.back() + 1;
+    while (m_pendingPings.size() >= 32) m_pendingPings.pop_front();
+    m_pendingPings.push_back(now);
+  }
   m_lastPingTime = now;
-  Send(PingMessage(now));
+  if (!Send(PingMessage(now)))
+  {
+    std::lock_guard<std::mutex> lock(m_clockMutex);
+    auto it = std::find(m_pendingPings.begin(), m_pendingPings.end(), now);
+    if (it != m_pendingPings.end()) m_pendingPings.erase(it);
+  }
 }
 
 // Sends Ping if the last one was sent at least the interval ago. Waits for
@@ -122,13 +133,21 @@ void CTCPConnection::SendThreadFunction(void)
       message = std::move(m_sendQueue.front());
       m_sendQueue.pop_front();
     }
-    int length = int(message.size());
-    if (SDLNet_TCP_Send(socket, message.data(), length) != length)
+    size_t sent = 0;
+    while (sent < message.size())
     {
-      // The other side disconnected. The server thread closes the socket.
-      m_open = false;
-      m_closeRequested = true;
-      return;
+      const int n = SDLNet_TCP_Send(socket, message.data() + sent, int(message.size() - sent));
+      if (n <= 0)
+      {
+        // A partial positive write is progress, not a disconnect. Preserve the
+        // byte stream; never discard/reorder a ROM segment to simulate loss.
+        ErrorLog("Network: send to %s failed after %u/%u bytes: %s",
+          m_peerName.c_str(), unsigned(sent), unsigned(message.size()), SDLNet_GetError());
+        m_open = false;
+        m_closeRequested = true;
+        return;
+      }
+      sent += size_t(n);
     }
   }
 }
@@ -147,6 +166,7 @@ bool CTCPConnection::Receive(CNetServer &server)
   int received = SDLNet_TCP_Recv(static_cast<TCPsocket>(m_socket), m_receiveBuffer.data() + used, int(RECEIVE_CHUNK_SIZE));
   if (received <= 0)
   {
+    ErrorLog("Network: recv from %s returned %d: %s", m_peerName.c_str(), received, SDLNet_GetError());
     m_receiveBuffer.resize(used);
     return false;   // the other side disconnected
   }
@@ -224,7 +244,37 @@ bool CTCPConnection::ProcessMessage(CNetServer &server, const uint8_t *message, 
       return false;
     }
     memcpy(&pong, message, sizeof(pong));
-    int64_t roundTripTime = int64_t(GetMicroseconds() - pong.pingSendTime);
+    const uint64_t now = GetMicroseconds();
+    if (pong.pingSendTime > now || now - pong.pingSendTime > 10000000 ||
+        pong.receiveTime > uint64_t(INT64_MAX)) return true;
+    const int64_t roundTripTime = int64_t(now - pong.pingSendTime);
+    {
+      std::lock_guard<std::mutex> lock(m_clockMutex);
+      const auto it = std::find(m_pendingPings.begin(), m_pendingPings.end(), pong.pingSendTime);
+      if (it == m_pendingPings.end()) return true; // stale, duplicate or unsolicited
+      m_pendingPings.erase(it);
+      const ClockSample latest{
+        int64_t(pong.receiveTime) - int64_t(pong.pingSendTime + roundTripTime / 2),
+        roundTripTime,
+        now
+      };
+      while (!m_clockWindow.empty() &&
+             (m_clockWindow.size() >= 8 ||
+              (now >= m_clockWindow.front().received && now - m_clockWindow.front().received > 8000000ULL)))
+      {
+        m_clockWindow.pop_front();
+      }
+      m_clockWindow.push_back(latest);
+      const ClockSample* best = &m_clockWindow.back();
+      for (const auto& candidate : m_clockWindow)
+      {
+        if (candidate.rtt >= 0 && (best->rtt < 0 || candidate.rtt <= best->rtt))
+          best = &candidate;
+      }
+      // Use the lowest-RTT sample's offset/RTT so asymmetric Wi-Fi jitter spikes
+      // on a single Ping do not corrupt one-way age estimates for the next second.
+      m_clockSample = {best->offset, best->rtt, now};
+    }
     m_roundTripTime = roundTripTime;
     CNetServer::LogInfo("Network: Round trip time to %s is %1.3f ms.", m_peerName.c_str(), double(roundTripTime) / 1000.0);
     return true;
