@@ -35,7 +35,10 @@ public:
    if(h.kind==Hello) {
     if(s.hello && now-s.hello<100000) continue;
     s.endpoint=rx->address;s.hello=now;h.kind=Ack;
-    std::memcpy(tx->data,&h,sizeof(h));tx->len=sizeof(h);tx->address=s.endpoint;SDLNet_UDP_Send(socket,-1,tx);continue;
+    // The Ack carries this host's clock so every cabinet can express sample times on it.
+    const uint64_t clock=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    std::memcpy(tx->data,&h,sizeof(h));std::memcpy(tx->data+sizeof(h),&clock,AckClockSize);
+    tx->len=int(sizeof(h)+AckClockSize);tx->address=s.endpoint;SDLNet_UDP_Send(socket,-1,tx);continue;
    }
    if(h.kind!=Snapshot || !s.hello || now-s.hello>3000000 || rx->address.host!=s.endpoint.host || rx->address.port!=s.endpoint.port) continue;
    s.credit=std::min(burst,s.credit+(s.creditAt?double(now-s.creditAt)/1000000.0*rate:0));s.creditAt=now;

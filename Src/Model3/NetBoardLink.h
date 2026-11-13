@@ -81,9 +81,16 @@ public:
   unsigned RelayCount();
   unsigned RelayTickRate() const { return m_relayTickRate.load(std::memory_order_acquire); }
   bool IsRelay() const { return m_relay; }
-  void SendPresentation(const void*,size_t);
+  // UDP snapshot lane (relay sessions only). sourceUs orders this cabinet's
+  // snapshots across both lanes; freshUs is the peer-silence tolerance.
+  struct UdpSnapshot { std::vector<uint8_t> raw; uint64_t sourceUs=0, receivedUs=0, ageUs=0, uncertaintyUs=0; bool timed=false; };
+  void SendPresentation(const void*,size_t,uint64_t sourceUs,uint64_t freshUs);
   bool LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs);
+  // Latest snapshot from origin, only if strictly newer than afterSourceUs.
+  bool LatestSnapshot(unsigned origin,uint64_t afterSourceUs,UdpSnapshot& out);
   bool UdpActive();
+  // Every other cabinet sends usable UDP snapshots and confirms receiving ours.
+  bool UdpPrimaryReady();
 
   /*
    * Send(data, length):

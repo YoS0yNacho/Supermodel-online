@@ -1,4 +1,5 @@
-// Hybrid relay presentation lane. Native ring/control bytes remain reliable TCP.
+// Relay UDP snapshot lane. In-race snapshots travel here (latest wins, never
+// resent); setup, race-start control and state-change keyframes remain TCP.
 // SPDX-License-Identifier: GPL-3.0-or-later
 #ifndef INCLUDED_RELAY_UDP_WIRE_H
 #define INCLUDED_RELAY_UDP_WIRE_H
@@ -9,8 +10,10 @@
 #include <vector>
 namespace RelayUdp {
 constexpr size_t DatagramSize=1200, HeaderSize=40, ChunkSize=DatagramSize-HeaderSize;
-constexpr size_t MaxRawSize=3264, MaxEncodedSize=MaxRawSize+1;
-constexpr uint8_t Version=1, Hello=1, Ack=2, Snapshot=3, HostStatus=4, Route=5;
+// Every snapshot carries a 16-byte trailer after the native segment (see Trailer).
+constexpr size_t MaxSegmentSize=3264, TrailerSize=16, MaxRawSize=MaxSegmentSize+TrailerSize, MaxEncodedSize=MaxRawSize+1;
+constexpr size_t AckClockSize=8; // Ack = header + responder clock (microseconds, little endian)
+constexpr uint8_t Version=2, Hello=1, Ack=2, Snapshot=3, HostStatus=4, Route=5;
 #pragma pack(push,1)
 struct Header {
  uint32_t magic=0x31504755; // UGP1, little endian
@@ -20,14 +23,25 @@ struct Header {
  uint16_t origin=0,total=0;
  uint64_t sourceUs=0;
 };
+// heard: bit i set = the sender currently receives usable snapshots from cabinet i.
+// clock: 0 = none, 1 = central relay clock, 2 = creator-host clock; clockUs is the
+// sample time on that clock and rttUs the sender's round trip to that responder.
+struct Trailer {
+ uint16_t heard=0;
+ uint8_t clock=0,reserved=0;
+ uint32_t rttUs=0;
+ uint64_t clockUs=0;
+};
 #pragma pack(pop)
 static_assert(sizeof(Header)==HeaderSize,"UDP header wire size");
+static_assert(sizeof(Trailer)==TrailerSize,"UDP trailer wire size");
 inline bool Newer(uint32_t a,uint32_t b) { return a!=b && uint32_t(a-b)<0x80000000u; }
 inline bool Parse(const void* bytes,size_t n,Header& h) {
  if(n<HeaderSize || n>DatagramSize) return false;
  std::memcpy(&h,bytes,sizeof(h));
  if(h.magic!=Header{}.magic || h.version!=Version) return false;
- if(h.kind==Hello || h.kind==Ack || h.kind==HostStatus || h.kind==Route) return n==HeaderSize && !h.part && !h.parts && !h.total;
+ if(h.kind==Ack) return n==HeaderSize+AckClockSize && !h.part && !h.parts && !h.total;
+ if(h.kind==Hello || h.kind==HostStatus || h.kind==Route) return n==HeaderSize && !h.part && !h.parts && !h.total;
  if(h.kind!=Snapshot || h.total<2 || h.total>MaxEncodedSize || !h.sourceUs || h.sourceUs>uint64_t(INT64_MAX)) return false;
  const size_t parts=(h.total+ChunkSize-1)/ChunkSize;
  return h.parts==parts && h.part<parts && n==HeaderSize+std::min(ChunkSize,size_t(h.total)-h.part*ChunkSize);

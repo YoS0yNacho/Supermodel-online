@@ -756,6 +756,10 @@ void CSimNetBoard::FinishAsyncTesting()
 	m_asyncLatestAgeUs = m_asyncWorkingAgeUs;
 	m_asyncLatestUncertaintyUs = m_asyncWorkingUncertaintyUs;
 	m_asyncLatestSourceUs.assign(m_numMachines, 0);
+	m_asyncKeyframe.assign(size_t(m_numMachines) * m_segmentSize, 0);
+	m_asyncKeyframeValid.assign(m_numMachines, 0);
+	m_udpReadySinceUs = 0;
+	m_udpPrimary = false;
 	m_asyncLastClockPingUs = 0;
 	m_asyncInFlightCount = 0;
 	m_asyncUnackedFromPeer = 0;
@@ -783,6 +787,13 @@ void CSimNetBoard::SetTickRate(unsigned hz)
 	}
 }
 
+// One monotonic stamp sequence orders this cabinet's snapshots on both lanes.
+uint64_t CSimNetBoard::NextSourceStampUs(uint64_t nowUs)
+{
+	m_asyncLastSentSourceUs = nowUs > m_asyncLastSentSourceUs ? nowUs : m_asyncLastSentSourceUs + 1;
+	return m_asyncLastSentSourceUs;
+}
+
 void CSimNetBoard::RunAsyncExchange()
 {
 	if (m_relay && m_link)
@@ -791,14 +802,17 @@ void CSimNetBoard::RunAsyncExchange()
 		if (linkHz != m_tickRateHz)
 			SetTickRate(linkHz);
 	}
-	// UDP keeps one latest snapshot while TCP is backlogged.
+	// One latest-wins UDP snapshot per tick. During a race this is the only
+	// copy sent; a lost one is superseded by the next and never resent.
 	if (m_relay && m_link && m_link->UdpActive())
 	{
 		const uint64_t udpNow = AsyncNowUs();
 		if (udpNow >= m_udpNextSendUs)
 		{
-			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize);
 			const uint64_t interval = 1000000ULL / m_tickRateHz;
+			// A peer counts as heard for 3.5 ticks (at least 150 ms) after its last snapshot.
+			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize, NextSourceStampUs(udpNow),
+				std::max<uint64_t>(150000ULL, interval * 7 / 2));
 			m_udpNextSendUs = m_udpNextSendUs && udpNow - m_udpNextSendUs < interval
 				? m_udpNextSendUs + interval : udpNow + interval;
 		}
@@ -818,9 +832,12 @@ void CSimNetBoard::RunAsyncExchange()
 	if (m_gameNet.UseTimedSegments())
 	{
 		// Refresh the direct-neighbour clock for sample-age estimates.
+		// While UDP carries the race the ring is silent: no originated segments
+		// and no hop-clock pings (TickStartSync keeps its 1 Hz keepalive ping).
+		const bool udpSilent = UdpPrimarySilent(nowUs);
 		const int64_t clockRttUs = m_link->GetIncomingClock().rtt;
 		const uint64_t clockPingIntervalUs = std::max<uint64_t>(500000ULL, uint64_t(std::max<int64_t>(0, clockRttUs)));
-		if (nowUs < m_asyncLastClockPingUs || nowUs - m_asyncLastClockPingUs >= clockPingIntervalUs)
+		if (!udpSilent && (nowUs < m_asyncLastClockPingUs || nowUs - m_asyncLastClockPingUs >= clockPingIntervalUs))
 		{
 			m_link->RefreshIncomingClock();
 			m_asyncLastClockPingUs = nowUs;
@@ -839,11 +856,11 @@ void CSimNetBoard::RunAsyncExchange()
 		const bool canPipeline = m_numMachines > 1 && !m_gameNet.m_startWaiting &&
 			payloadChanged && tickDue && m_asyncInFlightCount < MaxInFlight &&
 			m_asyncUnackedFromPeer < MaxUnackedFromPeer && spacingReady;
-		if (idleReady || canPipeline)
+		if (!udpSilent && (idleReady || canPipeline))
 		{
 			m_tickPhase = Online::ConsumeTick(m_tickPhase, frameMilliHz);
-			const uint64_t sourceStampUs = (nowUs > m_asyncLastSentSourceUs) ? nowUs : (m_asyncLastSentSourceUs + 1);
-			m_asyncLastSentSourceUs = sourceStampUs;
+			const uint64_t sourceStampUs = NextSourceStampUs(nowUs);
+			++m_statTcpOriginated;
 			auto wire = Dayto2pe::MakeTimedSegment(CommRAM + 0x100, m_segmentSize, nowUs, uint32_t(FrameDurationUs() + 0.5), sourceStampUs);
 			m_link->Send(wire.data(), wire.size());
 			m_asyncLastSent.assign(CommRAM + 0x100, CommRAM + 0x100 + m_segmentSize);
@@ -916,12 +933,24 @@ void CSimNetBoard::RunAsyncExchange()
 				m_link->Send(data.data(), data.size());
 
 			const size_t offset = size_t(incomingHops) * m_segmentSize;
-			memcpy(m_asyncLatest.data() + offset, payload, m_segmentSize);
-			m_asyncLatestAgeUs[incomingHops] = ageUs;
-			m_asyncLatestUncertaintyUs[incomingHops] = uncertaintyUs;
 			uint64_t sourceUs = 0;
 			Dayto2pe::ReadTimedSegmentSourceUs(data, m_segmentSize, sourceUs);
-			m_asyncLatestSourceUs[incomingHops] = sourceUs;
+			// Every TCP segment is the reliable race-context reference for its slot.
+			if (m_asyncKeyframe.size() >= offset + m_segmentSize)
+			{
+				memcpy(m_asyncKeyframe.data() + offset, payload, m_segmentSize);
+				m_asyncKeyframeValid[incomingHops] = 1;
+			}
+			// A newer UDP snapshot may already fill this slot; never step back in time.
+			if (sourceUs >= m_asyncLatestSourceUs[incomingHops] || incomingHops + 1 == m_numMachines)
+			{
+				memcpy(m_asyncLatest.data() + offset, payload, m_segmentSize);
+				m_asyncLatestAgeUs[incomingHops] = ageUs;
+				m_asyncLatestUncertaintyUs[incomingHops] = uncertaintyUs;
+				m_asyncLatestSourceUs[incomingHops] = sourceUs;
+			}
+			else
+				++m_statTcpStaleSkipped;
 			m_asyncWorkingReceiveUs[incomingHops] = measurementNowUs;
 
 			if (incomingHops + 1 == m_numMachines)
@@ -943,6 +972,8 @@ void CSimNetBoard::RunAsyncExchange()
 				}
 			}
 		}
+		if (m_state == State::error) return;
+		ApplyUdpSnapshots(AsyncNowUs());
 	}
 	else
 	{
@@ -1021,6 +1052,10 @@ void CSimNetBoard::Reset(void)
 
 	m_udpNextSendUs = 0;
 	m_udpLogged = false;
+	m_udpReadySinceUs = 0;
+	m_udpPrimary = false;
+	m_asyncKeyframe.clear();
+	m_asyncKeyframeValid.clear();
 	m_asyncPhase = AsyncPhase::start;
 	m_asyncInFlight = false;
 	m_asyncInFlightCount = 0;

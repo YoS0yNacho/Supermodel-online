@@ -168,6 +168,18 @@ private:
 	bool ConfigureGameNet();
 	uint64_t m_udpNextSendUs = 0;
 	bool m_udpLogged = false;
+	// UDP-primary racing: when every cabinet confirms the UDP lane, in-race
+	// snapshots travel only by UDP and the TCP ring carries just state-change
+	// keyframes and race-start control. Emulation thread only.
+	std::vector<uint8_t> m_asyncKeyframe;      // last TCP segment per slot (race-context reference)
+	std::vector<uint8_t> m_asyncKeyframeValid; // one flag per slot
+	uint64_t m_udpReadySinceUs = 0;
+	bool m_udpPrimary = false;                 // TCP ring currently silent
+	uint64_t m_statTcpOriginated = 0, m_statUdpApplied = 0, m_statTcpStaleSkipped = 0;
+	bool UdpSnapshotCapable() const;
+	bool UdpPrimarySilent(uint64_t nowUs);
+	void ApplyUdpSnapshots(uint64_t nowUs);
+	uint64_t NextSourceStampUs(uint64_t nowUs);
 	const uint8_t* PresentationSource(size_t,std::vector<uint8_t>&,double&,double&,uint64_t* = nullptr);
 	void ApplyGamePrediction();
 	void ApplyDaytonaPrediction();

@@ -365,3 +365,65 @@ const uint8_t* CSimNetBoard::PresentationSource(size_t slot,std::vector<uint8_t>
  if(!m_udpLogged) { m_udpLogged=true;InfoLog("Relay UDP r15 candidate: fresh UDP predictor inputs active; reliable control and raw ring unchanged"); }
  return storage.data();
 }
+
+// UDP-primary racing ---------------------------------------------------------
+// Sega Rally 2 depends on the ring-consistent returning self echo, so it keeps
+// the TCP ring at full rate and uses UDP only as predictor input (as before).
+bool CSimNetBoard::UdpSnapshotCapable() const
+{
+ return m_relay && m_link && m_gameNet.m_syncStart && m_gameNet.UseTimedSegments() &&
+   !m_gameNet.m_preserveRingSelfEcho && m_numMachines>=2;
+}
+
+// True when this cabinet may stop originating TCP ring segments this frame.
+// Requires (1) every peer confirming the UDP lane both ways for one second,
+// (2) no race-start barrier in progress, and (3) the local packet still being
+// in the race context of the last segment sent by TCP. A context change fails
+// (3), so that packet goes out reliably as a keyframe before silence resumes.
+bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
+{
+ bool silent=false;
+ const char* reason="UDP not confirmed by every cabinet";
+ if(UdpSnapshotCapable() && m_link->UdpPrimaryReady()) {
+  if(!m_udpReadySinceUs) m_udpReadySinceUs=nowUs;
+  const unsigned self=m_asyncIndex[0], other=(self+1)%m_numMachines;
+  if(nowUs-m_udpReadySinceUs<1000000) reason="UDP confirmation settling";
+  else if(m_gameNet.m_startWaiting || m_gameNet.m_startPrepared || m_gameNet.m_startTokenPending) reason="race-start barrier";
+  else if(m_asyncLastSent.size()!=m_segmentSize ||
+    !GameNetwork::PresentationCompatible(m_gameInfo.name,m_asyncLastSent.data(),CommRAM+0x100,m_segmentSize,self,other,m_numMachines))
+   reason="race state changed or not racing";
+  else silent=true;
+ } else m_udpReadySinceUs=0;
+ if(silent!=m_udpPrimary) {
+  m_udpPrimary=silent;
+  if(silent) InfoLog("Relay UDP: race snapshots now UDP only; TCP ring silent (keyframes on state change)");
+  else InfoLog("Relay UDP: TCP ring resumed (%s)",reason);
+ }
+ return silent;
+}
+
+// Fill each remote slot from the newest UDP snapshot. A snapshot is accepted
+// only if it is newer than the slot, carries a measured age, and matches the
+// race context of that cabinet's last reliable TCP segment.
+void CSimNetBoard::ApplyUdpSnapshots(uint64_t nowUs)
+{
+ if(!UdpSnapshotCapable() || m_asyncKeyframeValid.size()!=m_numMachines ||
+    m_asyncLatest.size()!=size_t(m_numMachines)*m_segmentSize) return;
+ for(unsigned slot=0;slot+1<m_numMachines;++slot) {
+  if(!m_asyncKeyframeValid[slot]) continue;
+  const unsigned remote=(unsigned(m_asyncIndex[0])+m_numMachines-1-slot)%m_numMachines;
+  CNetBoardLink::UdpSnapshot snap;
+  if(!m_link->LatestSnapshot(remote,m_asyncLatestSourceUs[slot],snap) || !snap.timed ||
+     snap.raw.size()!=m_segmentSize || nowUs<snap.receivedUs) continue;
+  const size_t offset=size_t(slot)*m_segmentSize;
+  if(!GameNetwork::PresentationCompatible(m_gameInfo.name,m_asyncKeyframe.data()+offset,snap.raw.data(),
+     m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) continue;
+  memcpy(m_asyncLatest.data()+offset,snap.raw.data(),m_segmentSize);
+  m_asyncLatestSourceUs[slot]=snap.sourceUs;
+  m_asyncLatestAgeUs[slot]=snap.ageUs+(nowUs-snap.receivedUs);
+  m_asyncLatestUncertaintyUs[slot]=snap.uncertaintyUs;
+  m_asyncWorkingReceiveUs[slot]=nowUs;
+  m_asyncProgress=std::chrono::steady_clock::now(); // the link is alive without TCP traffic
+  ++m_statUdpApplied;
+ }
+}

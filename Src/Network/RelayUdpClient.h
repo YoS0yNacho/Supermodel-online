@@ -14,7 +14,10 @@
 #include <utility>
 class CRelayUdpClient {
 public:
- struct Sample { std::vector<uint8_t> raw;uint64_t sourceUs=0,receivedUs=0; };
+ // sourceUs is the origin's own monotonic stamp (ordering only). When timed, ageUs
+ // is the measured transit age at receivedUs and uncertaintyUs bounds its error.
+ struct Sample { std::vector<uint8_t> raw;uint64_t sourceUs=0,receivedUs=0,ageUs=0,uncertaintyUs=0;uint16_t heard=0;bool timed=false; };
+ static constexpr uint64_t MaxAgeUs=2000000;
  static uint64_t Now() { return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
  CRelayUdpClient(const std::string& host,uint16_t port,const uint8_t* token,unsigned index,unsigned count,size_t size,const RelayUdp::HostConfig* hosted=nullptr)
   :m_index(index),m_count(count),m_size(size),m_samples(count),m_assemblies(count) {
@@ -31,19 +34,42 @@ public:
  unsigned Index() const { return m_index; }
  unsigned Count() const { return m_count; }
  bool Active() const { const auto last=m_lastAck.load();const auto now=Now();return last && now>=last && now-last<2000000; }
- void Submit(const void* bytes,size_t size) {
-  if(size!=m_size || !Active()) return;
-  auto encoded=RelayUdp::Encode(bytes,size);
-  if(encoded.empty()) return;
+ // freshUs: how long a peer may stay quiet before it stops counting as heard.
+ void Submit(const void* bytes,size_t size,uint64_t sourceUs,uint64_t freshUs) {
+  if(size!=m_size || !sourceUs || !Active()) return;
+  const auto* p=static_cast<const uint8_t*>(bytes);
   std::lock_guard<std::mutex> l(m_mutex);
-  m_pending=std::move(encoded);m_pendingSourceUs=Now();
+  m_pending.assign(p,p+size);m_pendingSourceUs=sourceUs;m_freshUs=freshUs;
  }
- bool Latest(unsigned origin,Sample& sample) {
+ // Returns only a sample strictly newer than afterSourceUs (no copy otherwise).
+ bool Latest(unsigned origin,Sample& sample,uint64_t afterSourceUs=0) {
   std::lock_guard<std::mutex> l(m_mutex);
-  if(origin>=m_count || origin==m_index || m_samples[origin].raw.empty()) return false;
+  if(origin>=m_count || origin==m_index || m_samples[origin].raw.empty() || m_samples[origin].sourceUs<=afterSourceUs) return false;
   sample=m_samples[origin];return true;
  }
+ // True while every other cabinet is sending usable timed snapshots AND reports
+ // that it is receiving ours. Only then may the reliable ring stay silent.
+ bool PrimaryReady() {
+  if(!Active()) return false;
+  const auto now=Now();
+  std::lock_guard<std::mutex> l(m_mutex);
+  for(unsigned i=0;i<m_count;++i) {
+   if(i==m_index) continue;
+   const auto& s=m_samples[i];
+   if(!Fresh(s,now) || !(s.heard&(1u<<m_index))) return false;
+  }
+  return true;
+ }
 private:
+ struct ClockSample { uint64_t rttUs=0,at=0;int64_t offset=0; };
+ struct Clock { std::array<ClockSample,8> samples{};unsigned next=0; };
+ bool Fresh(const Sample& s,uint64_t now) const { return s.timed && !s.raw.empty() && now>=s.receivedUs && now-s.receivedUs<=m_freshUs; }
+ // Lowest-RTT estimate of (responder clock - local clock) from the last few Acks.
+ static bool Estimate(const Clock& c,uint64_t now,int64_t& offset,uint64_t& rttUs) {
+  bool found=false;
+  for(const auto& s:c.samples) if(s.at && now>=s.at && now-s.at<=10000000 && (!found || s.rttUs<rttUs)) { offset=s.offset;rttUs=s.rttUs;found=true; }
+  return found;
+ }
  void Run() {
   UDPpacket* tx=SDLNet_AllocPacket(int(RelayUdp::DatagramSize));
   UDPpacket* rx=SDLNet_AllocPacket(int(RelayUdp::DatagramSize+1));
@@ -88,17 +114,35 @@ private:
     if(h.kind==RelayUdp::Ack) {
      const auto expected=helloWindow[h.sequence%helloWindow.size()];
      const auto ackNow=Now();
-     if(h.origin==m_index && h.sequence==expected.first && h.sourceUs==expected.second && ackNow>=h.sourceUs && ackNow-h.sourceUs<=2000000) { m_lastAck=ackNow;if(direct) hostAck=ackNow; }
+     if(h.origin==m_index && h.sequence==expected.first && h.sourceUs==expected.second && ackNow>=h.sourceUs && ackNow-h.sourceUs<=2000000) {
+      m_lastAck=ackNow;if(direct) hostAck=ackNow;
+      uint64_t remote=0;std::memcpy(&remote,rx->data+sizeof(h),RelayUdp::AckClockSize);
+      if(remote && remote<=uint64_t(INT64_MAX)) {
+       const uint64_t rtt=ackNow-h.sourceUs;
+       std::lock_guard<std::mutex> l(m_mutex);
+       auto& c=m_clocks[direct?1:0];
+       c.samples[c.next++%c.samples.size()]={rtt,ackNow,int64_t(remote)-int64_t(h.sourceUs+rtt/2)};
+      }
+     }
      continue;
     }
     if(h.kind!=RelayUdp::Snapshot || h.origin>=m_count || h.origin==m_index) continue;
     std::vector<uint8_t> encoded,raw;
     const auto received=Now();
-    if(!m_assemblies[h.origin].Add(h,rx->data+sizeof(h),received,encoded) || !RelayUdp::Decode(encoded,m_size,raw)) continue;
+    if(!m_assemblies[h.origin].Add(h,rx->data+sizeof(h),received,encoded) || !RelayUdp::Decode(encoded,m_size+RelayUdp::TrailerSize,raw)) continue;
+    RelayUdp::Trailer t;std::memcpy(&t,raw.data()+m_size,sizeof(t));raw.resize(m_size);
     std::lock_guard<std::mutex> l(m_mutex);
     auto& s=m_samples[h.origin];
     if(h.sourceUs<=s.sourceUs) continue;
-    s.raw=std::move(raw);s.sourceUs=h.sourceUs;s.receivedUs=received;
+    s.raw=std::move(raw);s.sourceUs=h.sourceUs;s.receivedUs=received;s.heard=t.heard;s.timed=false;s.ageUs=s.uncertaintyUs=0;
+    // Age = (receive time on the shared clock) - (sample time on the shared clock).
+    int64_t offset=0;uint64_t rtt=0;
+    if((t.clock==1 || t.clock==2) && t.clockUs && t.clockUs<=uint64_t(INT64_MAX) && Estimate(m_clocks[t.clock-1],received,offset,rtt)) {
+     const int64_t age=int64_t(received)+offset-int64_t(t.clockUs);
+     s.uncertaintyUs=rtt/2+uint64_t(t.rttUs)/2;
+     // Tolerate a negative age within the measurement error; reject implausible clocks.
+     if(age>=-int64_t(s.uncertaintyUs)-2000 && age<=int64_t(MaxAgeUs)) { s.ageUs=uint64_t(std::max<int64_t>(0,age));s.timed=true; }
+    }
    }
    std::vector<uint8_t> pending;uint64_t source=0;
    { std::lock_guard<std::mutex> l(m_mutex);pending.swap(m_pending);source=m_pendingSourceUs; }
@@ -106,7 +150,18 @@ private:
    const bool useHost=m_hosted && hostRoute && routeAt && routeNow>=routeAt && routeNow-routeAt<1000000 && hostAck && routeNow>=hostAck && routeNow-hostAck<1500000;
    m_usingHost=useHost;
    if(m_hosted && useHost!=lastRoute) {std::fprintf(stderr,"UDP self-host: snapshots via %s.\n",useHost?"creator":"central relay fallback");lastRoute=useHost;}
-   if(!pending.empty() && Active()) {
+   if(pending.size()==m_size && Active()) {
+    RelayUdp::Trailer t;
+    {
+     std::lock_guard<std::mutex> l(m_mutex);
+     for(unsigned i=0;i<m_count;++i) if(i!=m_index && Fresh(m_samples[i],routeNow)) t.heard|=uint16_t(1u<<i);
+     int64_t offset=0;uint64_t rtt=0;
+     if(Estimate(m_clocks[useHost?1:0],routeNow,offset,rtt) && int64_t(source)+offset>0) {
+      t.clock=useHost?2:1;t.rttUs=uint32_t(std::min<uint64_t>(rtt,UINT32_MAX));t.clockUs=uint64_t(int64_t(source)+offset);
+     }
+    }
+    pending.resize(pending.size()+sizeof(t));std::memcpy(pending.data()+m_size,&t,sizeof(t));
+    pending=RelayUdp::Encode(pending.data(),pending.size());
     RelayUdp::Header h;h.kind=RelayUdp::Snapshot;h.origin=uint16_t(m_index);h.total=uint16_t(pending.size());
     h.parts=uint8_t((pending.size()+RelayUdp::ChunkSize-1)/RelayUdp::ChunkSize);h.sequence=++seq;h.sourceUs=source;
     std::memcpy(h.token,m_token.data(),16);
@@ -121,6 +176,7 @@ private:
  UDPsocket m_socket=nullptr;IPaddress m_server{};std::array<uint8_t,16> m_token{};
  std::atomic<bool> m_stop{false},m_usingHost{false};std::atomic<uint64_t> m_lastAck{0};std::thread m_thread;
  std::mutex m_mutex;std::vector<Sample> m_samples;std::vector<RelayUdp::Assembly> m_assemblies;
- std::vector<uint8_t> m_pending;uint64_t m_pendingSourceUs=0;
+ std::vector<uint8_t> m_pending;uint64_t m_pendingSourceUs=0,m_freshUs=300000;
+ std::array<Clock,2> m_clocks{}; // 0 = central relay, 1 = creator host
 };
 #endif

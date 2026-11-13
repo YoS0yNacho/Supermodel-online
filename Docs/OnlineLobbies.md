@@ -75,6 +75,39 @@ pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
   remote cars continue moving smoothly every emulated frame (57.524 FPS online) even at low tick rates (e.g.
   `10`–`30` Hz).
 
+## UDP race traffic (default) and `--tcp-only`
+
+By default the relay opens UDP on the same port number as TCP. Allow **both**
+TCP and UDP on that port.
+
+- **During a race** each cabinet sends its whole snapshot by UDP at the tick
+  rate, and the relay fans it out to every other cabinet in one hop. The TCP
+  connections stay open but carry no snapshots. A lost datagram is not resent;
+  the next snapshot replaces it.
+- **TCP still carries** link setup, the race-start barrier, one keyframe each
+  time a cabinet's race state changes, and a 1 Hz keepalive ping.
+- **Automatic fallback.** A cabinet stops sending on TCP only while every other
+  cabinet reports, inside its own UDP snapshots, that it is receiving that
+  cabinet's UDP. If any cabinet stops confirming (firewall, NAT, packet loss
+  lasting 3.5 ticks or 150 ms, whichever is longer), the TCP ring resumes and
+  UDP-only racing returns one second after confirmation is restored.
+- **Sample age.** Every UDP acknowledgement carries the relay clock, so
+  receivers measure how old each snapshot is and the predictors compensate.
+- **Sega Rally 2** depends on the snapshot returning round the TCP ring, so it
+  keeps the ring at the tick rate during races and uses UDP only as predictor
+  input.
+- **`--tcp-only`** disables the UDP lane; all game traffic uses the TCP ring.
+
+```
+python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20             # UDP racing (default)
+python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20 --tcp-only  # TCP ring only
+```
+
+The UDP wire format is version 2. Update `relay.py` and every cabinet together;
+an older build on either side is ignored on UDP and the room runs on TCP.
+
+ROM-free test: `python3 Tests/run_udp_primary.py [--sanitize]`.
+
 ## Fake latency (testing only)
 
 The relay can add artificial delay to the linked game traffic, which is useful
