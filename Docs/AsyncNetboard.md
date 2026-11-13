@@ -110,6 +110,99 @@ To return to frame-locked behavior, use `-sync-netboard` or `AsyncNet = false` o
   Initialization also clears RAM from the allocation base, avoiding an overrun
   when the previously active bank was the upper bank.
 
+## Race-start barrier timing
+
+Supported games (`dayto2pe`, `daytona2`, `scud`, `scudplus`, `lemans24`,
+`srally2`) hold each cabinet at a game-specific checkpoint just before the race
+intro and release all of them at one agreed moment. The leader (lowest native
+participant) runs a three-step token exchange over the ring:
+
+1. **collect** — repeated every 100 ms until every participant is at the gate
+   and has a fresh clock sample to its upstream neighbour;
+2. **prepare** — carries the release deadline, translated hop by hop into each
+   cabinet's monotonic clock;
+3. **commit** — point of no return; everyone releases at the deadline.
+
+The deadline lead is **measured, not fixed**: `lead = 3 × round + 300 ms`,
+clamped to `[0.5 s, 20 s]`, where `round` is the longest collect/prepare token
+round seen in this barrier (tokens are forwarded by the emulation thread, so a
+round already includes one frame of scheduling per hop). Prepare and commit
+need two rounds; the third round plus the margin is headroom for the last
+cabinet, which must still see the deadline at least 100 ms ahead when the
+commit arrives. On a LAN that is the 0.5 s floor; at 100 ms per hop with two
+cabinets it is about 1 s. The earlier fixed two-second floor is gone.
+
+Nothing is allowed to go unsynchronized when the lead turns out too short:
+
+- A cabinet that receives a prepare whose deadline is already too close (or
+  whose clock sample is stale) **declines** it: it clears its clock bit in the
+  token and arms nothing. Cabinets further downstream see the missing bit and
+  forward the token unarmed. The leader sees the incomplete acknowledgement and
+  re-collects with a longer lead (two more rounds per retry, three retries, then
+  the usual fatal error).
+- A prepared cabinet whose deadline passes without a commit **lapses** instead
+  of failing: it disarms and waits for the next prepare. This is safe because
+  the leader commits only while the deadline is still at least one prepare
+  round plus 150 ms ahead, so a commit for that serial can no longer be
+  accepted anywhere; a commit that does arrive late is still rejected (fatal),
+  and the leader itself still fails if its own commit does not close in time.
+
+The log shows the whole sequence per cabinet: `start READY`, `start PREPARE
+... round_ms=.. lead_ms=..`, optional `prepare DECLINED` / `prepare LAPSED` /
+`prepare RETRY`, then `start RELEASE ... late_ms=.. held_ms=..`.
+`Tests/run_async_netboard.py` covers it with `start-fast` (release under one
+second after the last cabinet reaches the gate), `start-stall` (a cabinet
+stops servicing its board for longer than the lead: decline, lapse, retry,
+release, no errors) and the existing start scenarios up to 650 ms per hop.
+Set `ASYNC_NETBOARD_TEST_VERBOSE=1` to see the board's info log in the test
+output; `--only <prefix>` runs a subset.
+
+## Remote-car correction smoothing
+
+Remote cars are dead-reckoned from the last sample and, when a newer sample
+arrives, the difference between the shown car and the new target is blended
+out as `correction * e^(-elapsed / tau)`. At 200 ms of one-way delay the old
+code produced a faint, periodic "micro rubber band" even with a steady relay.
+Two things caused it, both in the Daytona 2 predictor and both fixed:
+
+* the dead-reckoning horizon was capped exactly at the measured latency, so a
+  packet that was one frame late made the shown car stall for a frame and
+  then catch up. The horizon now gets three frames of headroom over the
+  latency (`HoldHeadroomFrames`) when smoothing is enabled;
+* the non-smooth target branch used a different lead than the stalled-link
+  branch, so crossing the horizon produced a step in the velocity estimate
+  (the finite difference in `EvaluateVelocity`), which the velocity
+  correction then amplified into a jump. The branches now use the same lead
+  and the velocity correction is clamped to `MaxSpeed`.
+
+On top of that, `Src/Network/Games/CorrectionSmoothing.h` stretches `tau` for
+corrections that are small compared with how far the car moves per frame
+(`ErrorScaledTau`) and raises the knee of the far-latency term
+(`FarLatencyTau`). It is shared by the Daytona 2, Scud Race, Le Mans 24 and
+Sega Rally 2 predictors. The strength is a knob:
+
+| `NetPredictionSmoothing` / `-net-smoothing=` | Effect |
+| --- | --- |
+| `0` | legacy fixed blend (also keeps the legacy horizon) |
+| `1` | default: error-proportional blend, hold headroom |
+| `2` | stronger stretch; a little more position error for a little less noise |
+
+Below ~115 ms of sample age the stretch is not applied at all, so a LAN or a
+nearby relay sees no added lag. The `predict-rubberband` scenario in
+`Tests/run_async_netboard.py` drives the Daytona 2 predictor with a synthetic
+path at 100 / 200 / 300 ms (20% one-frame jitter) and reports per level the
+frame-to-frame roughness of the shown car and its mean error against the
+true path. Representative numbers (roughness rms / mean error, world units):
+
+| latency | level 0 | level 1 | level 2 |
+| --- | --- | --- | --- |
+| 100 ms | 0.028 / 1.54 | 0.028 / 1.54 | 0.028 / 1.54 |
+| 200 ms | 0.594 / 4.65 | 0.034 / 3.53 | 0.035 / 3.57 |
+| 300 ms | 0.154 / 6.61 | 0.071 / 6.24 | 0.072 / 6.25 |
+
+`RUBBERBAND_REPORT_ONLY=1` prints the table without asserting on it, for
+tuning.
+
 ## Important limitations
 
 **Full local frame speed is not the same as correct linked gameplay.** The game

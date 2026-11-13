@@ -272,7 +272,7 @@ static bool IsPerGameKey(const std::string& key)
         "ROMDirectory", "GameXMLFile", "OnlineRelay", "OnlineServers", "OnlinePlayer",
         "NetRoomHornet", "NetRoomRealPlayers", "NetRoomNoCollisions",
         "NetSrally2Eight", "NetNativeRoomOptions", "NetNativeCarNumber",
-        "NetSpectate", "NetRoomSecretCars"
+        "NetSpectate", "NetRoomSecretCars", "NetPredictionSmoothing"
     };
     return globalOnly.find(key) == globalOnly.end();
 }

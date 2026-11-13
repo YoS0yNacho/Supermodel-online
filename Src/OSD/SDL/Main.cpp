@@ -1748,6 +1748,7 @@ Util::Config::Node DefaultConfig()
   config.Set("Network", false, "Network");
   config.Set("SimulateNet", true, "Network");
   config.Set("AsyncNet", false, "Network");
+  config.Set("NetPredictionSmoothing", unsigned(1), "Network");
   config.Set<std::string>("NetRelay", "", "Network", "", "");
   config.Set<std::string>("OnlineRelay", Online::DefaultRelayEndpoint, "Online", "", "");
   config.Set<std::string>("OnlineServers", Online::DefaultRelayServers, "Online", "", "");
@@ -2086,6 +2087,7 @@ static void Help(void)
   puts("  -async-netboard         Use asynchronous net-board exchange");
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
   puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
+  puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
          "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
   printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
@@ -2167,6 +2169,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-relay",                 "NetRelay"                },
     { "-game-relay",            "NetGameRelay"            },
     { "-lobby-ticket",          "NetRelayTicket"          },
+    { "-net-smoothing",         "NetPredictionSmoothing"  },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };

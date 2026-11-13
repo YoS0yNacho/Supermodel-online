@@ -2,6 +2,7 @@
 #ifndef INCLUDED_SCUD_PREDICTION_H
 #define INCLUDED_SCUD_PREDICTION_H
 #include "Policy.h"
+#include "../CorrectionSmoothing.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -66,7 +67,7 @@ template<unsigned N, bool Progress=false> class Motion {
     if (!SmoothMode()) return 24.0;
     return 24.0 + 3.5*(intervalFrames-1.0) + (jitterFrames>0.25 ? 2.2*double(std::min(dt, 45u)) : 0.0);
   }
-  double Tau() const { return std::max(6.0, intervalFrames*1.25 + (Progress ? 0.0 : 0.35*jitterFrames) + (LatencyExtended() ? 0.15*(latencyFrames-12.0) : 0.0) + (!Progress && latencyFrames>18.0 ? 0.35*(latencyFrames-18.0) : 0.0)); }
+  double Tau() const { return std::max(6.0, intervalFrames*1.25 + (Progress ? 0.0 : 0.35*jitterFrames) + (LatencyExtended() ? 0.15*(latencyFrames-12.0) : 0.0) + (!Progress ? GameNetwork::FarLatencyTau(latencyFrames) : 0.0)); }
   static double SoftCap(double x, double cap, double knee=2.0) {
     if (x<=0.0) return 0.0;
     const double th=std::max(0.0, cap-knee);
@@ -227,6 +228,8 @@ public:
       activeTau=Tau();
       if constexpr (N==2 && !Progress) {
         const double spd=Norm(velocity);
+        // Small corrections blend slowly (no visible nudge); large ones keep the fast blend.
+        activeTau=GameNetwork::ErrorScaledTau(activeTau, Norm(correction), spd, 1.0, latencyFrames);
         if (smooth && wasMoving && spd>0.2) {
           const double ahead=(correction[0]*velocity[0] + correction[1]*velocity[1]) / spd;
           if (ahead>0.0)

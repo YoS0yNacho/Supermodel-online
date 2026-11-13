@@ -5,6 +5,7 @@
 #define INCLUDED_SRALLY2_PREDICTION_H
 
 #include "Policy.h"
+#include "../CorrectionSmoothing.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -217,7 +218,7 @@ class PoseMotion {
   }
   double Tau() const { return std::max(6.0, m_intervalFrames * 1.25 + 0.35 * m_jitterFrames +
       (LatencyExtended() ? 0.15 * (m_latencyFrames - 12.0) : 0.0) +
-      (m_latencyFrames > 18.0 ? 0.35 * (m_latencyFrames - 18.0) : 0.0)); }
+      GameNetwork::FarLatencyTau(m_latencyFrames)); }
 
   double EffectiveFrames(double elapsed) const {
     const double mf = MaxFrames();
@@ -569,6 +570,9 @@ public:
 
       m_activeTau = Tau();
       const double spdXZ = Norm2(m_velXZ);
+      // Small corrections blend slowly (no visible nudge); large ones keep the fast blend.
+      m_activeTau = GameNetwork::ErrorScaledTau(m_activeTau,
+          std::sqrt(m_posCorr[0] * m_posCorr[0] + m_posCorr[2] * m_posCorr[2]), spdXZ, 0.5, m_latencyFrames);
       if (smooth && wasMoving && spdXZ > 0.06) {
         const double ahead = (m_posCorr[0] * m_velXZ[0] + m_posCorr[2] * m_velXZ[1]) / spdXZ;
         if (ahead > 0.0)

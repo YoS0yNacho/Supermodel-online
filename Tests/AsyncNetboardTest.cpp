@@ -3,6 +3,8 @@
 #include "Lemans24Packet.h"
 #include "Network/Games/Policy.h"
 #include "Network/Games/Daytona2/Daytona2StartSync.h"
+#include "Network/Games/Daytona2/Daytona2Prediction.h"
+#include "Network/Games/CorrectionSmoothing.h"
 // ROM-free tests of the real HLE board and TCP transport. GPL-3.0-or-later.
 #include "Supermodel.h"
 #include "Util/NewConfig.h"
@@ -22,6 +24,7 @@
 #undef private
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdarg>
 #include <iostream>
 
@@ -37,7 +40,18 @@ Result ErrorLog(const char* fmt, ...)
   fputc('\n', stderr);
   return Result::FAIL;
 }
-void InfoLog(const char*, ...) {}
+// ASYNC_NETBOARD_TEST_VERBOSE=1 echoes the board's info log (start barrier tracing).
+void InfoLog(const char* fmt, ...)
+{
+  static const bool verbose = std::getenv("ASYNC_NETBOARD_TEST_VERBOSE") != nullptr;
+  if (!verbose) return;
+  va_list args;
+  va_start(args, fmt);
+  fputs("[Info] ", stdout);
+  vprintf(fmt, args);
+  va_end(args);
+  fputc('\n', stdout);
+}
 void DebugLog(const char*, ...) {}
 static void SleepForMs(unsigned ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
@@ -102,6 +116,94 @@ int main(int argc, char** argv)
   const std::string scenario = argv[1], game = argv[2];
   const unsigned n = std::stoul(argv[3]);
   assert(unsigned(argc) == 4 + 2 * n);
+  if (scenario == "predict-rubberband")
+  {
+    // Receive-side predictor alone, no transport: a car that brakes,
+    // accelerates and slaloms, sampled at 60 Hz and delivered L frames late
+    // with +-1 frame of arrival jitter. Roughness = frame-to-frame change of
+    // the displayed speed (the truth changes by < 0.03/frame, so anything
+    // above that is correction noise = the visible rubber band). Error = mean
+    // distance between the displayed and the true current position (lag plus
+    // extrapolation error), the price paid for smoothing.
+    struct Metrics { double roughRms, roughP95, error; };
+    auto run = [&](unsigned level, unsigned latency) {
+      GameNetwork::SetSmoothingLevel(level);
+      Dayto2pe::Predictor predictor;
+      predictor.SetTickRate(60);
+      uint32_t seed = 12345u + latency;
+      auto rnd = [&] { seed = seed * 1664525u + 1013904223u; return double(seed >> 8) / double(1u << 24); };
+      std::vector<Dayto2pe::Position> truth(2000);
+      Dayto2pe::Position pos{100.0, 50.0};
+      for (unsigned t = 0; t < truth.size(); ++t)
+      {
+        const double speed = 1.4 + 0.5 * std::sin(2.0 * M_PI * t / 180.0); // ~1 frame = 1 unit at top speed
+        const double heading = 0.6 * std::sin(2.0 * M_PI * t / 240.0);
+        pos = pos + Dayto2pe::Position{speed * std::cos(heading), speed * std::sin(heading)};
+        truth[t] = pos;
+      }
+      std::vector<unsigned> arrival(truth.size());
+      for (unsigned t = 0; t < truth.size(); ++t)
+        arrival[t] = t + latency + (rnd() < 0.2 ? 1u : 0u);
+      Dayto2pe::Sample latest; bool haveSample = false; unsigned nextSource = 0;
+      std::vector<double> rough; double errorSum = 0; unsigned errorCount = 0;
+      Dayto2pe::Position prev{}, prev2{}; unsigned shown = 0;
+      for (unsigned frame = 0; frame + 1 < truth.size(); ++frame)
+      {
+        while (nextSource < truth.size() && arrival[nextSource] <= frame)
+        {
+          latest = Dayto2pe::Sample{uint16_t(nextSource), truth[nextSource]}; haveSample = true; ++nextSource;
+        }
+        if (!haveSample) continue;
+        Dayto2pe::Position displayed;
+        if (!predictor.ApplySample(latest, displayed, frame, double(frame - latest.tick), 0.5)) continue;
+        ++shown;
+        if (frame >= 300 && frame < 1800)
+        {
+          if (shown >= 3)
+          {
+            const double step = Dayto2pe::Length(displayed - prev), prevStep = Dayto2pe::Length(prev - prev2);
+            rough.push_back(std::abs(step - prevStep));
+          }
+          errorSum += Dayto2pe::Length(displayed - truth[frame]); ++errorCount;
+        }
+        prev2 = prev; prev = displayed;
+      }
+      assert(rough.size() > 1000 && errorCount > 1000);
+      double sq = 0; for (double r : rough) sq += r * r;
+      std::vector<double> sorted = rough; std::sort(sorted.begin(), sorted.end());
+      return Metrics{std::sqrt(sq / rough.size()), sorted[size_t(sorted.size() * 0.95)], errorSum / errorCount};
+    };
+    for (unsigned latency : {6u, 12u, 18u})
+    {
+      Metrics m[3];
+      for (unsigned level = 0; level < 3; ++level)
+      {
+        m[level] = run(level, latency);
+        std::cout << "rubberband latency=" << latency << "f (" << latency * 1000 / 60 << " ms) level=" << level
+                  << " roughness_rms=" << m[level].roughRms << " roughness_p95=" << m[level].roughP95
+                  << " mean_error=" << m[level].error << " units\n";
+      }
+      // The default must take a clear bite out of the correction noise without
+      // buying it with much more position error; level 2 smoother still.
+      // RUBBERBAND_REPORT_ONLY=1 prints the table without judging it (tuning aid).
+      if (std::getenv("RUBBERBAND_REPORT_ONLY")) continue;
+      if (latency <= 6)
+      {
+        // Already clean at 100 ms: nothing to smooth, so (almost) nothing may be paid.
+        assert(m[1].roughRms < 1.1 * m[0].roughRms && m[1].error < 1.05 * m[0].error + 0.02);
+        assert(m[2].roughRms < 1.1 * m[0].roughRms && m[2].error < 1.05 * m[0].error + 0.02);
+        continue;
+      }
+      // 200-300 ms: the hold headroom removes the per-jitter stall and the
+      // error-proportional blend hides the rest; the position error must not grow.
+      assert(m[1].roughRms < 0.5 * m[0].roughRms && m[1].roughP95 < 0.6 * m[0].roughP95);
+      assert(m[1].error < 1.05 * m[0].error);
+      assert(m[2].roughRms < 0.6 * m[0].roughRms && m[2].error < 1.1 * m[0].error);
+    }
+    GameNetwork::SetSmoothingLevel(GameNetwork::DefaultSmoothingLevel);
+    std::cout << "PASS predict-rubberband: error-proportional blend cuts correction noise at 100-300 ms\n";
+    return 0;
+  }
   const bool relayCase = scenario == "start-relay" || scenario == "predict-relay-cpu" || scenario == "scud-relay-predict" || scenario == "srally2-relay-predict" || scenario == "lemans24-relay-predict" || scenario == "stream-relay-smoothness";
   const bool cpuCase = scenario == "predict-cpu" || scenario == "predict-relay-cpu";
   const bool startCase = scenario.rfind("start", 0) == 0;
@@ -765,13 +867,23 @@ int main(int argc, char** argv)
       for (auto& cab : c) cab->board->HoldForRaceStart(false);
       const auto begin = Clock::now();
       std::vector<double> release(n,-1);
-      const double stagger = scenario == "start-late" ? 3.0 : .4;
+      const double stagger = scenario == "start-late" ? 3.0 : scenario == "start-stall" ? .1 : .4;
+      // start-stall: once the leader has prepared, the last cabinet stops
+      // servicing its board for longer than the lead. The prepare must be
+      // declined (deadline too close), the leader's own prepare lapses, and the
+      // retry with a longer lead must release everyone without any error.
+      double stallUntil = -1; bool stalled = false;
       while (Clock::now()-begin < std::chrono::seconds(15))
       {
         for (unsigned i=0;i<n;++i)
         {
           auto& b=*c[i]->board;
           const double elapsed=std::chrono::duration<double>(Clock::now()-begin).count();
+          if (scenario == "start-stall" && i+1 == n)
+          {
+            if (!stalled && c[0]->board->m_gameNet.m_startPrepared) { stalled = true; stallUntil = elapsed + 1.2; }
+            if (elapsed < stallUntil) continue;
+          }
           const bool gate=release[i]<0 && elapsed >= .1 + i*stagger;
           const auto counter=b.m_counter;
           const auto before=Clock::now();
@@ -799,7 +911,19 @@ int main(int argc, char** argv)
       const double skew=*range.second-*range.first;
       assert(*range.first >= .1+(n-1)*stagger);
       assert(skew < .1); // scheduler tolerance, not a universal synchronization guarantee
-      std::cout << "PASS " << scenario << " n=" << n << " epoch=" << epoch << " skew_ms=" << skew*1000 << " first_release_s=" << *range.first << '\n';
+      if (scenario == "start-fast")
+      {
+        // Lead is measured, not a fixed two seconds: last gate -> release well under a second on a local link.
+        assert(*range.first - (.1+(n-1)*stagger) < 1.0);
+        assert(c[0]->board->m_gameNet.m_startLeadRetries == 0);
+      }
+      if (scenario == "start-stall")
+      {
+        assert(stalled && c[0]->board->m_gameNet.m_startLeadRetries >= 1);
+        assert(*range.first - (.1+(n-1)*stagger) >= 1.2);
+      }
+      std::cout << "PASS " << scenario << " n=" << n << " epoch=" << epoch << " skew_ms=" << skew*1000 << " first_release_s=" << *range.first
+                << " held_after_last_gate_s=" << (*range.first-(.1+(n-1)*stagger)) << " lead_retries=" << c[0]->board->m_gameNet.m_startLeadRetries << '\n';
       // Explicitly rearm after the native state leaves the checkpoint.
       for (auto& cab:c) { assert(!cab->board->HoldForRaceStart(false)); assert(!cab->board->m_gameNet.m_startWaiting); }
     }

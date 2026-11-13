@@ -28,6 +28,28 @@ struct StartToken
   uint64_t maxRTT = 0;
 };
 static_assert(sizeof(StartToken) == 56, "start token wire size");
+// Release lead chosen by the leader once every participant is ready. The
+// prepare and commit tokens each need one ring round (tokens are forwarded by
+// the emulation thread, so a round includes one frame of scheduling per hop),
+// and the last cabinet must still see the deadline >= 100 ms ahead when the
+// commit arrives. Three measured rounds plus a fixed margin covers that with
+// 50% headroom; each declined prepare adds two more rounds.
+constexpr uint64_t MinLeadUs = 500000, MaxLeadUs = 20000000, LeadMarginUs = 300000;
+constexpr uint64_t CommitMarginUs = 150000;
+constexpr unsigned MaxLeadRetries = 3;
+inline uint64_t ReleaseLead(uint64_t roundUs, unsigned retries) {
+  const uint64_t rounds = 3 + 2ull * retries;
+  if (roundUs > MaxLeadUs / rounds) return MaxLeadUs + 1;
+  const uint64_t lead = rounds * roundUs + LeadMarginUs;
+  return lead < MinLeadUs ? MinLeadUs : lead;
+}
+// Cabinets a token has already visited on its way from `origin` to the
+// cabinet `hops` hops downstream (the origin included, that cabinet excluded).
+inline uint32_t UpstreamMask(unsigned origin, unsigned hops, unsigned machines) {
+  uint32_t mask = 0;
+  for (unsigned k = 0; k <= hops && k < machines; ++k) mask |= 1u << ((origin + k) % machines);
+  return mask;
+}
 // Validate before converting to integer: malformed data must not overflow when
 // a peer's monotonic clock has a very different epoch from ours.
 inline bool TranslateStartDeadline(int64_t remote, int64_t peerMinusLocal,

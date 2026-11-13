@@ -26,6 +26,7 @@
 #include "Model3/SimNetBoard.h"
 
 #include "Policy.h"
+#include "CorrectionSmoothing.h"
 #include "UdpPresentationPolicy.h"
 #include "Srally2/MultiStartResearch.h"
 #include <cstdlib>
@@ -39,6 +40,8 @@ bool CSimNetBoard::Srally2PeersReady() const {
 }
 void CSimNetBoard::InitializeGameNet()
 {
+ // Remote car correction blend (NetPredictionSmoothing / -net-smoothing).
+ GameNetwork::SetSmoothingLevel(m_config["NetPredictionSmoothing"].ValueAsDefault<unsigned>(GameNetwork::DefaultSmoothingLevel));
  m_gameNet.daytona.m_daytoPrediction=Dayto2pe::AsyncEnabled(m_gameInfo.name,m_async);
  m_gameNet.m_syncStart=m_async && GameNetwork::IsSupportedGame(m_gameInfo.name);
  m_gameNet.m_timedSegments=m_gameNet.m_syncStart || m_gameNet.daytona.m_daytoPrediction;
@@ -131,6 +134,7 @@ void CSimNetBoard::ResetStartSync()
 	m_gameNet.m_startEpoch = m_gameNet.m_startSerial = m_gameNet.m_startKind = 0;
 	m_gameNet.m_startWaitTime = m_gameNet.m_startNextProbe = m_gameNet.m_startTokenTime = m_gameNet.m_startLastPing = 0;
 	m_gameNet.m_startDeadline = m_gameNet.m_startPeerOffset = 0;
+	m_gameNet.m_startRoundMaxUs = 0; m_gameNet.m_startLeadRetries = 0;
 }
 
 bool CSimNetBoard::HoldForRaceStart(bool atGate, bool nativeEntry)
@@ -170,6 +174,8 @@ bool CSimNetBoard::HoldForRaceStart(bool atGate, bool nativeEntry)
 		m_gameNet.m_startNextProbe = now;
 		m_gameNet.m_startPrepared = m_gameNet.m_startCommitted = m_gameNet.m_startTokenPending = false;
 		m_gameNet.m_startDeadline = 0;
+		m_gameNet.m_startRoundMaxUs = 0;
+		m_gameNet.m_startLeadRetries = 0;
 		InfoLog("%s start READY cabinet=%u epoch=%u clock_us=%llu", m_gameInfo.name.c_str(),
 			unsigned(m_asyncIndex[0]), m_gameNet.m_startEpoch, (unsigned long long)now);
 	}
@@ -220,14 +226,33 @@ void CSimNetBoard::TickStartSync()
 		m_gameNet.m_startLastPing = now;
 	}
 	if (!m_gameNet.m_startWaiting || m_gameNet.m_startReleased) return;
+	const unsigned leader = RaceStart::Leader(m_gameNet.m_startParticipants);
+	const bool isLeader = leader == m_asyncIndex[0];
 	if (now - m_gameNet.m_startWaitTime > (m_gameInfo.name == "srally2" ? 120000000ULL : 60000000ULL) ||
-		(m_gameNet.m_startTokenPending && now - m_gameNet.m_startTokenTime > 10000000) ||
-		(m_gameNet.m_startPrepared && !m_gameNet.m_startCommitted && int64_t(now) >= m_gameNet.m_startDeadline))
+		(m_gameNet.m_startTokenPending && now - m_gameNet.m_startTokenTime > 10000000))
 	{
 		AsyncError("race-start barrier timed out; no unsynchronized fallback; restart all cabinets");
 		return;
 	}
-	if (RaceStart::Leader(m_gameNet.m_startParticipants)==m_asyncIndex[0] && !m_gameNet.m_startPrepared && !m_gameNet.m_startTokenPending && now >= m_gameNet.m_startNextProbe)
+	if (m_gameNet.m_startPrepared && !m_gameNet.m_startCommitted && int64_t(now) >= m_gameNet.m_startDeadline)
+	{
+		// A prepare whose deadline passed without a commit lapses. The leader
+		// only commits while the deadline is still comfortably ahead, so a
+		// commit for this serial can no longer be accepted anywhere: a late one
+		// is rejected (fatal) on arrival. Once the leader has sent the commit it
+		// cannot take it back; that case stays fatal.
+		if (isLeader && m_gameNet.m_startKind == 3 && m_gameNet.m_startTokenPending)
+		{
+			AsyncError("race-start commit did not close before the deadline; no unsynchronized fallback; restart all cabinets");
+			return;
+		}
+		m_gameNet.m_startPrepared = false;
+		if (!isLeader && leader < m_gameNet.m_startTransit.size()) m_gameNet.m_startTransit[leader].prepared = false;
+		m_gameNet.m_startNextProbe = now;
+		InfoLog("%s start prepare LAPSED cabinet=%u epoch=%u serial=%u; waiting for the leader to re-prepare",
+			m_gameInfo.name.c_str(), unsigned(m_asyncIndex[0]), m_gameNet.m_startEpoch, m_gameNet.m_startSerial);
+	}
+	if (isLeader && !m_gameNet.m_startPrepared && !m_gameNet.m_startTokenPending && now >= m_gameNet.m_startNextProbe)
 	{
 		++m_gameNet.m_startSerial;
 		SendStartToken(1);
@@ -288,6 +313,25 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
     if(ready) m_gameNet.m_startPrepared=false;
     m_link->RefreshIncomingClock();
   }
+  // A prepare declined by any cabinet upstream is void for everyone after it:
+  // forward it unarmed so no cabinet holds a deadline the leader will not commit.
+  const uint32_t upstream=RaceStart::UpstreamMask(token.origin,token.hops,m_numMachines)&~bit;
+  const bool declinedUpstream=token.kind==2 && (token.clocks&upstream)!=upstream;
+  auto retryPrepare=[&](const char* why) {
+    // Leader: the prepare did not close; probe again with a longer lead.
+    m_gameNet.m_startTokenPending=false; m_gameNet.m_startPrepared=false;
+    if(++m_gameNet.m_startLeadRetries>RaceStart::MaxLeadRetries) {
+      AsyncError("native-cohort prepare declined repeatedly; network too unstable for bounded release"); return;
+    }
+    InfoLog("%s start prepare RETRY cabinet=%u epoch=%u serial=%u (%s); retry %u",
+      m_gameInfo.name.c_str(),unsigned(index),token.epoch,token.serial,why,m_gameNet.m_startLeadRetries);
+    m_gameNet.m_startNextProbe=now+200000;
+    m_link->RefreshIncomingClock();
+  };
+  if(declinedUpstream) {
+    if(origin) { retryPrepare("declined by a cabinet"); return; }
+    ++token.hops; m_link->Send(&token,sizeof(token)); return;
+  }
   if(token.kind!=1) {
     const bool same=transit.epoch==token.epoch && transit.serial==token.serial &&
                     transit.participants==token.participants;
@@ -296,6 +340,16 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
     if(!fresh || (participant && !ready) ||
        (!origin && token.kind==3 && (!same || !transit.prepared || transit.committed)) ||
        !RaceStart::TranslateStartDeadline(token.deadline,offset,now,deadline)) {
+      if(token.kind==2 && origin) { retryPrepare("deadline no longer ahead on return"); return; }
+      if(token.kind==2) {
+        // Decline softly: the deadline is already too close (or our clock
+        // sample is stale). Nothing is armed here; the leader re-prepares.
+        token.clocks&=~bit;
+        InfoLog("%s start prepare DECLINED cabinet=%u epoch=%u serial=%u (%s)",m_gameInfo.name.c_str(),
+          unsigned(index),token.epoch,token.serial,!fresh?"stale clock sample":(participant && !ready)?"not at the gate":"deadline too close");
+        m_link->RefreshIncomingClock();
+        ++token.hops; m_link->Send(&token,sizeof(token)); return;
+      }
       AsyncError("native-cohort deadline/clock/readiness invalid; no unsynchronized fallback"); return;
     }
     token.deadline=deadline;
@@ -303,24 +357,34 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
   }
   if(origin) {
     m_gameNet.m_startTokenPending=false;
+    const uint64_t round=now-m_gameNet.m_startTokenTime; // full ring round of this token
     if(token.kind==1) {
       if(token.ready!=token.participants || token.clocks!=all) {
-        m_gameNet.m_startNextProbe=now+250000; return;
+        m_gameNet.m_startNextProbe=now+100000; return;
       }
-      const uint64_t lead=std::max<uint64_t>(2000000,8*(now-m_gameNet.m_startTokenTime)+500000);
-      if(lead>20000000) { AsyncError("native-cohort network too slow for bounded release"); return; }
+      m_gameNet.m_startRoundMaxUs=std::max(m_gameNet.m_startRoundMaxUs,round);
+      const uint64_t lead=RaceStart::ReleaseLead(m_gameNet.m_startRoundMaxUs,m_gameNet.m_startLeadRetries);
+      if(lead>RaceStart::MaxLeadUs) { AsyncError("native-cohort network too slow for bounded release"); return; }
       m_gameNet.m_startDeadline=int64_t(now+lead); m_gameNet.m_startPrepared=true;
+      InfoLog("%s start PREPARE cabinet=%u epoch=%u serial=%u round_ms=%.1f lead_ms=%.1f",m_gameInfo.name.c_str(),
+        unsigned(index),token.epoch,token.serial,double(round)/1000.0,double(lead)/1000.0);
       SendStartToken(2,token.maxRTT);
     } else {
       if(token.ready!=token.participants || token.clocks!=all ||
          std::abs(token.deadline-m_gameNet.m_startDeadline)>50000) {
-        if(token.kind==2) {
-          m_gameNet.m_startPrepared=false; m_gameNet.m_startNextProbe=now+200000;
-          m_link->RefreshIncomingClock(); return;
-        }
+        if(token.kind==2) { retryPrepare("acknowledgement incomplete"); return; }
         AsyncError("native-cohort acknowledgement or clock closure failed"); return;
       }
-      if(token.kind==2) SendStartToken(3,token.maxRTT);
+      if(token.kind==2) {
+        // Commit only while the commit round still fits before the deadline
+        // with margin for the last cabinet's acceptance check.
+        m_gameNet.m_startRoundMaxUs=std::max(m_gameNet.m_startRoundMaxUs,round);
+        if(!m_gameNet.m_startPrepared || m_gameNet.m_startDeadline<=int64_t(now) ||
+           uint64_t(m_gameNet.m_startDeadline-int64_t(now))<round+RaceStart::CommitMarginUs) {
+          retryPrepare("prepare round too slow for the deadline"); return;
+        }
+        SendStartToken(3,token.maxRTT);
+      }
       else { m_gameNet.m_startCommitted=true; m_gameNet.m_lastAccepted[token.origin]=token.epoch; }
     }
     return;

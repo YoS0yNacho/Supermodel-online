@@ -11,6 +11,7 @@
 #define INCLUDED_DAYTONA2PREDICTION_H
 
 #include "Policy.h"
+#include "../CorrectionSmoothing.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -102,6 +103,7 @@ public:
   static constexpr double MaxLeadDistance = 16.0;
   static constexpr double SnapDistance = 12.0;
   static constexpr double CorrectionFrames = 6.0;
+  static constexpr double HoldHeadroomFrames = 3.0;
 
   // Shorten projection during turns and major speed changes.
   static double LeadConfidence(Position previous, Position current)
@@ -291,6 +293,8 @@ public:
       m_correction = oldDisplay - newTarget;
       m_activeTau = EffectiveCorrectionFrames();
       const double spd = Length(m_velocity);
+      // Small corrections blend slowly (no visible nudge); large ones keep the fast blend.
+      m_activeTau = GameNetwork::ErrorScaledTau(m_activeTau, Length(m_correction), spd, SnapDistance / 24.0, m_latencyFrames);
       if (smoothMode && hadVelocity && spd > 0.2)
       {
         const double ahead = (m_correction.x * m_velocity.x + m_correction.z * m_velocity.z) / spd;
@@ -302,6 +306,10 @@ public:
         const Position newBaseVel = EvaluateVelocity(localFrame);
         const double dampGain = (m_jitterFrames > 0.75) ? 0.85 : 0.65;
         m_velCorrection = (oldVel - newBaseVel) * dampGain;
+        // A velocity mismatch can never legitimately exceed the speed cap.
+        const double velCorrectionLength = Length(m_velCorrection);
+        if (velCorrectionLength > MaxSpeed)
+          m_velCorrection = m_velCorrection * (MaxSpeed / velCorrectionLength);
       }
     }
     if (!m_hasVelocity)
@@ -317,14 +325,22 @@ private:
   }
   double EffectiveMaxLeadFrames(double liveStallFrames = 0.0) const
   {
+    // The horizon must leave room above the latency for holding through a
+    // late packet: the lead is about `latency` frames when a sample arrives
+    // and grows one frame per frame without one. Capped at exactly the
+    // latency (as before, kept at smoothing level 0) a one-frame-late packet
+    // clipped the hold and the car visibly stalled for a frame - the
+    // "micro rubber band" of 150-250 ms relays, where the fixed 8-frame floor
+    // no longer provided that room.
+    const double headroom = GameNetwork::SmoothingLevel() ? HoldHeadroomFrames : 0.0;
+    const double latencyHorizon = std::min(m_latencyFrames + headroom, MaxLatencyFrames);
     if (!IsSmoothMode() && liveStallFrames <= 0.0)
-      return std::max(double(MaxLeadFrames),
-                      std::min(m_latencyFrames, MaxLatencyFrames));
+      return std::max(double(MaxLeadFrames), latencyHorizon);
     const double jitterBoost = (m_jitterFrames > 0.75 || liveStallFrames > 0.0)
         ? (1.8 * std::max(m_jitterFrames, liveStallFrames) + 10.0) : 0.0;
     // Low tick rates extend the lead horizon by measured sample age.
     return std::max(std::min(42.0, double(MaxLeadFrames) + 1.8 * (m_intervalFrames - 1.0) + jitterBoost),
-                    std::min(m_latencyFrames, MaxLatencyFrames));
+                    latencyHorizon);
   }
   double EffectiveMaxAdaptiveBuffer() const
   {
@@ -350,9 +366,8 @@ private:
   }
   double EffectiveCorrectionFrames() const
   {
-    // Increase smoothing for very high one-way latency.
-    const double farTau = m_latencyFrames > 18.0
-        ? 0.35 * (m_latencyFrames - 18.0) : 0.0;
+    // Increase smoothing for high one-way latency (from 8 frames; 18 at level 0).
+    const double farTau = GameNetwork::FarLatencyTau(m_latencyFrames);
     return std::max(CorrectionFrames, m_intervalFrames * 1.25 +
         (m_jitterFrames > 0.75 ? 0.35 * m_jitterFrames : 0.0) + farTau);
   }
@@ -437,11 +452,15 @@ private:
     }
     // Keep the correction curve continuous when drought state changes.
     const double normalLead = std::min(m_bufferFrames, m_age) * m_leadConfidence;
+    // The non-smooth form must equal the branch above at liveStall == 0:
+    // EvaluateVelocity differentiates across this point, and a step here
+    // used to become a huge velocity correction on a one-frame-late packet.
     const Position normalTarget = IsSmoothMode()
         ? m_sample.position + ArcLead(m_velocity, m_omega,
             SoftCap(normalLead + elapsed, EffectiveMaxLeadFrames(), 2.0))
         : m_sample.position + Lead(m_velocity,
-            std::min<double>(MaxLeadFrames, normalLead + (m_leadConfidence > 0.0 ? elapsed : 0.0)));
+            std::min<double>(EffectiveMaxLeadFrames(), normalLead + (m_leadConfidence > 0.0 ? elapsed : 0.0)),
+            EffectiveMaxLeadDistance());
     const double stallBlend = m_jitterFrames > 0.75 ? 1.0
         : std::clamp(liveStall / 6.0, 0.0, 1.0);
     if (stallBlend <= 0.0) return normalTarget;

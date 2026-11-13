@@ -1,0 +1,3 @@
+# LeakSanitizer suppressions for the async net-board tests.
+# SDL2's per-thread error buffer is never freed for non-SDL threads.
+leak:libSDL2-2.0

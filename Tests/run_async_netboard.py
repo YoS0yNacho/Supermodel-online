@@ -5,6 +5,7 @@ Run from anywhere: python3 Tests/run_async_netboard.py [--sanitize]
 """
 import argparse
 import asyncio
+import os
 from pathlib import Path
 import shlex
 import random
@@ -135,8 +136,14 @@ async def case(binary, scenario, game, n, latency):
     if n == 1:
         outgoing = incoming
     print(f"TEST {scenario} {game} n={n} per-hop delay={1000 * latency:g} ms", flush=True)
+    # SDL2 >= 2.32 keeps a per-thread error buffer (realloc inside libSDL2)
+    # that it never frees for threads it did not create; LeakSanitizer reports
+    # it from the net server thread. Not ours: suppress leaks rooted in libSDL2.
+    env = dict(os.environ)
+    env["LSAN_OPTIONS"] = ":".join(filter(None, [env.get("LSAN_OPTIONS", ""),
+                                                 f"suppressions={ROOT / 'Tests' / 'lsan.supp'}"]))
     proc = await asyncio.create_subprocess_exec(str(binary), scenario, game, str(n),
-                                              *map(str, incoming + outgoing), cwd=ROOT,
+                                              *map(str, incoming + outgoing), cwd=ROOT, env=env,
                                               stdout=asyncio.subprocess.PIPE,
                                               stderr=asyncio.subprocess.STDOUT)
     try:
@@ -159,7 +166,7 @@ async def case(binary, scenario, game, n, latency):
         await asyncio.gather(*remaining, return_exceptions=True)
 
 
-async def main(binary):
+async def main(binary, only=None):
     cases = [
         ("stream-smoothness", "dayto2pe", 2, .025),
         ("stream-smoothness", "scud", 2, .025),
@@ -178,6 +185,10 @@ async def main(binary):
         ("start", "dayto2pe", 2, .1),
         ("start", "dayto2pe", 2, .15),
         ("start", "dayto2pe", 4, .075),
+        ("start-fast", "dayto2pe", 2, .01),
+        ("start-fast", "dayto2pe", 3, .02),
+        ("start-stall", "dayto2pe", 2, .01),
+        ("start-stall", "dayto2pe", 3, .01),
         ("start-late", "dayto2pe", 2, .1),
         ("start-repeat", "dayto2pe", 2, .05),
         ("start", "dayto2pe", 1, 0),
@@ -191,6 +202,7 @@ async def main(binary):
         ("start-malformed", "dayto2pe", 2, .01),
         ("start-checkpoint", "dayto2pe", 2, .01),
         ("start-disconnect", "dayto2pe", 2, .01),
+        ("predict-rubberband", "dayto2pe", 1, 0),
         ("predict", "dayto2pe", 2, .05),
         ("predict", "dayto2pe", 3, .025),
         ("predict", "dayto2pe", 1, 0),
@@ -213,6 +225,8 @@ async def main(binary):
         ("malformed", "harley", 2, .1),
         ("disconnect", "harley", 2, .1),
     ]
+    if only:
+        cases = [c for c in cases if c[0].startswith(only)]
     for args in cases:
         await case(binary, *args)
     print(f"PASS: all {len(cases)} scenarios")
@@ -221,5 +235,6 @@ async def main(binary):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--only", help="run only scenarios whose name starts with this prefix")
     args = parser.parse_args()
-    asyncio.run(main(build(args.sanitize)))
+    asyncio.run(main(build(args.sanitize), args.only))

@@ -32,6 +32,10 @@ struct NetBoardState {
 	uint32_t m_startEpoch = 0, m_startSerial = 0, m_startKind = 0;
 	uint64_t m_startWaitTime = 0, m_startNextProbe = 0, m_startTokenTime = 0;
 	uint64_t m_startLastPing = 0;
+	// Release lead is derived from measured token rounds; a prepare that
+	// arrives too close to its deadline is declined and retried with a longer lead.
+	uint64_t m_startRoundMaxUs = 0;
+	uint32_t m_startLeadRetries = 0;
 	int64_t m_startDeadline = 0;
 	int64_t m_startPeerOffset = 0;
 
