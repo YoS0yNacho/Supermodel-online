@@ -52,6 +52,22 @@ NBD1_ID = int.from_bytes(b'NBD1', 'little')
 PIN1_ID = int.from_bytes(b'PIN1', 'little')
 PON1_ID = int.from_bytes(b'PON1', 'little')
 
+# Star fan-out of the TCP ring (timed-segment games whose segments are not
+# accumulated hop by hop). The relay delivers each cabinet's segment to every
+# other cabinet directly, with the hop count each receiver would have seen on
+# the ring, and sends the origin its echo at once. Sega Rally 2 is included:
+# its barriers need every segment of every slot to reach the game in order,
+# which the client's publication rule guarantees regardless of the transport.
+STAR_GAMES = frozenset(('dayto2pe', 'daytona2', 'scud', 'scudplus', 'lemans24', 'srally2', 'srally2_8p'))
+STAR = struct.Struct('<II')  # version, flags (1 = fan-out active)
+TIMED_HEADER = struct.Struct('<IHHIIQQQQ')  # magic, version, header size, segment size, hops, source, last hop send, age, uncertainty
+TIMED_MAGIC = 0x31544d44
+TIMED_MAX_AGE_US = 10000000
+TIMED_MAX_UNCERTAINTY_US = 60000000
+PING = struct.Struct('<Q')
+PONG = struct.Struct('<QQ')
+STAR_PING_INTERVAL = 1.0
+
 
 def _enable_winmm_high_res():
     global _WINMM_HIGH_RES
@@ -141,7 +157,7 @@ class FastChannelProtocol(asyncio.Protocol):
     __slots__ = (
         'room', 'transport', 'orig_proto', 'done', 'loop',
         '_buf', 'peer_write', 'inbound_peer', 'backlog_put',
-        'fast1', 'fast2', 'valid_nbd1', '_stall_timer',
+        'fast1', 'fast2', 'valid_nbd1', '_stall_timer', 'star', 'cabinet',
     )
 
     def __init__(self, room, transport, orig_proto, loop):
@@ -158,6 +174,8 @@ class FastChannelProtocol(asyncio.Protocol):
         self.fast2 = 0
         self.valid_nbd1 = frozenset()
         self._stall_timer = None
+        self.star = False  # this is a cabinet's segment channel in a star room
+        self.cabinet = -1
 
     def _fail(self, exc):
         if self._stall_timer is not None:
@@ -181,8 +199,8 @@ class FastChannelProtocol(asyncio.Protocol):
         buf = self._buf
         peer_write = self.peer_write
         active = room.started and peer_write is not None and not room.failed
-        # Fast zero-copy path: no partial leftover bytes and fake-latency is off.
-        if not buf and self.backlog_put is None:
+        # Fast zero-copy path: no partial leftover bytes, fake-latency off, no star routing.
+        if not buf and self.backlog_put is None and not self.star:
             n = len(data)
             offset = 0
             fast1 = self.fast1
@@ -225,7 +243,9 @@ class FastChannelProtocol(asyncio.Protocol):
         fast2 = self.fast2
         valid_nbd1 = self.valid_nbd1
         backlog_put = self.backlog_put
+        star = self.star
         now = time.monotonic() if backlog_put is not None else 0.0
+        ring_start = 0  # frames in buf[ring_start:offset] still travel the ring
         while n - offset >= 8:
             size, kind_u32 = _UNPACK_U32(buf, offset)
             if not 8 <= size <= MAX_FRAME_SIZE:
@@ -241,6 +261,29 @@ class FastChannelProtocol(asyncio.Protocol):
                     or (kind_u32 == PON1_ID and size == 24)):
                 self._fail(ValueError('invalid relay data message'))
                 return
+            if star and (kind_u32 == PON1_ID or (kind_u32 == NBD1_ID and size == fast1)):
+                with memoryview(buf) as mv:
+                    try:
+                        deliveries = room.star_route(self.cabinet, kind_u32, mv[offset:offset + size])
+                    except ValueError as exc:
+                        self._fail(exc)
+                        return
+                if deliveries is not None:
+                    if backlog_put is None:
+                        if ring_start < offset:
+                            with memoryview(buf) as mv:
+                                peer_write(mv[ring_start:offset])
+                        for write, packet in deliveries:
+                            write(packet)
+                    else:
+                        try:
+                            backlog_put((now, deliveries))
+                        except asyncio.QueueFull:
+                            self._fail(ValueError('fake-latency backlog overflow'))
+                            return
+                    offset += size
+                    ring_start = offset
+                    continue
             if backlog_put is not None:
                 try:
                     with memoryview(buf) as mv:
@@ -251,9 +294,9 @@ class FastChannelProtocol(asyncio.Protocol):
             offset += size
 
         if offset > 0:
-            if backlog_put is None:
+            if backlog_put is None and ring_start < offset:
                 with memoryview(buf) as mv:
-                    peer_write(mv[:offset])
+                    peer_write(mv[ring_start:offset])
             if offset == n:
                 buf.clear()
             else:
@@ -262,9 +305,13 @@ class FastChannelProtocol(asyncio.Protocol):
     def pause_writing(self):
         # Outbound socket buffer to THIS cabinet filled past WRITE_HIGH_WATER;
         # pause reading from the cabinet feeding us until kernel buffer drains.
-        upstream = self.inbound_peer
-        if upstream is not None and upstream.transport is not None:
-            upstream.transport.pause_reading()
+        # In a star room every cabinet feeds this one.
+        if self.room.star_active:
+            self.room.star_pause(self)
+        else:
+            upstream = self.inbound_peer
+            if upstream is not None and upstream.transport is not None:
+                upstream.transport.pause_reading()
         if self._stall_timer is None:
             self._stall_timer = self.loop.call_later(
                 STALL_TIMEOUT_SEC, self._on_write_stall)
@@ -273,9 +320,12 @@ class FastChannelProtocol(asyncio.Protocol):
         if self._stall_timer is not None:
             self._stall_timer.cancel()
             self._stall_timer = None
-        upstream = self.inbound_peer
-        if upstream is not None and upstream.transport is not None:
-            upstream.transport.resume_reading()
+        if self.room.star_active:
+            self.room.star_resume(self)
+        else:
+            upstream = self.inbound_peer
+            if upstream is not None and upstream.transport is not None:
+                upstream.transport.resume_reading()
 
     def _on_write_stall(self):
         self._stall_timer = None
@@ -302,12 +352,13 @@ class FastChannelProtocol(asyncio.Protocol):
 
 
 class Channel:
-    __slots__ = ('reader', 'writer', 'hello', 'number', 'peer', 'backlog', 'proto', 'hybrid')
+    __slots__ = ('reader', 'writer', 'hello', 'number', 'peer', 'backlog', 'proto', 'hybrid', 'cabinet')
 
     def __init__(self, reader, writer, hello, number):
         self.reader, self.writer = reader, writer
         self.hello, self.number = hello, number
         self.peer = None
+        self.cabinet = -1
         self.backlog = None  # asyncio.Queue of (arrival, frame) when latency faking is on
         self.proto = None
         self.hybrid = False
@@ -332,6 +383,19 @@ class Room:
         self.can_gc = can_gc
         self.udp = None
         self.udp_sessions = []
+        self.star = False  # every member's GUI advertised star fan-out (set by the lobby)
+        self.star_active = False
+        self.star_players = []
+        self.star_writes = []  # cabinet index -> write() of its receive channel
+        self.star_clocks = {}  # cabinet index -> [(offset_us, rtt_us, relay_time_us)] window
+        self.star_pings = {}  # ping send time -> cabinet index
+        self.star_stalled = set()
+        self.star_timer = None
+        # Fan-out opens once every cabinet has originated a segment, i.e. has
+        # finished the ring handshake; earlier segments wait in arrival order.
+        self.star_open = False
+        self.star_seen = set()
+        self.star_held = []
 
     def _notify(self):
         if self.on_change is not None:
@@ -371,6 +435,18 @@ class Room:
                 for channel in channels.values():
                     channel.backlog = asyncio.Queue(maxsize=Latency.MAX_BACKLOG)
 
+        self.star_active = self.star and GAMES[self.guid][0] in STAR_GAMES
+        self.star_players = players if self.star_active else []
+        self.star_writes = [p[1].writer.transport.write for p in players] if self.star_active else []
+        self.star_clocks, self.star_pings, self.star_stalled = {}, {}, set()
+        self.star_open, self.star_seen, self.star_held = False, set(), []
+        for i, channels in enumerate(players):
+            for channel in channels.values():
+                channel.cabinet = i
+                if channel.proto is not None:
+                    channel.proto.cabinet = i
+                    channel.proto.star = self.star_active and channel.number == 0
+
         for channels in players:
             for channel in channels.values():
                 peer = channel.peer
@@ -392,13 +468,14 @@ class Room:
         if self.udp is not None:
             CONFIG = relay_udp.CONFIG
         tick_pkt = frame(b'RLT1', TICK_RATE.pack(VERSION, self.tick_rate)) if self.tick_rate != DEFAULT_TICK_RATE else b''
+        star_pkt = frame(b'RLS1', STAR.pack(VERSION, 1)) if self.star_active else b''
         for i, channels in enumerate(players):
             for number, channel in channels.items():
                 udp_pkt = b''
                 if number == 0 and udp_sessions[i] is not None:
                     udp_kind, udp_config = self.udp.config(self, udp_sessions, i)
                     udp_pkt = frame(udp_kind, udp_config)
-                channel.writer.write(channel.peer.hello + tick_pkt + udp_pkt + frame(b'RLA1', READY.pack(VERSION, i, len(players), number)))
+                channel.writer.write(channel.peer.hello + tick_pkt + star_pkt + udp_pkt + frame(b'RLA1', READY.pack(VERSION, i, len(players), number)))
             self.log(f'ASSIGN cabinet={i+1} role={"MASTER" if i==0 else "SLAVE"} car={i+1}')
         try:
             for p in players:
@@ -419,8 +496,130 @@ class Room:
             self.log(f'FAKE LATENCY active for this session: {self.latency.describe()}')
         if self.tick_rate != DEFAULT_TICK_RATE:
             self.log(f'TICK RATE active for this session: {self.tick_rate} Hz')
+        if self.star_active:
+            self.star_tick()
+            self.log('STAR FAN-OUT active for this session: ring segments delivered to every cabinet directly')
         self.log(f'STARTED {len(players)} cabinets; no late joins or live master migration')
         return True
+
+    # ---- star fan-out -------------------------------------------------------
+    @staticmethod
+    def star_now():
+        return time.monotonic_ns() // 1000
+
+    def star_tick(self):
+        """Ping every cabinet so the relay can translate segment timestamps between clocks."""
+        self.star_timer = None
+        if not self.star_active or self.failed:
+            return
+        now = self.star_now()
+        for send_time in [t for t in self.star_pings if now - t > 10000000]:
+            del self.star_pings[send_time]
+        for i, channels in enumerate(self.star_players):
+            send_time = now + i  # distinct per cabinet, still within the clock window
+            self.star_pings[send_time] = i
+            transport = channels[0].writer.transport
+            if not transport.is_closing():
+                transport.write(frame(b'PIN1', PING.pack(send_time)))
+        self.star_timer = asyncio.get_running_loop().call_later(STAR_PING_INTERVAL, self.star_tick)
+
+    def star_clock(self, cabinet):
+        """Lowest-RTT recent sample of (cabinet clock - relay clock, rtt, taken at), or None."""
+        window = self.star_clocks.get(cabinet)
+        if not window:
+            return None
+        return min(window, key=lambda sample: sample[1])
+
+    def star_route(self, cabinet, kind_u32, view):
+        """Handle one frame from a cabinet's segment channel in a star room.
+
+        Returns None if the frame travels the ring as usual, or the list of
+        (write, packet) deliveries that replace it.
+        """
+        now = self.star_now()
+        if kind_u32 == PON1_ID:
+            send_time, receive_time = PONG.unpack_from(view, 8)
+            if self.star_pings.get(send_time) != cabinet:
+                return None  # answers the downstream cabinet's own ping
+            del self.star_pings[send_time]
+            rtt = now - send_time
+            if rtt < 0 or rtt > 2000000 or receive_time > 0x7fffffffffffffff:
+                return []
+            window = self.star_clocks.setdefault(cabinet, [])
+            window.append((receive_time - (send_time + rtt // 2), rtt, now))
+            while len(window) > 8 or now - window[0][2] > 8000000:
+                window.pop(0)
+            return []
+        magic, version, header_size, segment_size, hops, source, last_hop, age, uncertainty = TIMED_HEADER.unpack_from(view, 8)
+        if magic != TIMED_MAGIC or version != 1 or header_size != 48 or segment_size + 56 != len(view) or hops != 0:
+            raise ValueError('invalid timed segment for star fan-out')
+        # Origin -> relay leg, mirroring Dayto2pe::AdvanceTimedSegment: translate
+        # the origin's send time into the relay clock and add the elapsed time.
+        clock = self.star_clock(cabinet)
+        if clock is None:
+            uncertainty = TIMED_MAX_UNCERTAINTY_US
+        else:
+            offset, rtt, taken = clock
+            local_send = last_hop - offset
+            if local_send < 0 or local_send > now + 15000 or now - local_send > TIMED_MAX_AGE_US:
+                uncertainty = TIMED_MAX_UNCERTAINTY_US
+            else:
+                age = min(TIMED_MAX_AGE_US, age + max(0, now - local_send))
+                uncertainty = min(TIMED_MAX_UNCERTAINTY_US,
+                                  uncertainty + rtt // 2 + 1000 + (now - taken) // 10000 + max(0, local_send - now))
+        count = len(self.star_players)
+        head = bytes(view[:8])
+        body = bytes(view[56:])
+        deliveries = []
+        for receiver in range(count):
+            # The receiver dates the segment with its upstream neighbour's clock
+            # (its ping/pong partner), so hand it the relay time in that clock.
+            upstream = self.star_clock((receiver - 1) % count)
+            if upstream is None or now + upstream[0] < 0:
+                last, unc = now, TIMED_MAX_UNCERTAINTY_US
+            else:
+                last = now + upstream[0]
+                unc = min(TIMED_MAX_UNCERTAINTY_US, uncertainty + upstream[1] // 2 + 1000 + (now - upstream[2]) // 10000)
+            header = TIMED_HEADER.pack(magic, version, header_size, segment_size, (receiver - cabinet - 1) % count,
+                                       source, last, age, unc)
+            deliveries.append((self.star_writes[receiver], head + header + body))
+        if not self.star_open:
+            # On the ring a cabinet's first segment follows the handshake frames
+            # on the same stream, so it can only reach cabinets that are done
+            # with setup. Hold fan-out until every cabinet has sent a segment.
+            self.star_seen.add(cabinet)
+            if len(self.star_seen) < count:
+                if len(self.star_held) >= 64 * count:
+                    raise ValueError('star fan-out held too many segments before every cabinet finished setup')
+                self.star_held.append(deliveries)
+                return []
+            self.star_open = True
+            held, self.star_held = self.star_held, []
+            deliveries = [delivery for earlier in held for delivery in earlier] + deliveries
+        return deliveries
+
+    def star_pause(self, proto):
+        if not self.star_stalled:
+            for channels in self.star_players:
+                upstream = channels[0].proto
+                if upstream is not None and upstream.transport is not None:
+                    upstream.transport.pause_reading()
+        self.star_stalled.add(proto)
+
+    def star_resume(self, proto):
+        self.star_stalled.discard(proto)
+        if not self.star_stalled:
+            for channels in self.star_players:
+                upstream = channels[0].proto
+                if upstream is not None and upstream.transport is not None and not upstream.transport.is_closing():
+                    upstream.transport.resume_reading()
+
+    def star_stop(self):
+        if self.star_timer is not None:
+            self.star_timer.cancel()
+            self.star_timer = None
+        self.star_active = False
+        self.star_players, self.star_writes, self.star_stalled = [], [], set()
 
     async def pump(self, channel):
         """Deliver one direction's frames to the peer after the fake latency."""
@@ -447,7 +646,7 @@ class Room:
                 if self.failed or peer.writer.is_closing():
                     return
                 # Coalesce any pipelined frames whose target time has also arrived.
-                batch = None
+                items = [raw]
                 while not queue.empty():
                     next_arrival, _ = queue._queue[0]
                     next_target = next_arrival + sample()
@@ -456,11 +655,24 @@ class Room:
                     if next_target > now:
                         break
                     last = next_target
-                    _, next_raw = queue.get_nowait()
-                    if batch is None:
-                        batch = bytearray(raw)
-                    batch.extend(next_raw)
-                peer_write(bytes(batch) if batch is not None else raw)
+                    items.append(queue.get_nowait()[1])
+                # An item is either ring bytes for the peer or a star fan-out
+                # list of (write, packet); wire order is kept either way.
+                batch = None
+                for item in items:
+                    if isinstance(item, bytes):
+                        if batch is None:
+                            batch = bytearray(item)
+                        else:
+                            batch.extend(item)
+                        continue
+                    if batch is not None:
+                        peer_write(bytes(batch))
+                        batch = None
+                    for write, packet in item:
+                        write(packet)
+                if batch is not None:
+                    peer_write(bytes(batch))
                 if peer_transport.get_write_buffer_size() > WRITE_HIGH_WATER:
                     await asyncio.sleep(0)
         except asyncio.CancelledError:
@@ -475,6 +687,7 @@ class Room:
         if self.udp is not None:
             self.udp.unregister(self)
         self.stop_pumps()
+        self.star_stop()
         self.log(f'ROOM FAILED: {reason}. Create a new lobby and restart all clients.')
         err_pkt = frame(b'RLE1', struct.pack('<II', 5, 0))
         for channels in self.players.values():
@@ -494,6 +707,7 @@ class Room:
         if self.udp is not None:
             self.udp.unregister(self)
         self.stop_pumps()
+        self.star_stop()
         writers = [c.writer for channels in self.players.values() for c in channels.values()]
         self.players.clear()
         self.guid = None
@@ -590,11 +804,17 @@ class Room:
                          (kind == b'NBD1' and len(body) in (0, 1, 2, 8, 48, 56, segment_size, timed_segment_size)))
                 if not valid:
                     raise ValueError('invalid relay data message')
+                deliveries = None
+                if self.star_active and channel.number == 0 and (kind == b'PON1' or (kind == b'NBD1' and len(body) == timed_segment_size)):
+                    deliveries = self.star_route(channel.cabinet, int.from_bytes(kind, 'little'), memoryview(raw))
                 if channel.backlog is not None:
                     try:
-                        channel.backlog.put_nowait((time.monotonic(), raw))
+                        channel.backlog.put_nowait((time.monotonic(), raw if deliveries is None else deliveries))
                     except asyncio.QueueFull:
                         raise ValueError('fake-latency backlog overflow')
+                elif deliveries is not None:
+                    for write, packet in deliveries:
+                        write(packet)
                 else:
                     peer_writer = channel.peer.writer
                     peer_writer.write(raw)
@@ -805,9 +1025,10 @@ relay_udp=_bundled_module('relay_udp',r'''
 """Bounded UDP race-snapshot lane. GPL-3.0-or-later.
 
 TCP owns authorization, link setup, race-start control, chat and session
-lifetime. During a race each cabinet sends its whole snapshot by UDP only
-(latest wins, never resent) and the TCP ring stays silent except for a
-keyframe when race state changes. Clients fall back to the TCP ring by
+lifetime. During a race each cabinet sends its snapshot by UDP only (latest
+wins, never resent) and the TCP ring stays silent except for a keyframe when
+race state changes. Snapshots are usually XOR deltas against that keyframe;
+the relay forwards opaque bytes and never needs the keyframe itself. Clients fall back to the TCP ring by
 themselves whenever any cabinet stops confirming UDP delivery. Bearer
 cookies protect against off-path injection, NOT eavesdropping/on-path attackers.
 Use the same trusted VPN/firewall as the TCP relay. Standard library / PyPy3.
@@ -821,9 +1042,10 @@ import socket
 HEADER = struct.Struct('<4sBBBB16sIHHQ')
 DATAGRAM = 1200
 CHUNK = DATAGRAM - HEADER.size
-# Largest native segment (3264) + 24-byte client trailer + 1 encoding byte.
-MAX_ENCODED = 3289
-WIRE_VERSION = 3
+# Largest native segment (3264) + 32-byte client trailer + 102-byte streamed-word
+# mask + 1 encoding byte.
+MAX_ENCODED = 3399
+WIRE_VERSION = 5
 ACK_CLOCK = struct.Struct('<Q')  # relay monotonic microseconds appended to every ACK
 HELLO, ACK, SNAPSHOT, HOST_STATUS, ROUTE = 1, 2, 3, 4, 5
 CONFIG = struct.Struct('<IIII16s')
@@ -1057,6 +1279,9 @@ MEMBER = struct.Struct('<I32s')
 LAUNCH = struct.Struct('<IIII16s')  # room, game, reserved index, count, one-session ticket
 JOIN2 = struct.Struct('<II16sQ16s')
 CHAT_SEND = struct.Struct('<160s')
+POLL2 = struct.Struct('<QI')  # OLQ2: client stamp (echoed in OLP2), client's last measured RTT to this host in ms (0 = unknown)
+PING_ROW = struct.Struct('<II')  # ORP1 rows: member id, RTT ms to the room host (0 = unknown)
+MAX_PING_MS = 9999
 CHAT_MSG = struct.Struct('<III32s160s')  # seq, scope (0=lounge, >0=room.id), car (0..16), sender, text
 CHAT_JOIN = struct.Struct('<I16s32s')  # version, one-session ticket, fallback name
 CHAT_WELCOME = struct.Struct('<III32s64s')  # room, car (1..16), count, assigned name, room title
@@ -1238,6 +1463,11 @@ class Hub:
                 self.send(c, b'OLU1', struct.pack('<III', room.id, getattr(room.board, 'host_udp_port', 0), 1 if getattr(room.board, 'host_udp_port', 0) else 0))
             if c.get('options_capable'):
                 self.send(c, b'ORO1', struct.pack('<II', room.id, room.options))
+            if c.get('ping_capable'):
+                # Each member's RTT to this host (what it reported in its last OLQ2); 0 = not measured yet.
+                body = struct.pack('<II', room.id, len(members))
+                body += b''.join(PING_ROW.pack(m['id'], m.get('ping_ms', 0) if room.state == 0 or m['id'] in self.clients else 0) for m in members)
+                self.send(c, b'ORP1', body)
             if c.get('native_capable') and not (room.host_mode == 3 and room.directory_ready):
                 enabled = all_native(room)
                 body = struct.pack('<III', room.id, int(enabled), len(members))
@@ -1316,6 +1546,7 @@ class Hub:
         room.state = 1
         room.deadline = time.monotonic() + self.launch_timeout
         room.board.guid = GAMES[room.game][1]
+        room.board.star = all(m.get('star_capable') for m in room.members)
         # Reserve native cabinet order BEFORE any emulator sockets arrive.
         # Fast slaves cannot become MASTER by completing their ROM load first.
         for index, member in enumerate(room.members):
@@ -1496,6 +1727,12 @@ class Hub:
         if kind == b'OLQ1' and not body:
             self.snapshot(c)
             return
+        if kind == b'OLQ2' and len(body) == POLL2.size and c.get('ping_capable'):
+            stamp, rtt = POLL2.unpack(body)
+            c['ping_ms'] = min(rtt, MAX_PING_MS)
+            self.send(c, b'OLP2', struct.pack('<Q', stamp))  # echoed first so the client's RTT excludes the snapshot
+            self.snapshot(c)
+            return
         if kind == b'OLL1' and not body:
             await self.leave(c)
             self.snapshot(c)
@@ -1616,13 +1853,18 @@ class Hub:
         if len(body) != HELLO.size:
             raise ValueError('lobby hello size')
         version, mask, enabled, name = HELLO.unpack(body)
-        if version != VERSION or enabled not in (0, 1, 2, 3, 6, 7, 14, 15, 22, 23, 32, 33, 34, 35, 38, 39, 46, 47, 54, 55) or mask & ~((1 << len(GAMES)) - 1) or len(self.clients) >= 64:
+        # Capability bits: 1 AsyncNet, 2 room options, 4 native settings, 8 (reserved), 16 Hornet,
+        # 32 race options, 64 star fan-out, 128 ping (OLQ2 poll / OLP2 echo / ORP1 rows).
+        if version != VERSION or enabled & ~255 or mask & ~((1 << len(GAMES)) - 1) or len(self.clients) >= 64:
             raise ValueError('lobby version/limit/flags')
         c = dict(id=self.next_client, writer=writer, name=text(name, 'Player'), mask=mask, async_=bool(enabled & 1), room=0)
         c['options_capable'] = bool(enabled & 2)
         c['native_capable'] = bool(enabled & 4)
         c['hornet_capable'] = bool(enabled & 16)  # course-selection semantics; old car shortcut is not compatible
         c['race_capable'] = bool(enabled & 32)
+        c['star_capable'] = bool(enabled & 64)  # accepts RLS1: the relay fans ring segments out, the client does not forward
+        c['ping_capable'] = bool(enabled & 128)  # polls with OLQ2 and shows ORP1 pings in the room
+        c['ping_ms'] = 0
         c['async'] = c.pop('async_')
         c['host_capable'] = host_capable
         c['full_host_capable'] = full_host_capable

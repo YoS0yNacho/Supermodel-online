@@ -42,11 +42,11 @@ public:
   auto it=clients.find(id);
   if(it==clients.end()){
    Client c;c.id=id;
-   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~127u)==0&&(Read(b+8)==1||Read(b+8)==3||Read(b+8)==7||Read(b+8)==15||Read(b+8)==23||Read(b+8)==33||Read(b+8)==35||Read(b+8)==39||Read(b+8)==47||Read(b+8)==55)&&state==0&&!closed){
+   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~127u)==0&&(Read(b+8)&1)&&!(Read(b+8)&~255u)/*AsyncNet + capability bits 2,4,16,32,64,128*/&&state==0&&!closed){
     bool owner=std::memcmp(b+44,settings.owner.data(),16)==0;
     if(!(Read(b+4)&(1u<<settings.game))||(!owner&&(!order.size()||!Zero(b+44)))||(owner&&ownerId)||order.size()>=Capacity())return false;
     if(owner&&ntohl(ip)!=0x7f000001)return false;
-    c.optionsCapable=(Read(b+8)&2)!=0;c.nativeCapable=(Read(b+8)&4)!=0;c.hornetCapable=(Read(b+8)&16)!=0;c.raceCapable=(Read(b+8)&32)!=0;
+    c.optionsCapable=(Read(b+8)&2)!=0;c.nativeCapable=(Read(b+8)&4)!=0;c.hornetCapable=(Read(b+8)&16)!=0;c.raceCapable=(Read(b+8)&32)!=0;c.pingCapable=(Read(b+8)&128)!=0;
     if(owner && c.nativeCapable)options=NativeRoomSettings::Defaults(settings.game);
     if((options&NativeRoomSettings::Enabled)&&!c.nativeCapable){Error(id,"Update this client: native room settings are enabled.");return false;}
     if(NativeRoomSettings::CarLimit(settings.game)){for(unsigned car=1;car<=NativeRoomSettings::CarLimit(settings.game);++car){bool used=false;for(auto member:order)used|=clients.at(member).nativeCar==car;if(!used){c.nativeCar=car;break;}}}
@@ -71,6 +71,7 @@ public:
   auto& c=it->second;auto now=Now();if(now-c.window>=1000000){c.window=now;c.requests=0;}if(++c.requests>24||closed)return false;
   if(c.role==1){
    if(kind=="OLQ1"&&!n){Snapshot(id);return true;}
+   if(kind=="OLQ2"&&n==12&&c.pingCapable){c.pingMs=std::min<uint32_t>(Read(b+8),9999);Bytes e(b,b+8);send(id,Frame("OLP2",e));Snapshot(id);return true;}
    if(kind=="OLS1"&&n==160){Post(Car(id),c.name,Chat(b,n));return true;}
    if(kind=="OLL1"&&!n){Drop(id);return false;}
    if(kind=="ORO1"&&n==8){
@@ -122,7 +123,7 @@ public:
   if(started&&state==1){state=2;Broadcast();}listedState=state;listedCount=unsigned(order.size());
  }
 private:
- struct Client {uint32_t id=0,number=0,car=0,nativeCar=0;unsigned role=0,requests=0;bool optionsCapable=false,nativeCapable=false,hornetCapable=false,raceCapable=false;uint64_t window=Now();std::string name;};
+ struct Client {uint32_t id=0,number=0,car=0,nativeCar=0,pingMs=0;unsigned role=0,requests=0;bool optionsCapable=false,nativeCapable=false,hornetCapable=false,raceCapable=false,pingCapable=false;uint64_t window=Now();std::string name;};
  struct Frozen {Member auth;std::string name;uint32_t number=0,rank=0,rankOwner=0,nativeCar=0;uint64_t rankTime=0;};
  Settings settings;Send send;Launch launch;std::map<uint32_t,Client> clients;std::vector<uint32_t> order;std::vector<Frozen> frozen;std::vector<Bytes> history;
  uint32_t ownerId=0,nextMember=1,seq=1,state=0,options=0;bool closed=false,launchPending=false,frozenNative=false;uint64_t deadline=0;
@@ -138,6 +139,8 @@ private:
   if(state){for(auto& f:frozen){Put(b,f.number);Text(b,f.name,32);}}else for(auto member:order){Put(b,clients.at(member).number);Text(b,clients.at(member).name,32);}send(id,Frame("OLR1",b));b.clear();Put(b,settings.id);Put(b,settings.port);Put(b,3);Put(b,0);send(id,Frame("OLU2",b));if(it->second.optionsCapable){b.clear();Put(b,settings.id);Put(b,options);send(id,Frame("ORO1",b));}
   if(it->second.nativeCapable){b.clear();Put(b,settings.id);Put(b,AllNative()?1:0);Put(b,uint32_t(order.size()));
    for(size_t i=0;i<order.size();++i){Put(b,state?frozen[i].number:clients.at(order[i]).number);Put(b,AllNative()?(state?frozen[i].nativeCar:clients.at(order[i]).nativeCar):0);}send(id,Frame("ORN1",b));}
+  if(it->second.pingCapable){b.clear();Put(b,settings.id);Put(b,uint32_t(order.size()));
+   for(size_t i=0;i<order.size();++i){if(state){Put(b,frozen[i].number);Put(b,0);}else{Put(b,clients.at(order[i]).number);Put(b,clients.at(order[i]).pingMs);}}send(id,Frame("ORP1",b));}
   send(id,Frame("OLZ1"));
  }
  void Broadcast(){for(auto& c:clients)if(c.second.role==1)Snapshot(c.first);listedCount=unsigned(order.size());listedState=state;}

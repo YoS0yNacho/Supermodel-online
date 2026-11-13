@@ -17,7 +17,11 @@ inline bool IsSupportedGame(const std::string& game) {
   return game == "srally2";
 }
 
-// Preserve ring self-echo because native selection barriers inspect returning slots.
+// Preserve ring self-echo because native selection barriers inspect returning
+// slots: the local slot is filled from the returning ring echo, the game sees
+// at most one segment per slot per frame (CSimNetBoard publication rule), and
+// the UDP lane never replaces the TCP ring. Hops are still forwarded by the
+// receive thread or fanned out by the relay like every other timed-segment game.
 inline bool PreserveRingSelfEcho(const std::string& game) {
   return IsSupportedGame(game);
 }

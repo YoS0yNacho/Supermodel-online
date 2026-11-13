@@ -25,6 +25,7 @@ public:
  }
  ~Host() { if(socket) SDLNet_UDP_Close(socket); }
  bool Available() const { return socket!=nullptr; }
+ UDPsocket Socket() const { return socket; }
  Host(const Host&)=delete;Host& operator=(const Host&)=delete;
  void Poll(UDPpacket* rx,UDPpacket* tx,uint64_t now) {
   if(!socket) return;

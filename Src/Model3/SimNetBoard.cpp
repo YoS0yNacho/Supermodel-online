@@ -524,18 +524,20 @@ void CSimNetBoard::RunFrame(void)
 			}
 		}
 
-		// swap CommRAM banks
+		// swap CommRAM banks; the bank the game gets next starts a new write record
 		if (m_commbank)
 		{
 			m_commbank = false;
 			CommRAM = Buffer;
 			externalCommRAM = Buffer + 0x10000;
+			m_bankWriteFirstUs[1] = m_bankWriteLastUs[1] = 0;
 		}
 		else
 		{
 			m_commbank = true;
 			CommRAM = Buffer + 0x10000;
 			externalCommRAM = Buffer;
+			m_bankWriteFirstUs[0] = m_bankWriteLastUs[0] = 0;
 		}
 		
 		break;
@@ -552,6 +554,7 @@ void CSimNetBoard::AsyncError(const char* reason)
 {
 	m_onlineFailed.store(true);
 	ErrorLog("Async net board: %s", reason);
+	m_link->DisableEarlyForward();
 	m_link->Send(nullptr, 0); // propagate failure around the ring once
 	m_state = State::error;
 	m_gameNet.OnFailure();
@@ -777,6 +780,22 @@ void CSimNetBoard::FinishAsyncTesting()
 	m_asyncProgress = std::chrono::steady_clock::now();
 	if (!ConfigureGameNet()) return;
 	m_asyncInFlight = false;
+	// Timed-segment games forward peer hops from the receive thread as soon as
+	// they arrive. Forwarding is not game-visible: what Sega Rally 2's barriers
+	// need is that the game sees every segment of every slot, which the
+	// publication rule in the receive loop below guarantees (one segment per
+	// slot per frame, the returning self echo closing the round). When the
+	// relay fans segments out itself (RLS1) nothing is forwarded: every
+	// segment arrives straight from the relay with the hop count of its slot.
+	if (m_gameNet.UseTimedSegments())
+	{
+		const bool star = m_relay && m_link->RelayStar();
+		m_link->EnableEarlyForward(m_segmentSize, m_numMachines, !star);
+		InfoLog("Async net board: %s (%u machines, %u-byte segments)",
+			star ? "relay star fan-out, no ring forwarding" : "early forwarding of ring segments enabled", m_numMachines, unsigned(m_segmentSize));
+	}
+	else
+		m_link->DisableEarlyForward();
 	m_state = State::ready;
 }
 
@@ -822,9 +841,13 @@ void CSimNetBoard::RunAsyncExchange()
 			const uint64_t interval = 1000000ULL / m_tickRateHz;
 			// A peer counts as heard for 3.5 ticks (at least 150 ms) after its last snapshot.
 			const uint64_t stampUs = NextSourceStampUs(udpNow);
+			const std::vector<uint8_t> mask = StreamedMask();
+			uint64_t sampleAgeUs = 0, sampleUncertaintyUs = 0;
+			SampleTiming(udpNow, sampleAgeUs, sampleUncertaintyUs);
 			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize, stampUs,
 				std::max<uint64_t>(150000ULL, interval * 7 / 2),
-				(m_udpPrimary && ControlMessagePending()) ? stampUs : m_asyncLastTcpSourceUs);
+				(m_udpPrimary && ControlMessagePending()) ? stampUs : m_asyncLastTcpSourceUs,
+				mask.empty() ? nullptr : &mask, sampleAgeUs, sampleUncertaintyUs);
 			m_udpNextSendUs = m_udpNextSendUs && udpNow - m_udpNextSendUs < interval
 				? m_udpNextSendUs + interval : udpNow + interval;
 		}
@@ -876,9 +899,13 @@ void CSimNetBoard::RunAsyncExchange()
 			m_asyncLastTcpSourceUs = sourceStampUs;
 			++m_statTcpOriginated;
 			if (m_udpPrimary) NoteControlMessage();
-			auto wire = Dayto2pe::MakeTimedSegment(CommRAM + 0x100, m_segmentSize, nowUs, uint32_t(FrameDurationUs() + 0.5), sourceStampUs);
+			uint64_t sampleAgeUs = 0, sampleUncertaintyUs = 0;
+			SampleTiming(nowUs, sampleAgeUs, sampleUncertaintyUs);
+			auto wire = Dayto2pe::MakeTimedSegment(CommRAM + 0x100, m_segmentSize, nowUs, sampleUncertaintyUs, sourceStampUs, sampleAgeUs);
 			m_link->Send(wire.data(), wire.size());
 			m_asyncLastSent.assign(CommRAM + 0x100, CommRAM + 0x100 + m_segmentSize);
+			// Candidate delta base for UDP snapshots; it is used once its echo returns.
+			if (m_relay) m_link->NoteUdpLocalKeyframe(sourceStampUs, m_asyncLastSent.data(), m_segmentSize);
 			m_asyncLastSendUs = nowUs;
 			m_asyncSendFrames.push_back(m_gameNet.m_predictionFrame);
 			if (idle)
@@ -892,10 +919,24 @@ void CSimNetBoard::RunAsyncExchange()
 		}
 
 		const unsigned maxBudget = 8u * unsigned(m_numMachines) + 16u + m_gameNet.ControlBudget();
+		uint32_t publishedSlots = 0; // slots given a segment this frame
 		for (unsigned budget = 0; budget < maxBudget; budget++)
 		{
+			// Sega Rally 2 publication rule: a slot gets at most one segment per
+			// frame, so a value held for a single segment (its barriers pulse
+			// acknowledgements that way) is never overwritten before the game has
+			// seen it. The next segment waits in the queue for the next frame; the
+			// receive thread has already forwarded it, so peers are not delayed.
+			// A long backlog (more than three rounds) is drained freely to catch up.
+			if (m_gameNet.m_preserveRingSelfEcho && m_link->QueueSize() <= 3u * size_t(m_numMachines))
+			{
+				uint32_t nextSlot = 0;
+				if (m_link->PeekNextSlot(m_segmentSize, nextSlot) && nextSlot < 32 && (publishedSlots & (1u << nextSlot)))
+					break;
+			}
 			std::vector<uint8_t> data;
-			const auto result = m_link->TryReceive(data);
+			CNetBoardLink::PacketInfo info;
+			const auto result = m_link->TryReceive(data, info);
 			if (result == CNetBoardLink::ReceiveResult::Pending)
 			{
 				if (AsyncTimedOut())
@@ -910,9 +951,14 @@ void CSimNetBoard::RunAsyncExchange()
 			}
 
 			uint32_t incomingHops = 0;
-			if (result == CNetBoardLink::ReceiveResult::Closed ||
-				!Dayto2pe::ReadTimedSegmentHops(data, m_segmentSize, incomingHops) ||
-				incomingHops >= m_numMachines)
+			bool validHops = result == CNetBoardLink::ReceiveResult::Data &&
+				Dayto2pe::ReadTimedSegmentHops(data, m_segmentSize, incomingHops);
+			if (validHops && info.advanced)
+			{
+				// The receive thread already counted this hop (hops+1) when it forwarded.
+				if (incomingHops == 0) validHops = false; else --incomingHops;
+			}
+			if (!validHops || incomingHops >= m_numMachines)
 			{
 				char detail[160];
 				snprintf(detail, sizeof(detail),
@@ -924,13 +970,16 @@ void CSimNetBoard::RunAsyncExchange()
 			}
 
 			const uint64_t measurementNowUs = AsyncNowUs();
-			const auto clock = m_link->GetIncomingClock();
-			const uint64_t clockAge = clock.received <= measurementNowUs ? measurementNowUs - clock.received : UINT64_MAX;
-			if (!Dayto2pe::AdvanceTimedSegment(data, m_segmentSize, measurementNowUs, clock.offset,
-				clock.rtt, clockAge))
+			if (!info.advanced)
 			{
-				AsyncError("invalid timed-segment metadata");
-				return;
+				const auto clock = m_link->GetIncomingClock();
+				const uint64_t clockAge = clock.received <= measurementNowUs ? measurementNowUs - clock.received : UINT64_MAX;
+				if (!Dayto2pe::AdvanceTimedSegment(data, m_segmentSize, measurementNowUs, clock.offset,
+					clock.rtt, clockAge))
+				{
+					AsyncError("invalid timed-segment metadata");
+					return;
+				}
 			}
 			const uint8_t* payload = nullptr;
 			uint64_t ageUs = 0, uncertaintyUs = Dayto2pe::MaxTimingUncertaintyUs;
@@ -939,12 +988,17 @@ void CSimNetBoard::RunAsyncExchange()
 				AsyncError("invalid timed-segment payload");
 				return;
 			}
+			// An early-forwarded segment was aged up to its arrival; add the time it
+			// then waited in the queue for this frame.
+			if (info.advanced && measurementNowUs > info.receivedUs)
+				ageUs = std::min<uint64_t>(10000000, ageUs + (measurementNowUs - info.receivedUs));
 
 			m_asyncProgress = std::chrono::steady_clock::now();
 			m_asyncUnackedFromPeer = 0;
 
-			// Forward peer segments without waiting for the self-echo.
-			if (incomingHops + 1 < m_numMachines)
+			// Forward peer segments without waiting for the self-echo (unless the
+			// receive thread already did, or the relay fans segments out itself).
+			if (!info.advanced && incomingHops + 1 < m_numMachines && !(m_relay && m_link->RelayStar()))
 				m_link->Send(data.data(), data.size());
 
 			const size_t offset = size_t(incomingHops) * m_segmentSize;
@@ -956,6 +1010,9 @@ void CSimNetBoard::RunAsyncExchange()
 				memcpy(m_asyncKeyframe.data() + offset, payload, m_segmentSize);
 				m_asyncKeyframeValid[incomingHops] = 1;
 				m_asyncKeyframeSourceUs[incomingHops] = sourceUs;
+				// The same bytes undo that cabinet's UDP deltas built on this segment.
+				if (m_relay && incomingHops + 1 < m_numMachines)
+					m_link->SetUdpPeerBase(UdpOriginForSlot(incomingHops), sourceUs, payload, m_segmentSize);
 			}
 			// A newer UDP snapshot may already fill this slot; never step back in time.
 			if (sourceUs >= m_asyncLatestSourceUs[incomingHops] || incomingHops + 1 == m_numMachines)
@@ -966,11 +1023,32 @@ void CSimNetBoard::RunAsyncExchange()
 				m_asyncLatestSourceUs[incomingHops] = sourceUs;
 			}
 			else
+			{
+				// A newer UDP snapshot was applied with this slot's previous control
+				// words (streamed words only). Take the control words from this
+				// reliable segment so no control value is skipped.
 				++m_statTcpStaleSkipped;
+				MergeControlWords(incomingHops, payload);
+			}
 			m_asyncWorkingReceiveUs[incomingHops] = measurementNowUs;
+			if (incomingHops < 32) publishedSlots |= 1u << incomingHops;
 
 			if (incomingHops + 1 == m_numMachines)
 			{
+				// Our own segment is back: every cabinet holds it, so UDP deltas may use it.
+				if (m_relay) m_link->CommitUdpLocalKeyframe(sourceUs);
+				if (measurementNowUs >= sourceUs) { m_statRingRttSumUs += measurementNowUs - sourceUs; ++m_statRingRttCount; }
+				if (m_relay && measurementNowUs - m_linkStatsLogUs >= 10000000)
+				{
+					// Periodic link summary for real-ROM sessions (ring RTT is send stamp -> self-echo).
+					if (m_linkStatsLogUs)
+						InfoLog("Async net board: link stats: %s, %llu ring round trips, mean RTT %.1f ms, %llu segments forwarded by the receive thread, predictor inputs from UDP %llu (%llu timed), UDP snapshots applied to CommRAM %llu",
+							m_link->RelayStar() ? "relay star fan-out" : "ring", (unsigned long long)m_statRingRttCount,
+							m_statRingRttCount ? double(m_statRingRttSumUs) / double(m_statRingRttCount) / 1000.0 : 0.0,
+							(unsigned long long)m_link->EarlyForwarded(), (unsigned long long)m_statUdpPresentation,
+							(unsigned long long)m_statUdpPresentationTimed, (unsigned long long)m_statUdpApplied);
+					m_linkStatsLogUs = measurementNowUs;
+				}
 				if (!m_asyncSendFrames.empty())
 				{
 					m_gameNet.m_asyncRoundStartFrame = m_asyncSendFrames.front();
@@ -1076,6 +1154,8 @@ void CSimNetBoard::Reset(void)
 	m_udpClassNextUs = 0;
 	m_asyncKeyframe.clear();
 	m_asyncKeyframeValid.clear();
+	if (m_link) m_link->DisableEarlyForward();
+	if (m_relay && m_link) m_link->ClearUdpBases();
 	m_asyncPhase = AsyncPhase::start;
 	m_asyncInFlight = false;
 	m_asyncInFlightCount = 0;
@@ -1171,16 +1251,52 @@ uint32_t CSimNetBoard::ReadCommRAM32(unsigned addr)
 void CSimNetBoard::WriteCommRAM8(unsigned addr, uint8_t data)
 {
 	externalCommRAM[addr] = data;
+	NoteSegmentWrite(addr);
 }
 
 void CSimNetBoard::WriteCommRAM16(unsigned addr, uint16_t data)
 {
 	*(uint16_t*)&externalCommRAM[addr] = data;
+	NoteSegmentWrite(addr);
 }
 
 void CSimNetBoard::WriteCommRAM32(unsigned addr, uint32_t data)
 {
 	*(uint32_t*)&externalCommRAM[addr] = data;
+	NoteSegmentWrite(addr);
+}
+
+void CSimNetBoard::NoteSegmentWrite(unsigned addr)
+{
+	if (!m_async || m_state != State::ready || !m_segmentSize ||
+		addr < 0x100 || addr >= 0x100 + unsigned(m_segmentSize)) return;
+	const unsigned bank = externalCommRAM == Buffer ? 0 : 1;
+	const uint64_t now = AsyncNowUs();
+	if (!m_bankWriteFirstUs[bank]) m_bankWriteFirstUs[bank] = now;
+	m_bankWriteLastUs[bank] = now;
+}
+
+// Age and uncertainty of the local segment about to be sent from CommRAM. The
+// game wrote it while this bank was external, i.e. before the previous bank
+// swap; the write times make that one to two frames explicit instead of
+// stamping the pick-up time with a whole frame of uncertainty. Without a
+// write in the last few frames (unchanged data, or writes that bypass the
+// hooks) the old conservative stamp is used.
+void CSimNetBoard::SampleTiming(uint64_t nowUs, uint64_t& ageUs, uint64_t& uncertaintyUs) const
+{
+	const unsigned bank = CommRAM == Buffer ? 0 : 1;
+	const uint64_t first = m_bankWriteFirstUs[bank], last = m_bankWriteLastUs[bank];
+	const uint64_t frameUs = uint64_t(FrameDurationUs() + 0.5);
+	if (last && first && first <= last && nowUs >= last && nowUs - last <= 4 * frameUs)
+	{
+		ageUs = nowUs - last;
+		uncertaintyUs = (last - first) + 1000; // write burst span plus a scheduling allowance
+	}
+	else
+	{
+		ageUs = 0;
+		uncertaintyUs = frameUs;
+	}
 }
 
 uint16_t CSimNetBoard::ReadIORegister(unsigned reg)

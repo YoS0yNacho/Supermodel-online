@@ -20,8 +20,9 @@ int main(int argc,char**argv) {
   assert(argc==2);uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
   {
     std::string defHost; uint16_t defPort=0;
-    assert(std::string(Online::DefaultRelayHost)=="onlinetest-useast.viewdns.net");
-    assert(std::string(Online::DefaultRelayEndpoint)=="onlinetest-useast.viewdns.net:1970");
+    // Defaults moved to ServerDefaults.h: check consistency, not a hard-coded host.
+    assert(std::string(Online::DefaultRelayEndpoint)==std::string(Online::DefaultRelayHost)+":"+std::to_string(Online::DefaultRelayPort));
+    assert(std::string(Online::DefaultRelayEndpoints[0])==Online::DefaultRelayEndpoint);
     assert(Online::DefaultRelayPort==1970);
     assert(std::string(Online::DefaultPlayerName)=="Player");
     assert(RelayProtocol::ParseEndpoint(Online::DefaultRelayEndpoint,defHost,defPort)&&defHost==Online::DefaultRelayHost&&defPort==Online::DefaultRelayPort);
@@ -52,6 +53,14 @@ int main(int argc,char**argv) {
     assert(slave.Get().roomChat.back().car==1&&slave.Get().roomChat.back().text=="Lobby ready!");
     slave.SendChat("Joined as car 2!");
     Wait([&]{return master.Get().roomChat.size()>=2&&master.Get().roomChat.back().car==2;});
+    if(game==0) {
+      // Lobby ping: each client measures its own RTT from the OLQ2/OLP2 poll and the
+      // relay lists every member's reported RTT (ORP1) in the room snapshot.
+      auto roomPings=[&](const Online::Snapshot& v){std::vector<uint32_t> p;for(const auto& r:v.rooms)if(r.id==room)for(const auto& m:r.members)p.push_back(m.pingMs);return p;};
+      auto both=[&]{auto p=roomPings(master.Get()),q=roomPings(slave.Get());return p.size()==2&&q.size()==2&&p[0]>0&&p[1]>0&&q[0]>0&&q[1]>0;};
+      Wait([&]{return master.Get().pingMs>0&&slave.Get().pingMs>0&&both();});
+      assert(master.Get().pingMs<=9999&&slave.Get().pingMs<=9999); // both views carry every member's reported RTT
+    }
     slave.Start(room);Wait([&]{return !slave.Get().error.empty();});assert(!slave.Get().launch);
     master.Start(room);Wait([&]{return master.Get().launch&&slave.Get().launch;});
     auto a=master.Get(),b=slave.Get();assert(a.game==game&&b.game==game&&a.index==0&&b.index==1&&a.count==2&&b.count==2&&a.ticket!=b.ticket);

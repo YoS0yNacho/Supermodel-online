@@ -134,6 +134,54 @@ async def main():
             await hub.destroy(hub.rooms[room_id], 'test complete')
             print(f'PASS {online.GAMES[game][0]} master authorization, frozen role order, capability/game rejection, raw forwarding, disconnect, legacy isolation')
 
+        # Lobby ping: OLQ2 polls carry a stamp and the client's last RTT; the hub echoes the
+        # stamp (OLP2) before the snapshot and lists every member's RTT in ORP1 rows.
+        pinger = await client(name='Pinger', enabled=1 | 128)
+        peer = await client(name='Peer', enabled=1 | 128)
+        plain = await client(name='Plain', enabled=1)
+        ping_room = await pinger.create(2)
+        await peer.join(ping_room)
+        await plain.join(ping_room)
+        async def poll(cl, stamp, rtt):
+            cl.send(b'OLQ2', online.POLL2.pack(stamp, rtt))
+            assert struct.unpack('<Q', await cl.until(b'OLP2'))[0] == stamp
+            rows = {}
+            while True:
+                kind, data, _ = await cl.next()
+                if kind == b'ORP1':
+                    room, count = struct.unpack_from('<II', data)
+                    rows[room] = dict(online.PING_ROW.unpack_from(data, 8 + 8 * i) for i in range(count))
+                elif kind == b'OLZ1':
+                    return rows
+        assert (await poll(pinger, 0x1122334455667788, 17))[ping_room][pinger.ident] == 17
+        rows = await poll(peer, 42, 250)
+        assert rows[ping_room] == {pinger.ident: 17, peer.ident: 250, plain.ident: 0}
+        assert (await poll(pinger, 43, 20000))[ping_room][pinger.ident] == 9999  # clamped
+        plain.send(b'OLQ1')  # old clients: no ORP1 rows, no OLP2
+        kinds = []
+        while True:
+            kind, _, _ = await plain.next()
+            kinds.append(kind)
+            if kind == b'OLZ1': break
+        assert b'ORP1' not in kinds and b'OLP2' not in kinds
+        plain.send(b'OLQ2', online.POLL2.pack(1, 1))  # a client that did not advertise the capability is dropped
+        try:
+            await plain.next()
+            raise AssertionError('OLQ2 without the ping capability accepted')
+        except asyncio.IncompleteReadError:
+            pass
+        bogus = await asyncio.open_connection('127.0.0.1', port)
+        bogus[1].write(relay.frame(b'HEL1', b'x') + relay.frame(b'OEH6', online.HELLO.pack(1, 127, 1 | 256, online.fixed('Bogus', 32))))
+        try:  # rejected before any greeting
+            kind, _, _ = await asyncio.wait_for(relay.read_frame(bogus[0]), 3)
+            assert kind != b'HEL1', 'unknown capability bit accepted'
+        except asyncio.IncompleteReadError:
+            pass
+        bogus[1].close()
+        for cl in (pinger, peer): cl.close()
+        await wait_for(lambda: ping_room not in hub.rooms)
+        print('PASS lobby ping: OLQ2 stamp echo, ORP1 rows per member, clamp, legacy poll unchanged, unknown capability rejected')
+
         # srally2 supports the role encodings for at most four cabinets.
         rally = [await client(name=f'Rally{i}') for i in range(5)]
         rally_room = await rally[0].create(4)

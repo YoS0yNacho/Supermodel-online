@@ -2085,6 +2085,7 @@ static void Help(void)
   puts("  -emulate-netboard       Emulate the net board (requires -no-threads)");
   puts("  -async-netboard         Use asynchronous net-board exchange");
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
+  puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
          "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
   printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
@@ -2164,6 +2165,8 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-port-out",              "PortOut"                 },
     { "-address-out",           "AddressOut"              },
     { "-relay",                 "NetRelay"                },
+    { "-game-relay",            "NetGameRelay"            },
+    { "-lobby-ticket",          "NetRelayTicket"          },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };
@@ -2494,7 +2497,21 @@ static int RunSession(int argc, char **argv)
       ErrorLog("Invalid relay endpoint: use host:port with a port from 1 to 65535.");
       return 1;
     }
-    loadGUI = true;
+    // Headless lobby launch (test rigs): a one-session ticket obtained out of
+    // band (-lobby-ticket=<32 hex>) joins the already-started room directly,
+    // exactly as the Online tab would after its launch message, without the GUI.
+    uint8_t ticketBytes[16];
+    const std::string cliTicket = launcherConfig["NetRelayTicket"].ValueAsDefault<std::string>("");
+    if (!cliTicket.empty() && !requestedRom.empty() && RelayProtocol::ParseTicket(cliTicket, ticketBytes))
+    {
+      cmd_line.config.Set("AsyncNet", true);
+      cmd_line.config.Set("Network", true);
+      cmd_line.config.Set("SimulateNet", true);
+      if (launcherConfig["NetGameRelay"].ValueAsDefault<std::string>("").empty())
+        cmd_line.config.Set("NetGameRelay", guiOptions.relay);
+    }
+    else
+      loadGUI = true;
   }
 
   if (loadGUI)

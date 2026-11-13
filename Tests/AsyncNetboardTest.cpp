@@ -127,7 +127,9 @@ int main(int argc, char** argv)
       if ((scenario == "start-old-gate" || scenario == "start-old-cohort") && !oldGateInjected)
       {
         std::lock_guard<std::mutex> lock(cab->board->m_link->m_mutex);
-        for (auto& packet : cab->board->m_link->m_queue)
+        for (auto& queued : cab->board->m_link->m_queue)
+        {
+          auto& packet = queued.data;
           if (packet.size() == sizeof(uint64_t))
           {
             uint64_t guid; memcpy(&guid,packet.data(),sizeof(guid));
@@ -137,6 +139,7 @@ int main(int argc, char** argv)
               memcpy(packet.data(),&guid,sizeof(guid)); oldGateInjected = true; break;
             }
           }
+        }
       }
       const auto before = Clock::now();
       if (relayCase && cab->board->RelayCabinetIndex() >= 0) {

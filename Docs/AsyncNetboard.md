@@ -65,10 +65,22 @@ To return to frame-locked behavior, use `-sync-netboard` or `AsyncNet = false` o
 - In the ready state, supported exact-ROM games (`dayto2pe`, `daytona2`, `scud`,
   `scudplus`, `srally2`, `lemans24`) wrap each native segment in a 48-byte `TimedSegment`
   header (`hops`, monotonic timestamps, accumulated one-way `ageUs` and
-  `uncertaintyUs`) and stream changed local snapshots at a bounded ~60 Hz wall-
+  `uncertaintyUs`; the origin dates the segment by the game's last CommRAM
+  write, `CSimNetBoard::SampleTiming`, so `uncertaintyUs` starts at the span
+  of that write burst rather than at a full frame) and stream changed local
+  snapshots at a bounded ~60 Hz wall-
   clock pace (`MaxInFlight = 48`, `MaxUnackedFromPeer = 30`) without waiting
-  for full-ring completion. Arriving peer hops are forwarded immediately and
-  published directly to their corresponding CommRAM slot (`slot = incomingHops`)
+  for full-ring completion. Arriving peer hops are forwarded by the network
+  receive thread the moment they arrive (`CNetBoardLink::EnableEarlyForward`),
+  so a hop costs network time only instead of also waiting for the next
+  emulated frame; the emulation thread still publishes the payload at its own
+  pace and adds the queue dwell time to the sample age. Sega Rally 2 uses
+  the same forwarding; what its barriers need is covered by the publication
+  rule below. In relay sessions whose members all advertise
+  it, the relay fans the segments out itself (`RLS1`, see
+  `Docs/OnlineLobbies.md`): the receive thread still dates each arrival but
+  forwards nothing. Peer hops are published directly to their
+  corresponding CommRAM slot (`slot = incomingHops`)
   so remote cars update at 60 Hz with one-way hop age instead of stepping once
   per full-ring RTT. Untimed legacy games retain stop-and-wait complete-ring
   publication (`m_asyncWorking` -> `m_asyncLatest`).
@@ -79,8 +91,12 @@ To return to frame-locked behavior, use `-sync-netboard` or `AsyncNet = false` o
   bank is exposed to the game. By default, the local echo slot uses current
   local data rather than waiting for its own packet to return; games whose
   native ring barriers depend on round-consistent returning echo (`srally2`)
-  preserve the returning ring snapshot and break the per-frame receive drain at
-  each returning self-echo boundary.
+  preserve the returning ring snapshot and publish at most one segment per
+  slot per frame: the receive drain stops at a returning self-echo and before
+  a slot that already received a segment this frame (`PeekNextSlot`), so a
+  value held for a single segment is never overwritten before the game has
+  seen it, whatever path (ring, receive-thread forwarding, relay fan-out)
+  delivered it. A backlog of more than three rounds is drained freely.
 - Frame counters and bank swaps continue at the local emulation rate. Remote
   snapshot updates remain limited by ring traversal time and peer scheduling.
   Other ROMs have no game-specific prediction or interpolation; native

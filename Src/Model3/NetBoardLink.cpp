@@ -26,6 +26,8 @@
  */
 
 #include "NetBoardLink.h"
+#include "Network/Games/Daytona2/TimedSegment.h"
+#include <chrono>
 
 #include "OSD/Logger.h"
 #include <cstring>
@@ -104,13 +106,19 @@ std::vector<uint8_t> &CNetBoardLink::Receive(void)
     m_received.clear();
   else
   {
-    m_received = std::move(m_queue.front());
+    m_received = std::move(m_queue.front().data);
     m_queue.pop_front();
   }
   return m_received;
 }
 
 CNetBoardLink::ReceiveResult CNetBoardLink::TryReceive(std::vector<uint8_t> &data)
+{
+  PacketInfo info;
+  return TryReceive(data, info);
+}
+
+CNetBoardLink::ReceiveResult CNetBoardLink::TryReceive(std::vector<uint8_t> &data, PacketInfo &info)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (m_queue.empty())
@@ -121,9 +129,25 @@ CNetBoardLink::ReceiveResult CNetBoardLink::TryReceive(std::vector<uint8_t> &dat
       m_input ? 1 : 0, (m_input && m_input->IsOpen()) ? 1 : 0, (m_output && m_output->IsOpen()) ? 1 : 0);
     return ReceiveResult::Closed;
   }
-  data = std::move(m_queue.front());
+  data = std::move(m_queue.front().data);
+  info = m_queue.front().info;
   m_queue.pop_front();
   return data.empty() ? ReceiveResult::Closed : ReceiveResult::Data;
+}
+
+void CNetBoardLink::EnableEarlyForward(size_t segmentSize, unsigned machines, bool forward)
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_earlySegmentSize = (segmentSize && machines >= 2) ? segmentSize : 0;
+  m_earlyMachines = machines;
+  m_earlySend = forward;
+}
+
+void CNetBoardLink::DisableEarlyForward()
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  m_earlySegmentSize = 0;
+  m_earlyMachines = 0;
 }
 
 CTCPConnection::ClockSample CNetBoardLink::GetIncomingClock()
@@ -149,6 +173,18 @@ size_t CNetBoardLink::QueueSize(void)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
   return m_queue.size();
+}
+
+bool CNetBoardLink::PeekNextSlot(size_t segmentSize, uint32_t& slot)
+{
+  std::lock_guard<std::mutex> lock(m_mutex);
+  if (m_queue.empty()) return false;
+  const Packet& front = m_queue.front();
+  uint32_t hops = 0;
+  if (!Dayto2pe::ReadTimedSegmentHops(front.data, segmentSize, hops)) return false;
+  if (front.info.advanced) { if (hops == 0) return false; --hops; } // the receive thread already counted its hop
+  slot = hops;
+  return true;
 }
 
 
@@ -201,7 +237,46 @@ bool CNetBoardLink::OnData(const std::shared_ptr<CTCPConnection> &connection, co
     ErrorLog("Net board: %s sent data before it linked.", connection->GetPeerName().c_str());
     return false;
   }
-  m_queue.emplace_back(message + sizeof(DataMessage), message + size);
+  Packet packet;
+  packet.data.assign(message + sizeof(DataMessage), message + size);
+  // Early forwarding (receive thread): advance the timing header and send the
+  // segment on now. Anything that is not a well-formed timed segment of the
+  // expected size is queued untouched for the consumer to validate.
+  uint32_t hops = 0;
+  if (m_earlySegmentSize && m_output && m_output->IsOpen() &&
+      Dayto2pe::ReadTimedSegmentHops(packet.data, m_earlySegmentSize, hops) && hops < m_earlyMachines)
+  {
+    const uint64_t nowUs = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+    const CTCPConnection::ClockSample clock = connection->GetClockSample();
+    const uint64_t clockAge = clock.received <= nowUs ? nowUs - clock.received : UINT64_MAX;
+    if (Dayto2pe::AdvanceTimedSegment(packet.data, m_earlySegmentSize, nowUs, clock.offset, clock.rtt, clockAge))
+    {
+      packet.info.advanced = true;
+      packet.info.receivedUs = nowUs;
+      if (hops + 1 < m_earlyMachines)
+      {
+        // Register this peer's keyframe as a UDP delta base before forwarding,
+        // so when the origin sees its echo every cabinet already holds it.
+        if (m_udp && !m_relayFailed && m_relayCount == m_earlyMachines)
+        {
+          uint64_t sourceUs = 0;
+          if (Dayto2pe::ReadTimedSegmentSourceUs(packet.data, m_earlySegmentSize, sourceUs))
+            m_udp->SetPeerBase((m_relayIndex + m_earlyMachines - 1 - hops) % m_earlyMachines, sourceUs,
+                               packet.data.data() + sizeof(Dayto2pe::TimedSegmentHeader), m_earlySegmentSize);
+        }
+      }
+      if (m_earlySend && hops + 1 < m_earlyMachines)
+      {
+        DataMessage header(packet.data.size());
+        std::vector<uint8_t> forward(header.size);
+        memcpy(forward.data(), &header, sizeof(header));
+        memcpy(forward.data() + sizeof(header), packet.data.data(), packet.data.size());
+        m_output->Send(std::move(forward));
+        m_earlyForwarded.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+  m_queue.push_back(std::move(packet));
   m_condition.notify_all();
   return true;
 }
@@ -231,6 +306,7 @@ CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::stri
     m_udpHandler = m_server->RegisterHandler(RelayProtocol::UdpConfig::ID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
     m_udpHostHandler = m_server->RegisterHandler(RelayProtocol::UdpHostConfigID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
     m_relayTickRateHandler = m_server->RegisterHandler(RelayProtocol::TickRate::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayTickRate(c,p,n); });
+    m_relayStarHandler = m_server->RegisterHandler(RelayProtocol::Star::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayStar(c,p,n); });
     m_relayReadyHandler = m_server->RegisterHandler(RelayProtocol::Ready::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayReady(c,p,n); });
     m_relayErrorHandler = m_server->RegisterHandler(RelayProtocol::Error::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayError(c,p,n); });
   }
@@ -322,6 +398,18 @@ bool CNetBoardLink::OnRelayTickRate(const std::shared_ptr<CTCPConnection>& c, co
   m_relayTickRateSeen[channel] = true;
   return true;
 }
+bool CNetBoardLink::OnRelayStar(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
+{
+  if (size != sizeof(RelayProtocol::Star)) return false;
+  RelayProtocol::Star info; memcpy(&info, p, size);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
+  if (info.version != RelayProtocol::Version || info.flags != 1 ||
+      channel > 1 || m_relayAssigned[channel] || m_relayStarSeen[channel] || m_relayFailed) return false;
+  m_relayStarSeen[channel] = true;
+  m_relayStar.store(true, std::memory_order_release);
+  return true;
+}
 bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
 {
   if (size != sizeof(RelayProtocol::Ready)) return false;
@@ -337,8 +425,9 @@ bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const
       (m_relayCount && (m_relayCount!=ready.count || m_relayIndex!=ready.index))) return false;
   m_relayIndex=ready.index; m_relayCount=ready.count; m_relayAssigned[channel]=true;
   if (m_relayAssigned[0] && m_relayAssigned[1])
-    InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz",
-      ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed));
+    InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz, ring segments %s",
+      ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed),
+      m_relayStar.load(std::memory_order_relaxed)?"fanned out by the relay":"forwarded hop by hop");
   m_condition.notify_all(); return true;
 }
 bool CNetBoardLink::OnRelayError(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
@@ -384,26 +473,47 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
  InfoLog("Relay UDP: snapshot lane configured (UDP port %u); in-race snapshots use UDP, setup/start control and fallback use TCP",cfg.port);
  return true;
 }
-void CNetBoardLink::SendPresentation(const void* p,size_t n,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs)
+void CNetBoardLink::SendPresentation(const void* p,size_t n,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs,const std::vector<uint8_t>* streamedMask,
+                                     uint64_t sampleAgeUs,uint64_t sampleUncertaintyUs)
 {
- std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->Submit(p,n,sourceUs,freshUs,controlUs);
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->Submit(p,n,sourceUs,freshUs,controlUs,streamedMask,sampleAgeUs,sampleUncertaintyUs);
 }
 bool CNetBoardLink::LatestSnapshot(unsigned origin,uint64_t afterSourceUs,UdpSnapshot& out)
 {
  std::lock_guard<std::mutex> lock(m_mutex);
  CRelayUdpClient::Sample s;if(!m_udp || m_relayFailed || !m_udp->Latest(origin,s,afterSourceUs)) return false;
- out.raw=std::move(s.raw);out.sourceUs=s.sourceUs;out.receivedUs=s.receivedUs;out.ageUs=s.ageUs;out.uncertaintyUs=s.uncertaintyUs;out.controlUs=s.controlUs;out.timed=s.timed;
+ out.raw=std::move(s.raw);out.mask=std::move(s.mask);out.sourceUs=s.sourceUs;out.receivedUs=s.receivedUs;out.ageUs=s.ageUs;out.transitUs=s.transitUs;out.uncertaintyUs=s.uncertaintyUs;out.controlUs=s.controlUs;out.timed=s.timed;
  return true;
 }
-bool CNetBoardLink::UdpPrimaryReady()
+void CNetBoardLink::NoteUdpLocalKeyframe(uint64_t sourceUs,const void* bytes,size_t size)
 {
- std::lock_guard<std::mutex> lock(m_mutex);return m_udp && !m_relayFailed && m_udp->PrimaryReady();
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->NoteLocalKeyframe(sourceUs,bytes,size);
 }
-bool CNetBoardLink::LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs)
+void CNetBoardLink::CommitUdpLocalKeyframe(uint64_t sourceUs)
 {
- std::lock_guard<std::mutex> lock(m_mutex);
- CRelayUdpClient::Sample s;if(!m_udp || m_relayFailed || !m_udp->Latest(origin,s)) return false;
- raw=std::move(s.raw);sourceUs=s.sourceUs;receivedUs=s.receivedUs;return true;
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->CommitLocalKeyframe(sourceUs);
+}
+void CNetBoardLink::SetUdpPeerBase(unsigned origin,uint64_t sourceUs,const void* bytes,size_t size)
+{
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->SetPeerBase(origin,sourceUs,bytes,size);
+}
+void CNetBoardLink::ClearUdpBases()
+{
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp) m_udp->ClearBases();
+}
+bool CNetBoardLink::GetUdpStats(UdpStats& out)
+{
+ std::lock_guard<std::mutex> lock(m_mutex);if(!m_udp) return false;
+ const auto s=m_udp->GetStats();
+ out.sent=s.sent;out.sentDelta=s.sentDelta;out.sentBytes=s.sentBytes;out.sentRawBytes=s.sentRawBytes;out.received=s.received;
+ out.receivedDelta=s.receivedDelta;out.heldResolved=s.heldResolved;out.deltaStale=s.deltaStale;out.deltaBaseUnknown=s.deltaBaseUnknown;
+ out.maskSent=s.maskSent;out.maskReceived=s.maskReceived;
+ out.datagrams=s.datagrams;out.lost=s.lost;out.reordered=s.reordered;out.duplicated=s.duplicated;
+ return true;
+}
+bool CNetBoardLink::UdpPrimaryReady(bool holding)
+{
+ std::lock_guard<std::mutex> lock(m_mutex);return m_udp && !m_relayFailed && m_udp->PrimaryReady(holding);
 }
 bool CNetBoardLink::UdpActive()
 {

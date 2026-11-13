@@ -30,6 +30,15 @@ struct TickRate : NetProtocol::MessageHeader {
   uint32_t version = Version, tickRate = DefaultTickRate;
   TickRate() : MessageHeader(ID,sizeof(TickRate)) {}
 };
+// RLS1: the relay fans every timed ring segment out to all cabinets itself
+// (hop count rewritten per receiver, origin echoed at once); cabinets must not
+// forward peer segments. Sent before RLA1, only when every member's lobby
+// client advertised the capability.
+struct Star : NetProtocol::MessageHeader {
+  static constexpr uint32_t ID = NetProtocol::ID("RLS1");
+  uint32_t version = Version, flags = 0;
+  Star() : MessageHeader(ID,sizeof(Star)) {}
+};
 struct Error : NetProtocol::MessageHeader {
   static constexpr uint32_t ID = NetProtocol::ID("RLE1");
   uint32_t code = 0, reserved = 0;
@@ -50,7 +59,7 @@ struct UdpConfig : NetProtocol::MessageHeader {
 static constexpr uint32_t UdpHostConfigID=NetProtocol::ID("RLU2");
 #pragma pack(pop)
 static_assert(sizeof(HybridJoin)==56 && sizeof(UdpConfig)==40,"Hybrid wire sizes");
-static_assert(sizeof(Join)==40 && sizeof(Ready)==24 && sizeof(TickRate)==16 && sizeof(Error)==16,"Relay wire sizes");
+static_assert(sizeof(Join)==40 && sizeof(Ready)==24 && sizeof(TickRate)==16 && sizeof(Error)==16 && sizeof(Star)==16,"Relay wire sizes");
 static_assert(sizeof(LobbyJoin)==56,"Lobby ticket wire size");
 inline bool ParseTicket(const std::string& text, uint8_t (&bytes)[16]) {
   if(text.size()!=32) return false;

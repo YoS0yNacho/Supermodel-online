@@ -242,13 +242,14 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
     SocketOwner owner;
     if(!OpenNonblockingSocket(s->stop,route.host,route.port,owner)) return;
     Socket fd=owner.socket;
-    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&Online::GameMaskAll); Put(hello,(enabled?1u:0u)|54u); Text(hello,name,32);
+    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&Online::GameMaskAll); Put(hello,(enabled?1u:0u)|246u)/*2 options, 4 native, 16 Hornet, 32 race, 64 star fan-out, 128 ping*/; Text(hello,name,32);
     std::vector<uint8_t> output=Frame("HEL1",{'S','u','p','e','r','m','o','d','e','l',' ','O','n','l','i','n','e'});
     if(route.native)hello.insert(hello.end(),route.key.begin(),route.key.end());
     const auto registration=Frame(Srally2Research::LobbyHello,hello);output.insert(output.end(),registration.begin(),registration.end());
     std::vector<uint8_t> input; size_t sent=0;
     bool bindPending=false,armPending=false;
     Snapshot pending; size_t expected=0; bool collecting=false, greeted=false, admitted=false;
+    uint32_t pingMs=0; double pingSmooth=0; // OLQ2 poll stamp is echoed by OLP2; RTT smoothed 50/50
     auto received=Clock::now(),polled=Clock::now(),sendProgress=Clock::now();
     while(!s->stop) {
       retiredHosts.erase(std::remove_if(retiredHosts.begin(),retiredHosts.end(),[](const auto& h){return h->Finished();}),retiredHosts.end());
@@ -266,7 +267,12 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
         if(sent==output.size()) {
           output.clear(); sent=0;
           if(!s->outgoing.empty()) { output=std::move(s->outgoing.front());s->outgoing.pop_front();sendProgress=Clock::now(); }
-          else if(admitted && Clock::now()-polled>std::chrono::seconds(2)) { output=Frame("OLQ1");polled=Clock::now();sendProgress=Clock::now(); }
+          else if(admitted && Clock::now()-polled>std::chrono::seconds(1)) {
+            // Poll with a stamp: the host echoes it (OLP2) before the snapshot, so the measured RTT is the lobby ping.
+            const uint64_t stamp=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
+            std::vector<uint8_t> b;Put(b,uint32_t(stamp));Put(b,uint32_t(stamp>>32));Put(b,pingMs);
+            output=Frame("OLQ2",b);polled=Clock::now();sendProgress=Clock::now();
+          }
         }
       }
       fd_set read,write;FD_ZERO(&read);FD_ZERO(&write);FD_SET(fd,&read);
@@ -334,6 +340,21 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           for(uint32_t i=0;i<count;++i){PlayerHost::Member m;std::memcpy(m.ticket.data(),b.data()+16+32*i,16);std::memcpy(m.cookie.data(),b.data()+32+32*i,16);config.members.push_back(m);}
           if(host->Configure(config))armPending=true;
           else {std::vector<uint8_t> body;Put(body,hostRoom);Put(body,0);std::lock_guard<std::mutex> lock(s->mutex);s->outgoing.push_back(Frame("OHA1",body));}
+        } else if(kind=="OLP2") {
+          Require(b.size()==8);
+          const uint64_t stamp=uint64_t(U32(b,0))|(uint64_t(U32(b,4))<<32);
+          const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now().time_since_epoch()).count());
+          if(now>=stamp && now-stamp<60000000) {
+            const double rtt=double(now-stamp)/1000.0;
+            pingSmooth=pingSmooth>0?0.5*pingSmooth+0.5*rtt:rtt;
+            pingMs=std::max<uint32_t>(1,uint32_t(pingSmooth+0.5));
+            std::lock_guard<std::mutex> l(s->mutex);s->view.pingMs=pingMs;
+          }
+        } else if(kind=="ORP1") {
+          Require(collecting && !pending.rooms.empty() && b.size()>=8);
+          auto& room=pending.rooms.back();const auto count=U32(b,4);
+          Require(U32(b,0)==room.id && count==room.members.size() && b.size()==8+8*count);
+          for(unsigned i=0;i<count;++i){Require(U32(b,8+8*i)==room.members[i].id);room.members[i].pingMs=std::min<uint32_t>(U32(b,12+8*i),9999);}
         } else if(kind=="ORO1") {
           Require(collecting && !pending.rooms.empty() && b.size()==8);
           auto& room=pending.rooms.back();Require(U32(b,0)==room.id && !room.optionsSupported);
@@ -359,7 +380,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Require(b.empty()&&collecting&&pending.rooms.size()==expected); collecting=false;admitted=true;
           std::lock_guard<std::mutex> l(s->mutex);
           if(s->view.room!=pending.room) s->view.roomChat.clear();
-          s->view.rooms=std::move(pending.rooms);s->view.self=pending.self;s->view.room=pending.room;
+          s->view.rooms=std::move(pending.rooms);s->view.self=pending.self;s->view.room=pending.room;s->view.pingMs=pingMs;
           s->view.hostedRoom=route.native;s->view.connected=true;s->view.connecting=false;s->view.status=route.native?"Connected to creator (central: discovery only)":"Connected";
         } else if(kind=="OLM1") {
           Require(b.size()==204&&!collecting);

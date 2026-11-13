@@ -39,14 +39,18 @@ inline bool IsTimedSegment(const std::vector<uint8_t>& wire, size_t expectedSegm
          h.ageUs <= 10000000 && h.uncertaintyUs <= MaxTimingUncertaintyUs;
 }
 
+// sourceAgeUs: how long before nowUs the game wrote the segment (0 if unknown;
+// then sourceUncertaintyUs should cover one frame).
 inline std::vector<uint8_t> MakeTimedSegment(const uint8_t* raw, size_t size, uint64_t nowUs,
                                              uint64_t sourceUncertaintyUs = 0,
-                                             uint64_t sourceTimestampUs = 0)
+                                             uint64_t sourceTimestampUs = 0,
+                                             uint64_t sourceAgeUs = 0)
 {
   TimedSegmentHeader h;
   h.segmentSize = uint32_t(size);
   h.sourceTimestampUs = sourceTimestampUs ? sourceTimestampUs : nowUs;
   h.lastHopSendUs = nowUs;
+  h.ageUs = std::min<uint64_t>(10000000, sourceAgeUs);
   h.uncertaintyUs = std::min(sourceUncertaintyUs, MaxTimingUncertaintyUs);
   std::vector<uint8_t> wire(sizeof(h) + size);
   std::memcpy(wire.data(), &h, sizeof(h));

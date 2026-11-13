@@ -22,7 +22,7 @@ inline constexpr const char* RomGame(unsigned game){return game==6?"srally2":gam
 inline constexpr size_t MaxChatLength = 159;
 inline constexpr const char* DefaultPlayerName = "Player";
 
-struct Member { uint32_t id = 0; std::string name; uint32_t carNumber = 0; };
+struct Member { uint32_t id = 0; std::string name; uint32_t carNumber = 0; uint32_t pingMs = 0; /* RTT to the room host, 0 = not measured */ };
 struct Room {
   uint32_t id = 0, game = 0, state = 0, master = 0;
   std::string name;
@@ -37,6 +37,7 @@ struct ChatMessage {
 struct Snapshot {
   bool connecting = false, connected = false, launch = false, hostedRoom = false;
   uint32_t self = 0, room = 0, game = 0, index = 0, count = 0, roomOptions = 0, carNumber = 0;
+  uint32_t pingMs = 0; // own smoothed RTT to the lobby host (relay or creator), 0 = not measured
   std::string status = "Not connected", error, endpoint, ticket, gameEndpoint;
   // Original discovery server, never overwritten by a creator-room redirect.
   std::string directoryEndpoint;

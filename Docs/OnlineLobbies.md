@@ -91,33 +91,132 @@ TCP and UDP on that port.
   is sent round the TCP ring, in order, exactly as before. No per-game table
   is needed; the split is learned from the traffic.
 - **Ordering.** Every UDP snapshot names the last TCP control message it was
-  built on, and a receiver holds the snapshot until that message has arrived.
-  A control state is therefore never skipped or seen out of order, and UDP
-  never delivers control data that TCP has not delivered first.
+  built on. While that message is still in flight the receiver applies only
+  the snapshot's *streamed* words and keeps the control words of the last
+  reliable segment; when the TCP message lands its control words are merged
+  in. A control state is therefore never skipped or seen out of order, UDP
+  never delivers control data that TCP has not delivered first, and remote
+  cars keep moving while a lap/rank/phase change crosses the ring. For this
+  each cabinet appends its streamed-word mask (one bit per 32-bit word,
+  27–102 bytes) to a snapshot whenever the classification changes and at
+  least every 500 ms; until a receiver has a peer's mask it holds that peer's
+  snapshots whole, as before.
 - **TCP also carries** link setup, the race-start barrier and a 1 Hz keepalive
   ping. The log reports how many control messages were sent and which packet
   offsets caused them (`Relay UDP: N control messages sent by TCP so far`).
 - **Automatic fallback.** A cabinet stops sending on TCP only while every other
   cabinet reports, inside its own UDP snapshots, that it is receiving that
-  cabinet's UDP. If any cabinet stops confirming (firewall, NAT, packet loss
-  lasting 3.5 ticks or 150 ms, whichever is longer), the TCP ring resumes and
-  UDP-only racing returns one second after confirmation is restored.
+  cabinet's UDP. The lane becomes UDP-only once every cabinet has been heard
+  within 3.5 ticks or 150 ms (whichever is longer) for one second; once it
+  is, a cabinet may stay quiet for 400 ms (or twice that window) before the
+  TCP ring resumes, so a short stall or a run of lost snapshots costs a
+  moment of staleness instead of a burst of keyframes and another second of
+  settling. A real outage (firewall, NAT) still falls back within half a
+  second, and UDP-only racing returns one second after confirmation is
+  restored. The log line `Relay UDP: TCP ring resumed (...)` names the cause.
 - **Sample age.** Every UDP acknowledgement carries the relay clock, so
   receivers measure how old each snapshot is and the predictors compensate.
+  The age counts from the moment the game wrote the segment into CommRAM,
+  not from the moment the net board picked it up a frame later: the board
+  records the write burst for each CommRAM bank and sends its age and span
+  with the snapshot (`sampleAgeUs`, `sampleUncertaintyUs`) and with every
+  TCP timed segment, whose origin uncertainty therefore drops from a whole
+  frame (~17 ms) to about a millisecond.
+  Snapshots are sent by the emulation thread the moment a tick is due and
+  read by a worker that blocks on the socket, so neither direction waits on
+  a polling interval.
+- **Delta snapshots.** A UDP snapshot is normally sent as the XOR of the
+  current segment with the cabinet's last TCP segment (its keyframe), which
+  every receiver already holds. Between control messages only the streamed
+  words differ, so after zero-run encoding a 1–3 KB segment usually travels
+  in well under 100 bytes and always fits one datagram. The trailer names the
+  keyframe stamp; a delta that arrives before its keyframe is kept until the
+  TCP ring delivers it (the same hold that already protects control order),
+  and a delta built on an older keyframe than the receiver holds is discarded
+  because a newer TCP segment has superseded it. The relay never decodes
+  game bytes. The log line `Relay UDP: delta lane ...` reports the saving.
 - **Sega Rally 2** depends on the snapshot returning round the TCP ring, so it
   keeps the ring at the tick rate during races and uses UDP only as predictor
-  input.
+  input; those inputs carry the relay-clock sample age like every other
+  game's, so its predictor compensates latency the same way. Its ring segments
+  are forwarded by the receive thread and fanned out by the relay like the
+  other games' (the client guarantees the game still sees every segment of
+  every slot, one per frame).
 - **`--tcp-only`** disables the UDP lane; all game traffic uses the TCP ring.
+- **Star fan-out of the TCP ring.** For the timed-segment games the relay
+  does not pass each segment from cabinet to cabinet:
+  it delivers it to every other cabinet directly, with the hop count that
+  cabinet would have seen on the ring, and returns the origin its echo at
+  once. A control message or a `--tcp-only` segment therefore reaches the
+  farthest cabinet after one relay delivery instead of up to N-1, and the
+  origin's echo (which releases the next UDP delta base) after one round trip
+  instead of N. The relay pings every cabinet once a second and translates
+  the segment timestamps through its own clock, so sample ages keep their
+  measured uncertainty. Fan-out starts once every cabinet has sent its first
+  segment, i.e. has finished the ring handshake. The relay announces it with
+  an `RLS1` frame before `RLA1`; it is used only when every member's GUI
+  advertised the capability (lobby hello flag 64), so a room with an older
+  client and a creator-hosted room keep the hop-by-hop ring.
+  Cabinets never forward segments in a fan-out room. The ROM-free test
+  reports both: `ring-latency` (4 cabinets, 40 ms per delivery) measures a
+  166 ms ring round trip and 168 ms worst staleness, `star-latency` 45 ms and
+  88 ms.
 
 ```
 python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20             # UDP racing (default)
 python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20 --tcp-only  # TCP ring only
 ```
 
-The UDP wire format is version 3. Update `relay.py` and every cabinet together;
+The UDP wire format is version 5. Update `relay.py` and every cabinet together;
 an older build on either side is ignored on UDP and the room runs on TCP.
 
-ROM-free test: `python3 Tests/run_udp_primary.py [--sanitize]`.
+ROM-free test: `python3 Tests/run_udp_primary.py [--sanitize] [--tc] [--only NAME]`.
+
+The log line `Relay UDP: inbound N snapshots, L lost (x%), R reordered, D
+duplicated; lane fell back to TCP F times` reports what the UDP lane actually
+experienced, from the per-peer sequence numbers.
+
+### Testing under impaired networks
+
+`Tests/netem.py` holds impairment profiles (`wifi`, `congested`, `mobile`:
+one-way delay, jitter, random and bursty Gilbert-Elliott loss, duplicates) and
+the `netem` scenarios of `run_udp_primary.py` race under each of them. By
+default the rig runs in-process and deterministically: UDP snapshots are
+dropped, duplicated, delayed and reordered on their way out of the relay, and
+the relay's own fake latency/jitter delays the TCP ring in order. Each run
+asserts that the lane settles into UDP-only racing and stays there, that
+control values arrive in order, that staleness stays within the profile's
+bound, and that the cabinets' loss count agrees with what the rig dropped.
+`--tc` installs a kernel `netem` qdisc on loopback instead (Linux,
+CAP_NET_ADMIN, `sch_netem`), so TCP and UDP both cross a real impaired path;
+when netem is unavailable the runner says so and uses the in-process rig.
+
+### Real-ROM sessions on one machine (testing only)
+
+`-lobby-ticket=<32 hex>` together with `-relay=HOST:PORT` and a ROM argument
+joins an already-started lobby room **without the GUI**, exactly as the Online
+tab does after it receives its launch message. The ticket comes from the
+relay's lobby: `Tests/lobby_tickets.py --relay HOST:1970 --game srally2
+--players 2` creates a room as the GUI would (same HELLO capabilities, so the
+relay chooses star fan-out as it would for real GUIs; `--no-star` keeps the
+ring), joins the members, presses Start Link and prints one ticket per
+cabinet. `Tests/rom_session.sh GAME N` wires this up end to end on Linux:
+relay, tickets and `N` cabinets on separate Xvfb displays (Mesa llvmpipe, no
+GPU), `Tests/rom_key.sh DISPLAY KEY` injects keys per cabinet. Cabinets log
+`Async net board: link stats: ...` every 10 seconds: transport (ring or relay
+star fan-out), ring round trips and mean RTT, segments forwarded by the
+receive thread, predictor inputs taken from UDP (and of those, timed) and UDP
+snapshots applied. Tickets are single-session and never written to the INI.
+
+Measured with the real `srally2.zip` and `scud.zip` archives, 2 cabinets and
+the relay on one 2-core sandbox (software GL, emulation ran at roughly a
+third of real time, so absolute RTTs are CPU-bound and pessimistic):
+
+| session | transport | result |
+| --- | --- | --- |
+| srally2, star fan-out | relay fans segments out, 0 forwarded by clients | LINK GAME OK on both; coin -> course -> car -> name entry -> `DESERT START!!` and the 60 s clock started on the same frame on both cabinets; race to TIME IS UP with consistent 1st/2nd on both; back to attract; a **second race in the same session** passed the same barriers. 15 000 ring round trips, 5 040 predictor inputs from UDP, **100 % timed**, no reset/flush, no fallback. |
+| srally2, ring (`--no-star`) | 5 253 of 5 554 segments forwarded by the receive thread | same flow, race clocks within 0.1 s of each other, 1 245 predictor inputs from UDP, 100 % timed. |
+| scud, star fan-out | UDP-primary lane | course/car select, GO!, 4-lap race in sync; `positions now UDP only`; 5 935/5 936 snapshots as deltas, 90 % bytes saved, 0 lost, 0 stale, 0 waited for keyframe; one TCP resume at the race-state change, none during the race. |
 
 ## Fake latency (testing only)
 
@@ -187,6 +286,21 @@ The supported selection is exactly:
 | Sega Rally 2 | `srally2.zip` (up to 4 cabinets) |
 | Sega Rally 2 - 8 Player | `srally2.zip` (up to 8 cabinets; select the optional mode) |
 | Le Mans 24 | `lemans24.zip` (up to 6 cabinets) |
+
+## Room ping
+
+Inside a lobby every member row shows that player's round trip to the room
+host (the central relay, or the creator for creator-hosted rooms), green under
+60 ms, yellow under 120 ms, red beyond; `your ping` is shown next to
+**Create Lobby** in the lounge and in the room header. The number is what
+matters for play: all game traffic goes through that host, so two players'
+pings added together is roughly their mutual delay. It is measured by the
+GUI's own lobby poll: every second the client sends `OLQ2` (a clock stamp
+plus the last RTT it measured), the host echoes the stamp (`OLP2`) before the
+snapshot, and the snapshot lists every member's reported RTT (`ORP1`). Clients
+advertise the feature with HELLO capability bit 128; older clients keep
+polling with `OLQ1` and see no pings. Nothing is sent to other players'
+addresses and no extra sockets are opened.
 
 ## Lobby chat and in-game chat
 

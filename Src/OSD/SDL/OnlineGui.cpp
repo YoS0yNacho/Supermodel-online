@@ -19,6 +19,9 @@ bool HasPrintableText(const char* text) {
   }
   return false;
 }
+// Lobby ping colour: green under 60 ms, yellow under 120 ms, red beyond.
+ImVec4 PingColor(uint32_t ms) { return ms<60?ImVec4(0.45f,0.9f,0.45f,1):ms<120?ImVec4(0.95f,0.85f,0.3f,1):ImVec4(0.95f,0.4f,0.4f,1); }
+
 ImVec4 CarBadgeColor(uint32_t car) {
   switch (car) {
     case 1: return ImVec4(1.00f, 0.82f, 0.28f, 1.0f);
@@ -144,6 +147,7 @@ void OnlineGui::Draw(const std::string& dir) {
     ImGui::TableSetColumnIndex(0);
     if(current) {
       ImGui::Text("%s  |  %s  |  %u/%u players",current->name.c_str(),Online::Titles[current->game],unsigned(current->members.size()), Online::MaxPlayers(current->game));
+      if(s.pingMs){ImGui::SameLine();ImGui::TextUnformatted("|");ImGui::SameLine();ImGui::TextColored(PingColor(s.pingMs),"your ping %u ms",unsigned(s.pingMs));}
       ImGui::TextWrapped("Hosting: %s",current->hostChecking?"Testing TCP/UDP host reachability...":current->udpMode==3?"Creator-hosted room/chat + TCP/UDP":current->udpMode==2?"Creator-hosted TCP + UDP":current->udpMode==1?"Legacy UDP-only host":"Central relay");
       for(size_t i=0;i<current->members.size();++i) {
         const auto& m=current->members[i];
@@ -151,6 +155,10 @@ void OnlineGui::Draw(const std::string& dir) {
         if(NativeRoomSettings::CarLimit(current->game) && current->nativeSettingsSupported){ImGui::SameLine();if(m.carNumber)ImGui::Text("CAR %u",unsigned(m.carNumber));else ImGui::TextDisabled("CAR not selected");}
         ImGui::SameLine();
         ImGui::Text("%s  -  %s%s",m.name.c_str(),i==0?"MASTER":"SLAVE",m.id==s.self?" (you)":"");
+        ImGui::SameLine();
+        if(m.pingMs) ImGui::TextColored(PingColor(m.pingMs),"%u ms",unsigned(m.pingMs));
+        else ImGui::TextDisabled("ping ...");
+        if(ImGui::IsItemHovered()) ImGui::SetTooltip("Round trip from this player to the room host (%s), measured by their lobby poll",current->udpMode>=2?"creator":"relay");
       }
       // Daytona 2 slaves may choose the non-racing live-camera role.
       if(current->game<2 && s.self!=current->master && current->state==0) {
@@ -174,6 +182,7 @@ void OnlineGui::Draw(const std::string& dir) {
       const uint32_t available=Available(dir);
       // Game selection applies only when creating a lobby.
       if(ImGui::Button("Create Lobby")) openCreateDialog=true;
+      if(s.pingMs){ImGui::SameLine();ImGui::TextColored(PingColor(s.pingMs),"your ping %u ms",unsigned(s.pingMs));if(ImGui::IsItemHovered())ImGui::SetTooltip("Round trip to this lobby server, measured by the lobby poll");}
       ImGui::TextUnformatted("Available lobbies (updates automatically)");
       const Online::Room* selected=nullptr;
       const float tableHeight=(std::max)(95.0f*scale,ImGui::GetContentRegionAvail().y-34.0f*scale);

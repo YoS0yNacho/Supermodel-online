@@ -80,17 +80,31 @@ public:
   int RelayIndex();
   unsigned RelayCount();
   unsigned RelayTickRate() const { return m_relayTickRate.load(std::memory_order_acquire); }
+  // True once the relay announced star fan-out (RLS1) for this session.
+  bool RelayStar() const { return m_relayStar.load(std::memory_order_acquire); }
   bool IsRelay() const { return m_relay; }
   // UDP snapshot lane (relay sessions only). sourceUs orders this cabinet's
   // snapshots across both lanes; freshUs is the peer-silence tolerance.
-  struct UdpSnapshot { std::vector<uint8_t> raw; uint64_t sourceUs=0, receivedUs=0, ageUs=0, uncertaintyUs=0, controlUs=0; bool timed=false; };
-  void SendPresentation(const void*,size_t,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs=0);
-  bool LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs);
+  // mask: the origin's streamed-word mask (bit w = segment word w is UDP-only), empty if none received yet.
+  // ageUs: age of the data at receivedUs = transitUs (stamp -> arrival) + the sender's sample age.
+  struct UdpSnapshot { std::vector<uint8_t> raw, mask; uint64_t sourceUs=0, receivedUs=0, ageUs=0, transitUs=0, uncertaintyUs=0, controlUs=0; bool timed=false; };
+  void SendPresentation(const void*,size_t,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs=0,const std::vector<uint8_t>* streamedMask=nullptr,
+                        uint64_t sampleAgeUs=0,uint64_t sampleUncertaintyUs=0);
   // Latest snapshot from origin, only if strictly newer than afterSourceUs.
   bool LatestSnapshot(unsigned origin,uint64_t afterSourceUs,UdpSnapshot& out);
+  // Delta bases for the UDP lane: segments this cabinet originated by TCP
+  // (a candidate becomes the base when its self-echo returns) and the last TCP
+  // segments received from each peer (its keyframes).
+  void NoteUdpLocalKeyframe(uint64_t sourceUs,const void* bytes,size_t size);
+  void CommitUdpLocalKeyframe(uint64_t sourceUs);
+  void SetUdpPeerBase(unsigned origin,uint64_t sourceUs,const void* bytes,size_t size);
+  void ClearUdpBases();
+  struct UdpStats { uint64_t sent=0,sentDelta=0,sentBytes=0,sentRawBytes=0,received=0,receivedDelta=0,heldResolved=0,deltaStale=0,deltaBaseUnknown=0,maskSent=0,maskReceived=0,
+                    datagrams=0,lost=0,reordered=0,duplicated=0; }; // see RelayUdpClient::Stats
+  bool GetUdpStats(UdpStats& out);
   bool UdpActive();
   // Every other cabinet sends usable UDP snapshots and confirms receiving ours.
-  bool UdpPrimaryReady();
+  bool UdpPrimaryReady(bool holding=false);
 
   /*
    * Send(data, length):
@@ -115,10 +129,29 @@ public:
   // covers an empty (link-broken) packet. Only one thread may consume data.
   enum class ReceiveResult { Pending, Data, Closed };
   ReceiveResult TryReceive(std::vector<uint8_t> &data);
+  // advanced: the receive thread already advanced this timed segment's header
+  // (hops+1, age up to receivedUs) and forwarded it to the next machine; the
+  // consumer must not advance or forward it again (see EnableEarlyForward).
+  struct PacketInfo { bool advanced = false; uint64_t receivedUs = 0; };
+  ReceiveResult TryReceive(std::vector<uint8_t> &data, PacketInfo &info);
+  // Early forwarding: valid timed segments of `segmentSize` bytes in a ring of
+  // `machines` are advanced and sent on to the next machine by the receive
+  // thread as soon as they arrive, instead of waiting for the emulation
+  // thread's next frame. Each hop then costs network time only. The copy
+  // queued for the consumer is flagged `advanced`. Forwarding touches no guest
+  // RAM; the consumer still publishes the payload at its own pace.
+  // forward=false (relay star fan-out): segments are still advanced and
+  // registered as UDP delta bases on arrival, but never sent on.
+  void EnableEarlyForward(size_t segmentSize, unsigned machines, bool forward = true);
+  void DisableEarlyForward();
+  uint64_t EarlyForwarded() const { return m_earlyForwarded.load(std::memory_order_relaxed); }
 
   // True if Receive() can return data immediately
   bool CheckDataAvailable(void);
   size_t QueueSize(void);
+  // Slot (hop count as TryReceive's consumer will see it) of the next queued
+  // packet, if it is a timed segment of segmentSize; false otherwise.
+  bool PeekNextSlot(size_t segmentSize, uint32_t& slot);
 
   CTCPConnection::ClockSample GetIncomingClock();
   void RefreshIncomingClock();
@@ -140,6 +173,7 @@ private:
   std::unique_ptr<CRelayUdpClient> m_udp;
   CNetServer::Registration m_udpHandler, m_udpHostHandler;
   bool OnRelayTickRate(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
+  bool OnRelayStar(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayReady(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayError(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool LinkBroken(void) const;
@@ -156,6 +190,8 @@ private:
   uint64_t m_relayNonce[2] = {};
   bool m_relayAssigned[2] = {};
   bool m_relayTickRateSeen[2] = {};
+  bool m_relayStarSeen[2] = {};
+  std::atomic<bool> m_relayStar{false};
   bool m_relayFailed = false;
   unsigned m_relayIndex = 0, m_relayCount = 0;
   std::atomic<unsigned> m_relayTickRate{60};
@@ -164,10 +200,15 @@ private:
   std::condition_variable m_condition;
   std::shared_ptr<CTCPConnection> m_output;
   std::shared_ptr<CTCPConnection> m_input;
-  std::deque<std::vector<uint8_t>> m_queue;
+  struct Packet { std::vector<uint8_t> data; PacketInfo info; };
+  std::deque<Packet> m_queue;
   std::vector<uint8_t> m_received;      // last block that Receive() returned
+  size_t m_earlySegmentSize = 0;        // 0 = early forwarding off
+  unsigned m_earlyMachines = 0;
+  bool m_earlySend = true;              // false: advance on arrival only (star fan-out)
+  std::atomic<uint64_t> m_earlyForwarded{0};
 
-  CNetServer::Registration m_relayTickRateHandler, m_relayReadyHandler, m_relayErrorHandler;
+  CNetServer::Registration m_relayTickRateHandler, m_relayStarHandler, m_relayReadyHandler, m_relayErrorHandler;
   CNetServer::Registration m_joinHandler;
   CNetServer::Registration m_dataHandler;
   CNetServer::Registration m_disconnectHandler;

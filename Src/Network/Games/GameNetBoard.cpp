@@ -21,6 +21,7 @@
  **/
 
 // Game-specific hooks; shared transport remains in SimNetBoard.
+#include "Network/RelayUdpWire.h"
 #include "Supermodel.h"
 #include "Model3/SimNetBoard.h"
 
@@ -356,17 +357,25 @@ const uint8_t* CSimNetBoard::PresentationSource(size_t slot,std::vector<uint8_t>
  if(offset>m_asyncLatest.size() || m_segmentSize>m_asyncLatest.size()-offset) return nullptr;
  const uint8_t* reliable=m_asyncLatest.data()+offset;
  if(!m_relay || !m_link || slot+1>=m_numMachines || offset+m_segmentSize>m_asyncLatest.size()) return reliable;
- const unsigned remote=(unsigned(m_asyncIndex[0])+m_numMachines-1-unsigned(slot))%m_numMachines;
- uint64_t stamp=0,received=0;
- if(!m_link->LatestPresentation(remote,storage,stamp,received) || storage.size()!=m_segmentSize ||
-    (slot<m_asyncLatestSourceUs.size() && stamp<=m_asyncLatestSourceUs[slot]) ||
-    !GameNetwork::PresentationCompatible(m_gameInfo.name,reliable,storage.data(),m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) return reliable;
+ const unsigned remote=UdpOriginForSlot(unsigned(slot));
+ CNetBoardLink::UdpSnapshot snap;
+ if(!m_link->LatestSnapshot(remote,slot<m_asyncLatestSourceUs.size()?m_asyncLatestSourceUs[slot]:0,snap) || snap.raw.size()!=m_segmentSize ||
+    !GameNetwork::PresentationCompatible(m_gameInfo.name,reliable,snap.raw.data(),m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) return reliable;
  const uint64_t now=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
- if(now<received) return reliable;
- // Direct UDP broadcast has no synchronized per-origin clock; transit age is unknown.
- ageFrames=double(now-received)/FrameDurationUs();
- uncertaintyFrames=60000000.0/FrameDurationUs();
- if(sourceUs) *sourceUs=stamp;
+ if(now<snap.receivedUs) return reliable;
+ storage=std::move(snap.raw);
+ ++m_statUdpPresentation;
+ if(snap.timed) {
+  ++m_statUdpPresentationTimed;
+  // Relay-clock sample: age since the game wrote it, plus the wait here.
+  ageFrames=double(snap.ageUs+(now-snap.receivedUs))/FrameDurationUs();
+  uncertaintyFrames=double(snap.uncertaintyUs)/FrameDurationUs();
+ } else {
+  // No usable clock for this snapshot: only the local wait is known.
+  ageFrames=double(now-snap.receivedUs)/FrameDurationUs();
+  uncertaintyFrames=60000000.0/FrameDurationUs();
+ }
+ if(sourceUs) *sourceUs=snap.sourceUs;
  if(!m_udpLogged) { m_udpLogged=true;InfoLog("Relay UDP r15 candidate: fresh UDP predictor inputs active; reliable control and raw ring unchanged"); }
  return storage.data();
 }
@@ -389,7 +398,11 @@ bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
 {
  bool silent=false;
  const char* reason="UDP not confirmed by every cabinet";
- if(UdpSnapshotCapable() && m_link->UdpPrimaryReady()) {
+ // While the lane is primary a peer may stay quiet for longer (hysteresis in
+ // RelayUdpClient::PrimaryReady), so a few lost or late snapshots do not cost
+ // a burst of TCP keyframes and a one-second settling period.
+ const bool laneReady=UdpSnapshotCapable() && m_link->UdpPrimaryReady(m_udpPrimary);
+ if(laneReady) {
   if(!m_udpReadySinceUs) m_udpReadySinceUs=nowUs;
   const unsigned self=m_asyncIndex[0], other=(self+1)%m_numMachines;
   if(nowUs-m_udpReadySinceUs<1000000) reason="UDP confirmation settling";
@@ -402,7 +415,7 @@ bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
  if(silent!=m_udpPrimary) {
   m_udpPrimary=silent;
   if(silent) InfoLog("Relay UDP: positions now UDP only; TCP carries control messages only");
-  else InfoLog("Relay UDP: TCP ring resumed (%s)",reason);
+  else { if(!laneReady) ++m_statUdpPrimaryDrops; InfoLog("Relay UDP: TCP ring resumed (%s)",reason); }
  }
  if(silent && nowUs-m_udpControlLogUs>=10000000) {
   if(m_statTcpControl!=m_statTcpControlLogged) {
@@ -415,6 +428,17 @@ bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
    InfoLog("Relay UDP: %llu control messages sent by TCP so far (offset:count%s)",(unsigned long long)m_statTcpControl,where.c_str());
   }
   m_statTcpControlLogged=m_statTcpControl; m_udpControlLogUs=nowUs;
+  CNetBoardLink::UdpStats u;
+  if(m_link->GetUdpStats(u) && u.sent) {
+   InfoLog("Relay UDP: delta lane %llu/%llu snapshots as deltas, %llu -> %llu bytes (%.0f%% saved); received %llu (%llu deltas, %llu waited for keyframe, %llu stale)",
+    (unsigned long long)u.sentDelta,(unsigned long long)u.sent,(unsigned long long)u.sentRawBytes,(unsigned long long)u.sentBytes,
+    u.sentRawBytes?100.0*(1.0-double(u.sentBytes)/double(u.sentRawBytes)):0.0,
+    (unsigned long long)u.received,(unsigned long long)u.receivedDelta,(unsigned long long)u.deltaBaseUnknown,(unsigned long long)u.deltaStale);
+   const double expected=double(u.datagrams+u.lost);
+   InfoLog("Relay UDP: inbound %llu snapshots, %llu lost (%.1f%%), %llu reordered, %llu duplicated; lane fell back to TCP %llu times",
+    (unsigned long long)u.datagrams,(unsigned long long)u.lost,expected>0?100.0*double(u.lost)/expected:0.0,
+    (unsigned long long)u.reordered,(unsigned long long)u.duplicated,(unsigned long long)m_statUdpPrimaryDrops);
+  }
  }
  // The lane stays UDP, but a pending control message is originated by TCP.
  return silent && !ControlMessagePending();
@@ -470,23 +494,60 @@ void CSimNetBoard::ApplyUdpSnapshots(uint64_t nowUs)
     m_asyncLatest.size()!=size_t(m_numMachines)*m_segmentSize) return;
  for(unsigned slot=0;slot+1<m_numMachines;++slot) {
   if(!m_asyncKeyframeValid[slot]) continue;
-  const unsigned remote=(unsigned(m_asyncIndex[0])+m_numMachines-1-slot)%m_numMachines;
+  const unsigned remote=UdpOriginForSlot(slot);
   CNetBoardLink::UdpSnapshot snap;
   if(!m_link->LatestSnapshot(remote,m_asyncLatestSourceUs[slot],snap) || !snap.timed ||
      snap.raw.size()!=m_segmentSize || nowUs<snap.receivedUs) continue;
-  // Hold the snapshot until the TCP control message it was built on is here.
-  if(snap.controlUs>m_asyncKeyframeSourceUs[slot]) { ++m_statUdpHeldForControl; continue; }
   const size_t offset=size_t(slot)*m_segmentSize;
-  if(!GameNetwork::PresentationCompatible(m_gameInfo.name,m_asyncKeyframe.data()+offset,snap.raw.data(),
-     m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) continue;
-  memcpy(m_asyncLatest.data()+offset,snap.raw.data(),m_segmentSize);
+  const uint8_t* keyframe=m_asyncKeyframe.data()+offset;
+  const uint8_t* apply=snap.raw.data();
+  std::vector<uint8_t> merged;
+  if(snap.controlUs>m_asyncKeyframeSourceUs[slot]) {
+   // The TCP control message this snapshot was built on is still in flight.
+   // With the sender's streamed-word mask, apply only the streamed words and
+   // keep the control words of the last reliable segment; control therefore
+   // still arrives by TCP, in order, while remote cars keep moving. Without a
+   // mask, hold the whole snapshot as before.
+   if(snap.mask.size()!=RelayUdp::MaskSize(m_segmentSize)) { ++m_statUdpHeldForControl; continue; }
+   merged.assign(keyframe,keyframe+m_segmentSize);
+   for(size_t w=0;w*4+3<m_segmentSize;++w)
+    if(snap.mask[w/8]&(1u<<(w%8))) memcpy(merged.data()+w*4,snap.raw.data()+w*4,4);
+   apply=merged.data();
+   ++m_statUdpMerged;
+  }
+  if(!GameNetwork::PresentationCompatible(m_gameInfo.name,keyframe,apply,m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) continue;
+  memcpy(m_asyncLatest.data()+offset,apply,m_segmentSize);
   m_asyncLatestSourceUs[slot]=snap.sourceUs;
   m_asyncLatestAgeUs[slot]=snap.ageUs+(nowUs-snap.receivedUs);
+  if(snap.uncertaintyUs<5000) { m_statUdpTransitSumUs+=snap.transitUs;++m_statUdpTransitCount; }
   m_asyncLatestUncertaintyUs[slot]=snap.uncertaintyUs;
   m_asyncWorkingReceiveUs[slot]=nowUs;
   m_asyncProgress=std::chrono::steady_clock::now(); // the link is alive without TCP traffic
   ++m_statUdpApplied;
  }
+}
+
+std::vector<uint8_t> CSimNetBoard::StreamedMask() const
+{
+ std::vector<uint8_t> mask;
+ if(!UdpSnapshotCapable() || m_udpStreamed.size()!=m_segmentSize) return mask;
+ mask.assign(RelayUdp::MaskSize(m_segmentSize),0);
+ for(size_t w=0;w*4+3<m_segmentSize;++w) if(m_udpStreamed[w*4]) mask[w/8]|=uint8_t(1u<<(w%8));
+ return mask;
+}
+
+void CSimNetBoard::MergeControlWords(unsigned slot,const uint8_t* src)
+{
+ if(!UdpSnapshotCapable() || slot+1>=m_numMachines) return;
+ const size_t offset=size_t(slot)*m_segmentSize;
+ if(m_asyncLatest.size()<offset+m_segmentSize) return;
+ CNetBoardLink::UdpSnapshot snap;
+ // Only the peer's own mask says which words it trusts to UDP; without it nothing was merged.
+ if(!m_link->LatestSnapshot(UdpOriginForSlot(slot),0,snap) || snap.mask.size()!=RelayUdp::MaskSize(m_segmentSize)) return;
+ uint8_t* dst=m_asyncLatest.data()+offset;
+ for(size_t w=0;w*4+3<m_segmentSize;++w) if(!(snap.mask[w/8]&(1u<<(w%8)))) memcpy(dst+w*4,src+w*4,4);
+ for(size_t i=(m_segmentSize/4)*4;i<m_segmentSize;++i) dst[i]=src[i]; // tail bytes are never streamed
+ ++m_statTcpControlMerged;
 }
 
 // Count a TCP control message and the non-streamed offsets that caused it.

@@ -185,12 +185,31 @@ private:
 	// change in any other byte is a control message and is sent by TCP.
 	std::vector<uint8_t> m_udpByteActivity, m_udpClassSample, m_udpStreamed;
 	uint64_t m_udpClassNextUs = 0, m_udpControlLogUs = 0;
+	uint64_t m_linkStatsLogUs = 0; // last periodic link summary (InfoLog)
 	uint64_t m_statTcpControl = 0, m_statTcpControlLogged = 0, m_statUdpHeldForControl = 0;
 	void ClassifyOutgoing(uint64_t nowUs);
 	bool ControlMessagePending() const;
 	std::vector<uint32_t> m_udpControlHist;
 	void NoteControlMessage();
 	void ApplyUdpSnapshots(uint64_t nowUs);
+	// Streamed-word mask of the outgoing packet (RelayUdp::MaskSize bytes), empty until classified.
+	std::vector<uint8_t> StreamedMask() const;
+	// Copy the words NOT flagged in mask from src into dst (both m_segmentSize bytes).
+	void MergeControlWords(unsigned slot, const uint8_t* src);
+	uint64_t m_statUdpMerged = 0, m_statTcpControlMerged = 0;
+	uint64_t m_statRingRttSumUs = 0, m_statRingRttCount = 0; // own segment: send stamp -> self-echo
+	uint64_t m_statUdpTransitSumUs = 0, m_statUdpTransitCount = 0; // UDP snapshot: source stamp -> arrival (relay clock)
+	uint64_t m_statUdpPrimaryDrops = 0; // times the lane fell back from UDP-only to the ring
+	uint64_t m_statUdpPresentation = 0, m_statUdpPresentationTimed = 0; // predictor inputs taken from a UDP snapshot (and of those, with a relay-clock age)
+	// When the game last wrote the local segment of each CommRAM bank (bank 0 =
+	// Buffer, 1 = Buffer + 0x10000), so a snapshot can carry the age of its
+	// data instead of the time it was picked up. Written on the emulation
+	// thread through WriteCommRAM*; cleared when the bank becomes external.
+	uint64_t m_bankWriteFirstUs[2] = {}, m_bankWriteLastUs[2] = {};
+	void NoteSegmentWrite(unsigned addr);
+	void SampleTiming(uint64_t nowUs, uint64_t& ageUs, uint64_t& uncertaintyUs) const;
+	// Relay cabinet index whose segment occupies CommRAM receive slot `slot`.
+	unsigned UdpOriginForSlot(unsigned slot) const { return (unsigned(m_asyncIndex[0]) + m_numMachines - 1 - slot) % m_numMachines; }
 	uint64_t NextSourceStampUs(uint64_t nowUs);
 	const uint8_t* PresentationSource(size_t,std::vector<uint8_t>&,double&,double&,uint64_t* = nullptr);
 	void ApplyGamePrediction();
