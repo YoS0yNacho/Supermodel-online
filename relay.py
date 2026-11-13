@@ -821,9 +821,9 @@ import socket
 HEADER = struct.Struct('<4sBBBB16sIHHQ')
 DATAGRAM = 1200
 CHUNK = DATAGRAM - HEADER.size
-# Largest native segment (3264) + 16-byte client trailer + 1 encoding byte.
-MAX_ENCODED = 3281
-WIRE_VERSION = 2
+# Largest native segment (3264) + 24-byte client trailer + 1 encoding byte.
+MAX_ENCODED = 3289
+WIRE_VERSION = 3
 ACK_CLOCK = struct.Struct('<Q')  # relay monotonic microseconds appended to every ACK
 HELLO, ACK, SNAPSHOT, HOST_STATUS, ROUTE = 1, 2, 3, 4, 5
 CONFIG = struct.Struct('<IIII16s')

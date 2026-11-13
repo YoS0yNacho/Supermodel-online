@@ -16,7 +16,7 @@ class CRelayUdpClient {
 public:
  // sourceUs is the origin's own monotonic stamp (ordering only). When timed, ageUs
  // is the measured transit age at receivedUs and uncertaintyUs bounds its error.
- struct Sample { std::vector<uint8_t> raw;uint64_t sourceUs=0,receivedUs=0,ageUs=0,uncertaintyUs=0;uint16_t heard=0;bool timed=false; };
+ struct Sample { std::vector<uint8_t> raw;uint64_t sourceUs=0,receivedUs=0,ageUs=0,uncertaintyUs=0,controlUs=0;uint16_t heard=0;bool timed=false; };
  static constexpr uint64_t MaxAgeUs=2000000;
  static uint64_t Now() { return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
  CRelayUdpClient(const std::string& host,uint16_t port,const uint8_t* token,unsigned index,unsigned count,size_t size,const RelayUdp::HostConfig* hosted=nullptr)
@@ -35,11 +35,11 @@ public:
  unsigned Count() const { return m_count; }
  bool Active() const { const auto last=m_lastAck.load();const auto now=Now();return last && now>=last && now-last<2000000; }
  // freshUs: how long a peer may stay quiet before it stops counting as heard.
- void Submit(const void* bytes,size_t size,uint64_t sourceUs,uint64_t freshUs) {
+ void Submit(const void* bytes,size_t size,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs=0) {
   if(size!=m_size || !sourceUs || !Active()) return;
   const auto* p=static_cast<const uint8_t*>(bytes);
   std::lock_guard<std::mutex> l(m_mutex);
-  m_pending.assign(p,p+size);m_pendingSourceUs=sourceUs;m_freshUs=freshUs;
+  m_pending.assign(p,p+size);m_pendingSourceUs=sourceUs;m_pendingControlUs=controlUs;m_freshUs=freshUs;
  }
  // Returns only a sample strictly newer than afterSourceUs (no copy otherwise).
  bool Latest(unsigned origin,Sample& sample,uint64_t afterSourceUs=0) {
@@ -134,7 +134,7 @@ private:
     std::lock_guard<std::mutex> l(m_mutex);
     auto& s=m_samples[h.origin];
     if(h.sourceUs<=s.sourceUs) continue;
-    s.raw=std::move(raw);s.sourceUs=h.sourceUs;s.receivedUs=received;s.heard=t.heard;s.timed=false;s.ageUs=s.uncertaintyUs=0;
+    s.raw=std::move(raw);s.sourceUs=h.sourceUs;s.receivedUs=received;s.heard=t.heard;s.controlUs=t.controlUs;s.timed=false;s.ageUs=s.uncertaintyUs=0;
     // Age = (receive time on the shared clock) - (sample time on the shared clock).
     int64_t offset=0;uint64_t rtt=0;
     if((t.clock==1 || t.clock==2) && t.clockUs && t.clockUs<=uint64_t(INT64_MAX) && Estimate(m_clocks[t.clock-1],received,offset,rtt)) {
@@ -144,14 +144,14 @@ private:
      if(age>=-int64_t(s.uncertaintyUs)-2000 && age<=int64_t(MaxAgeUs)) { s.ageUs=uint64_t(std::max<int64_t>(0,age));s.timed=true; }
     }
    }
-   std::vector<uint8_t> pending;uint64_t source=0;
-   { std::lock_guard<std::mutex> l(m_mutex);pending.swap(m_pending);source=m_pendingSourceUs; }
+   std::vector<uint8_t> pending;uint64_t source=0,control=0;
+   { std::lock_guard<std::mutex> l(m_mutex);pending.swap(m_pending);source=m_pendingSourceUs;control=m_pendingControlUs; }
    const auto routeNow=Now();
    const bool useHost=m_hosted && hostRoute && routeAt && routeNow>=routeAt && routeNow-routeAt<1000000 && hostAck && routeNow>=hostAck && routeNow-hostAck<1500000;
    m_usingHost=useHost;
    if(m_hosted && useHost!=lastRoute) {std::fprintf(stderr,"UDP self-host: snapshots via %s.\n",useHost?"creator":"central relay fallback");lastRoute=useHost;}
    if(pending.size()==m_size && Active()) {
-    RelayUdp::Trailer t;
+    RelayUdp::Trailer t;t.controlUs=control;
     {
      std::lock_guard<std::mutex> l(m_mutex);
      for(unsigned i=0;i<m_count;++i) if(i!=m_index && Fresh(m_samples[i],routeNow)) t.heard|=uint16_t(1u<<i);
@@ -176,7 +176,7 @@ private:
  UDPsocket m_socket=nullptr;IPaddress m_server{};std::array<uint8_t,16> m_token{};
  std::atomic<bool> m_stop{false},m_usingHost{false};std::atomic<uint64_t> m_lastAck{0};std::thread m_thread;
  std::mutex m_mutex;std::vector<Sample> m_samples;std::vector<RelayUdp::Assembly> m_assemblies;
- std::vector<uint8_t> m_pending;uint64_t m_pendingSourceUs=0,m_freshUs=300000;
+ std::vector<uint8_t> m_pending;uint64_t m_pendingSourceUs=0,m_pendingControlUs=0,m_freshUs=300000;
  std::array<Clock,2> m_clocks{}; // 0 = central relay, 1 = creator host
 };
 #endif

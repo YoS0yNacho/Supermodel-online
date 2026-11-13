@@ -80,12 +80,23 @@ pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
 By default the relay opens UDP on the same port number as TCP. Allow **both**
 TCP and UDP on that port.
 
-- **During a race** each cabinet sends its whole snapshot by UDP at the tick
-  rate, and the relay fans it out to every other cabinet in one hop. The TCP
-  connections stay open but carry no snapshots. A lost datagram is not resent;
-  the next snapshot replaces it.
-- **TCP still carries** link setup, the race-start barrier, one keyframe each
-  time a cabinet's race state changes, and a 1 Hz keepalive ping.
+- **During a race** each cabinet sends its snapshot by UDP at the tick rate,
+  and the relay fans it out to every other cabinet in one hop. A lost datagram
+  is not resent; the next snapshot replaces it.
+- **Positions by UDP, control messages by TCP.** Each cabinet classifies the
+  fields of its own outgoing packet. A 32-bit field that keeps changing on more
+  than one tick in seven (positions, speeds, frame counters) is
+  *streamed* and travels by UDP only. A change in any other field (lap, rank,
+  finish and handshake flags, race phase) is a *control message*: that packet
+  is sent round the TCP ring, in order, exactly as before. No per-game table
+  is needed; the split is learned from the traffic.
+- **Ordering.** Every UDP snapshot names the last TCP control message it was
+  built on, and a receiver holds the snapshot until that message has arrived.
+  A control state is therefore never skipped or seen out of order, and UDP
+  never delivers control data that TCP has not delivered first.
+- **TCP also carries** link setup, the race-start barrier and a 1 Hz keepalive
+  ping. The log reports how many control messages were sent and which packet
+  offsets caused them (`Relay UDP: N control messages sent by TCP so far`).
 - **Automatic fallback.** A cabinet stops sending on TCP only while every other
   cabinet reports, inside its own UDP snapshots, that it is receiving that
   cabinet's UDP. If any cabinet stops confirming (firewall, NAT, packet loss
@@ -103,7 +114,7 @@ python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20             # UDP rac
 python3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20 --tcp-only  # TCP ring only
 ```
 
-The UDP wire format is version 2. Update `relay.py` and every cabinet together;
+The UDP wire format is version 3. Update `relay.py` and every cabinet together;
 an older build on either side is ignored on UDP and the room runs on TCP.
 
 ROM-free test: `python3 Tests/run_udp_primary.py [--sanitize]`.

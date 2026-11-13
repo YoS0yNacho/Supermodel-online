@@ -84,11 +84,14 @@ int main(int argc, char** argv)
   const unsigned n = unsigned(argc - 4);
   std::vector<std::unique_ptr<Cabinet>> c;
   for (unsigned i = 0; i < n; ++i) c.emplace_back(new Cabinet(game, relay, argv[4 + i]));
-  unsigned frame = 0, phase = 21, maxStale = 0;
+  unsigned frame = 0, phase = 21, maxStale = 0, control = 0;
+  constexpr size_t ControlOffset = 0x300; // a quiet byte: not a position, not race context
+  std::vector<std::vector<unsigned>> controlSeen(n, std::vector<unsigned>(n, 0));
   bool ready = false;
-  auto packet = [&](unsigned owner, unsigned f, unsigned ph) {
+  auto packet = [&](unsigned owner, unsigned f, unsigned ph, unsigned ctl) {
     auto p = ScudPacket(owner, f, n, 1);
     p[0x1f ^ 2] = p[0x21 ^ 2] = uint8_t(ph);
+    p[ControlOffset] = uint8_t(ctl);
     ScudChecksum(p);
     return p;
   };
@@ -103,7 +106,7 @@ int main(int argc, char** argv)
       {
         const uint16_t role = index == 0 ? 0 : 1;
         memcpy(c[i]->ram.data() + c[i]->Base(), &role, 2);
-        const auto p = packet(unsigned(index) + 1, frame, phase);
+        const auto p = packet(unsigned(index) + 1, frame, phase, control);
         for (unsigned bank : {0u, 0x10000u}) memcpy(c[i]->buffer.data() + bank + 0x100, p.data(), p.size());
       }
       b.RunFrame();
@@ -121,8 +124,12 @@ int main(int argc, char** argv)
         uint32_t stamp = 0;
         if (!Scud::DecodeHeader(raw, Segment, stamp)) continue; // nothing received yet
         const unsigned owner = 1 + (i + n - 1 - slot) % n;
-        const auto original = packet(owner, stamp, Scud::Read8(raw, 0x1f));
+        const unsigned ctl = raw[ControlOffset];
+        const auto original = packet(owner, stamp, Scud::Read8(raw, 0x1f), ctl);
         CHECK(!memcmp(raw, original.data(), Segment));
+        // Control values must arrive in order with none skipped.
+        CHECK(ctl == controlSeen[i][slot] || ctl == controlSeen[i][slot] + 1);
+        controlSeen[i][slot] = ctl;
         CHECK(stamp <= frame);
         maxStale = std::max(maxStale, frame - stamp);
         CHECK(b.m_asyncLatestAgeUs[slot] < 1500000);
@@ -189,6 +196,29 @@ int main(int argc, char** argv)
     CHECK(silent() && maxStale <= 60 && errors == 0);
     std::cout << "PASS primary cabinets=" << n << ": 3 s of racing with 0 TCP segments, steady staleness " << steadyStale * 8
               << " ms, state change sent as " << (t2[0] - t1[0]) << " TCP keyframe(s)\n";
+    finished = true;
+    return 0;
+  }
+  if (scenario == "control")
+  {
+    // 16 short-lived control values while the relay drops 15% of UDP snapshots.
+    // Each one must reach every cabinet, in order, as a TCP control message,
+    // and positions must keep flowing by UDP.
+    std::cout << "CTL loss 0.15\n"; run(0.5); maxStale = 0;
+    const auto u2 = udp();
+    for (control = 1; control <= 16; ++control) run(0.16);
+    control = 16; run(0.5);
+    const auto t2 = tcp(); const auto u3 = udp();
+    for (unsigned i = 0; i < n; ++i)
+    {
+      for (unsigned slot = 0; slot + 1 < n; ++slot) CHECK(controlSeen[i][slot] == 16);
+      std::cout << "INFO cabinet " << i << " tcp=" << (t2[i] - t1[i]) << " udp=" << (u3[i] - u2[i]) << " held=" << c[i]->board->m_statUdpHeldForControl << " lane=" << c[i]->board->m_udpPrimary << "\n";
+      CHECK(t2[i] - t1[i] >= 16 && t2[i] - t1[i] <= 40);   // one TCP message per control change (plus loss fallbacks)
+      CHECK(u3[i] - u2[i] >= 25 * (n - 1));                // positions still streamed by UDP
+    }
+    CHECK(maxStale <= 60 && errors == 0);
+    std::cout << "PASS control cabinets=" << n << ": 16 control values delivered in order under 15% UDP loss, "
+              << (t2[0] - t1[0]) << " TCP messages, worst staleness " << maxStale * 8 << " ms\n";
     finished = true;
     return 0;
   }

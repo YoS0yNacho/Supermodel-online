@@ -384,15 +384,15 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
  InfoLog("Relay UDP: snapshot lane configured (UDP port %u); in-race snapshots use UDP, setup/start control and fallback use TCP",cfg.port);
  return true;
 }
-void CNetBoardLink::SendPresentation(const void* p,size_t n,uint64_t sourceUs,uint64_t freshUs)
+void CNetBoardLink::SendPresentation(const void* p,size_t n,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs)
 {
- std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->Submit(p,n,sourceUs,freshUs);
+ std::lock_guard<std::mutex> lock(m_mutex);if(m_udp && !m_relayFailed) m_udp->Submit(p,n,sourceUs,freshUs,controlUs);
 }
 bool CNetBoardLink::LatestSnapshot(unsigned origin,uint64_t afterSourceUs,UdpSnapshot& out)
 {
  std::lock_guard<std::mutex> lock(m_mutex);
  CRelayUdpClient::Sample s;if(!m_udp || m_relayFailed || !m_udp->Latest(origin,s,afterSourceUs)) return false;
- out.raw=std::move(s.raw);out.sourceUs=s.sourceUs;out.receivedUs=s.receivedUs;out.ageUs=s.ageUs;out.uncertaintyUs=s.uncertaintyUs;out.timed=s.timed;
+ out.raw=std::move(s.raw);out.sourceUs=s.sourceUs;out.receivedUs=s.receivedUs;out.ageUs=s.ageUs;out.uncertaintyUs=s.uncertaintyUs;out.controlUs=s.controlUs;out.timed=s.timed;
  return true;
 }
 bool CNetBoardLink::UdpPrimaryReady()

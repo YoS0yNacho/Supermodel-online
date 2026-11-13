@@ -83,8 +83,8 @@ public:
   bool IsRelay() const { return m_relay; }
   // UDP snapshot lane (relay sessions only). sourceUs orders this cabinet's
   // snapshots across both lanes; freshUs is the peer-silence tolerance.
-  struct UdpSnapshot { std::vector<uint8_t> raw; uint64_t sourceUs=0, receivedUs=0, ageUs=0, uncertaintyUs=0; bool timed=false; };
-  void SendPresentation(const void*,size_t,uint64_t sourceUs,uint64_t freshUs);
+  struct UdpSnapshot { std::vector<uint8_t> raw; uint64_t sourceUs=0, receivedUs=0, ageUs=0, uncertaintyUs=0, controlUs=0; bool timed=false; };
+  void SendPresentation(const void*,size_t,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs=0);
   bool LatestPresentation(unsigned origin,std::vector<uint8_t>& raw,uint64_t& sourceUs,uint64_t& receivedUs);
   // Latest snapshot from origin, only if strictly newer than afterSourceUs.
   bool LatestSnapshot(unsigned origin,uint64_t afterSourceUs,UdpSnapshot& out);

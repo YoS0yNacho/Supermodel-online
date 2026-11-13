@@ -28,6 +28,11 @@
 #include "UdpPresentationPolicy.h"
 #include "Srally2/MultiStartResearch.h"
 #include <cstdlib>
+#include <cstdio>
+#include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
 bool CSimNetBoard::Srally2PeersReady() const {
   return Srally2::Research::RingEligible(m_asyncLatest.data(),m_asyncLatest.size(),m_numMachines,m_asyncIndex[0]);
 }
@@ -396,10 +401,64 @@ bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
  } else m_udpReadySinceUs=0;
  if(silent!=m_udpPrimary) {
   m_udpPrimary=silent;
-  if(silent) InfoLog("Relay UDP: race snapshots now UDP only; TCP ring silent (keyframes on state change)");
+  if(silent) InfoLog("Relay UDP: positions now UDP only; TCP carries control messages only");
   else InfoLog("Relay UDP: TCP ring resumed (%s)",reason);
  }
- return silent;
+ if(silent && nowUs-m_udpControlLogUs>=10000000) {
+  if(m_statTcpControl!=m_statTcpControlLogged) {
+   // Name the packet offsets that caused them, most frequent first.
+   std::vector<std::pair<uint32_t,unsigned>> top;
+   for(unsigned i=0;i<m_udpControlHist.size();++i) if(m_udpControlHist[i]) top.emplace_back(m_udpControlHist[i],i);
+   std::sort(top.begin(),top.end(),[](const auto& x,const auto& y){return x.first>y.first;});
+   std::string where;
+   for(size_t i=0;i<top.size() && i<24;++i) { char t[32]; snprintf(t,sizeof t," %03x:%u",top[i].second,top[i].first); where+=t; }
+   InfoLog("Relay UDP: %llu control messages sent by TCP so far (offset:count%s)",(unsigned long long)m_statTcpControl,where.c_str());
+  }
+  m_statTcpControlLogged=m_statTcpControl; m_udpControlLogUs=nowUs;
+ }
+ // The lane stays UDP, but a pending control message is originated by TCP.
+ return silent && !ControlMessagePending();
+}
+
+// Learn which bytes of the outgoing packet are streamed state. Sampled once
+// per network tick: a change adds 6, a quiet tick subtracts 1 (range 0..150)
+// and 90 means streamed. A byte therefore has to change on more than one tick
+// in seven, and at least 15 times, before it is trusted to UDP alone; it is
+// demoted after it holds still for up to 3 seconds. A short burst of distinct
+// values (a handshake stepping through its states) does not qualify.
+void CSimNetBoard::ClassifyOutgoing(uint64_t nowUs)
+{
+ if(!UdpSnapshotCapable() || nowUs<m_udpClassNextUs) return;
+ m_udpClassNextUs=nowUs+1000000ULL/m_tickRateHz;
+ const uint8_t* cur=CommRAM+0x100;
+ if(m_udpClassSample.size()!=m_segmentSize) {
+  m_udpClassSample.assign(cur,cur+m_segmentSize);
+  m_udpByteActivity.assign(m_segmentSize,0);
+  return;
+ }
+ for(size_t i=0;i<m_segmentSize;++i) {
+  uint8_t& a=m_udpByteActivity[i];
+  if(cur[i]!=m_udpClassSample[i]) { a=uint8_t(std::min<unsigned>(150u,a+6u)); m_udpClassSample[i]=cur[i]; }
+  else if(a) --a;
+ }
+ // Classify by aligned 32-bit field: the high bytes of a moving coordinate
+ // change rarely on their own but belong to the same streamed value.
+ m_udpStreamed.assign(m_segmentSize,0);
+ for(size_t i=0;i+3<m_segmentSize;i+=4)
+  if(std::max(std::max(m_udpByteActivity[i],m_udpByteActivity[i+1]),std::max(m_udpByteActivity[i+2],m_udpByteActivity[i+3]))>=90)
+   m_udpStreamed[i]=m_udpStreamed[i+1]=m_udpStreamed[i+2]=m_udpStreamed[i+3]=1;
+}
+
+// A control message is any difference from the last TCP segment in a byte
+// that is not streamed. Every such change is sent by TCP, in order, exactly as
+// the ring delivered it before; only streamed bytes rely on UDP alone.
+bool CSimNetBoard::ControlMessagePending() const
+{
+ if(m_udpStreamed.size()!=m_segmentSize || m_asyncLastSent.size()!=m_segmentSize) return true;
+ const uint8_t* cur=CommRAM+0x100;
+ for(size_t i=0;i<m_segmentSize;++i)
+  if(cur[i]!=m_asyncLastSent[i] && !m_udpStreamed[i]) return true;
+ return false;
 }
 
 // Fill each remote slot from the newest UDP snapshot. A snapshot is accepted
@@ -407,7 +466,7 @@ bool CSimNetBoard::UdpPrimarySilent(uint64_t nowUs)
 // race context of that cabinet's last reliable TCP segment.
 void CSimNetBoard::ApplyUdpSnapshots(uint64_t nowUs)
 {
- if(!UdpSnapshotCapable() || m_asyncKeyframeValid.size()!=m_numMachines ||
+ if(!UdpSnapshotCapable() || m_asyncKeyframeValid.size()!=m_numMachines || m_asyncKeyframeSourceUs.size()!=m_numMachines ||
     m_asyncLatest.size()!=size_t(m_numMachines)*m_segmentSize) return;
  for(unsigned slot=0;slot+1<m_numMachines;++slot) {
   if(!m_asyncKeyframeValid[slot]) continue;
@@ -415,6 +474,8 @@ void CSimNetBoard::ApplyUdpSnapshots(uint64_t nowUs)
   CNetBoardLink::UdpSnapshot snap;
   if(!m_link->LatestSnapshot(remote,m_asyncLatestSourceUs[slot],snap) || !snap.timed ||
      snap.raw.size()!=m_segmentSize || nowUs<snap.receivedUs) continue;
+  // Hold the snapshot until the TCP control message it was built on is here.
+  if(snap.controlUs>m_asyncKeyframeSourceUs[slot]) { ++m_statUdpHeldForControl; continue; }
   const size_t offset=size_t(slot)*m_segmentSize;
   if(!GameNetwork::PresentationCompatible(m_gameInfo.name,m_asyncKeyframe.data()+offset,snap.raw.data(),
      m_segmentSize,remote,m_asyncIndex[0],m_numMachines)) continue;
@@ -426,4 +487,15 @@ void CSimNetBoard::ApplyUdpSnapshots(uint64_t nowUs)
   m_asyncProgress=std::chrono::steady_clock::now(); // the link is alive without TCP traffic
   ++m_statUdpApplied;
  }
+}
+
+// Count a TCP control message and the non-streamed offsets that caused it.
+void CSimNetBoard::NoteControlMessage()
+{
+ ++m_statTcpControl;
+ if(m_udpStreamed.size()!=m_segmentSize || m_asyncLastSent.size()!=m_segmentSize) return;
+ m_udpControlHist.resize(m_segmentSize);
+ const uint8_t* cur=CommRAM+0x100;
+ for(size_t i=0;i<m_segmentSize;++i)
+  if(cur[i]!=m_asyncLastSent[i] && !m_udpStreamed[i]) ++m_udpControlHist[i];
 }

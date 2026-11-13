@@ -160,6 +160,8 @@ private:
 	// Per-source timestamp measurements published atomically with a complete ring.
 	std::vector<uint64_t> m_asyncWorkingAgeUs, m_asyncWorkingUncertaintyUs, m_asyncWorkingReceiveUs;
 	std::vector<uint64_t> m_asyncLatestAgeUs, m_asyncLatestUncertaintyUs, m_asyncLatestSourceUs;
+	std::vector<uint64_t> m_asyncKeyframeSourceUs;  // stamp of the last TCP segment per slot
+	uint64_t m_asyncLastTcpSourceUs = 0;            // stamp of our last originated TCP segment
 	uint64_t m_asyncLastClockPingUs = 0;
 	std::chrono::steady_clock::time_point m_asyncProgress;
 
@@ -178,6 +180,16 @@ private:
 	uint64_t m_statTcpOriginated = 0, m_statUdpApplied = 0, m_statTcpStaleSkipped = 0;
 	bool UdpSnapshotCapable() const;
 	bool UdpPrimarySilent(uint64_t nowUs);
+	// Message classification for the silent ring: bytes that change on most
+	// ticks are streamed state (positions, timers) and travel by UDP only; a
+	// change in any other byte is a control message and is sent by TCP.
+	std::vector<uint8_t> m_udpByteActivity, m_udpClassSample, m_udpStreamed;
+	uint64_t m_udpClassNextUs = 0, m_udpControlLogUs = 0;
+	uint64_t m_statTcpControl = 0, m_statTcpControlLogged = 0, m_statUdpHeldForControl = 0;
+	void ClassifyOutgoing(uint64_t nowUs);
+	bool ControlMessagePending() const;
+	std::vector<uint32_t> m_udpControlHist;
+	void NoteControlMessage();
 	void ApplyUdpSnapshots(uint64_t nowUs);
 	uint64_t NextSourceStampUs(uint64_t nowUs);
 	const uint8_t* PresentationSource(size_t,std::vector<uint8_t>&,double&,double&,uint64_t* = nullptr);

@@ -10,10 +10,10 @@
 #include <vector>
 namespace RelayUdp {
 constexpr size_t DatagramSize=1200, HeaderSize=40, ChunkSize=DatagramSize-HeaderSize;
-// Every snapshot carries a 16-byte trailer after the native segment (see Trailer).
-constexpr size_t MaxSegmentSize=3264, TrailerSize=16, MaxRawSize=MaxSegmentSize+TrailerSize, MaxEncodedSize=MaxRawSize+1;
+// Every snapshot carries a 24-byte trailer after the native segment (see Trailer).
+constexpr size_t MaxSegmentSize=3264, TrailerSize=24, MaxRawSize=MaxSegmentSize+TrailerSize, MaxEncodedSize=MaxRawSize+1;
 constexpr size_t AckClockSize=8; // Ack = header + responder clock (microseconds, little endian)
-constexpr uint8_t Version=2, Hello=1, Ack=2, Snapshot=3, HostStatus=4, Route=5;
+constexpr uint8_t Version=3, Hello=1, Ack=2, Snapshot=3, HostStatus=4, Route=5;
 #pragma pack(push,1)
 struct Header {
  uint32_t magic=0x31504755; // UGP1, little endian
@@ -31,6 +31,9 @@ struct Trailer {
  uint8_t clock=0,reserved=0;
  uint32_t rttUs=0;
  uint64_t clockUs=0;
+ // Stamp of the sender's last TCP control message. The receiver holds this
+ // snapshot until that message has arrived, so control stays reliable and ordered.
+ uint64_t controlUs=0;
 };
 #pragma pack(pop)
 static_assert(sizeof(Header)==HeaderSize,"UDP header wire size");

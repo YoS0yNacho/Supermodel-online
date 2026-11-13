@@ -3,6 +3,7 @@
 plus the real HLE net board. Requires g++, SDL2/SDL2_net dev packages, Python 3.9+.
 Run from anywhere: python3 Tests/run_udp_primary.py [--sanitize]
 """
+import random
 import argparse
 import asyncio
 import shlex
@@ -43,11 +44,14 @@ def build(sanitize):
 
 
 class Filter:
-    """Wraps the relay's UDP transport; can stop snapshot delivery to one cabinet."""
+    """Wraps the relay's UDP transport; can stop snapshot delivery to one cabinet or drop a share of all snapshots."""
     def __init__(self, udp, transport):
-        self.udp, self.transport, self.blocked = udp, transport, None
+        self.udp, self.transport, self.blocked, self.loss = udp, transport, None, 0.0
+        self.random = random.Random(1)
 
     def sendto(self, packet, address):
+        if self.loss and packet[5] == relay.relay_udp.SNAPSHOT and self.random.random() < self.loss:
+            return
         if self.blocked is not None and packet[5] == relay.relay_udp.SNAPSHOT:
             session = self.udp.sessions.get(packet[8:24])
             if session is not None and session.index == self.blocked:
@@ -97,7 +101,9 @@ async def case(binary, scenario, n, tick_rate=20):
                     flt.blocked = 1
                 elif text == "CTL unblock":
                     flt.blocked = None
-                elif text.startswith("PASS"):
+                elif text.startswith("CTL loss "):
+                    flt.loss = float(text.split()[2])
+                elif text.startswith("PASS") or text.startswith("INFO"):
                     print(text, flush=True)
         await asyncio.wait_for(pump(), 90)
         if await proc.wait():
@@ -120,7 +126,7 @@ async def case(binary, scenario, n, tick_rate=20):
 
 
 async def main(binary):
-    cases = [("primary", 2), ("primary", 4), ("recover", 3), ("fallback", 3), ("tcp-only", 2)]
+    cases = [("primary", 2), ("primary", 4), ("control", 3), ("recover", 3), ("fallback", 3), ("tcp-only", 2)]
     for args in cases:
         await case(binary, *args)
     print(f"PASS: all {len(cases)} UDP-primary scenarios")

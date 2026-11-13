@@ -756,10 +756,16 @@ void CSimNetBoard::FinishAsyncTesting()
 	m_asyncLatestAgeUs = m_asyncWorkingAgeUs;
 	m_asyncLatestUncertaintyUs = m_asyncWorkingUncertaintyUs;
 	m_asyncLatestSourceUs.assign(m_numMachines, 0);
+	m_asyncKeyframeSourceUs.assign(m_numMachines, 0);
+	m_asyncLastTcpSourceUs = 0;
 	m_asyncKeyframe.assign(size_t(m_numMachines) * m_segmentSize, 0);
 	m_asyncKeyframeValid.assign(m_numMachines, 0);
 	m_udpReadySinceUs = 0;
 	m_udpPrimary = false;
+	m_udpByteActivity.clear();
+	m_udpStreamed.clear();
+	m_udpClassSample.clear();
+	m_udpClassNextUs = 0;
 	m_asyncLastClockPingUs = 0;
 	m_asyncInFlightCount = 0;
 	m_asyncUnackedFromPeer = 0;
@@ -802,8 +808,12 @@ void CSimNetBoard::RunAsyncExchange()
 		if (linkHz != m_tickRateHz)
 			SetTickRate(linkHz);
 	}
-	// One latest-wins UDP snapshot per tick. During a race this is the only
-	// copy sent; a lost one is superseded by the next and never resent.
+	// One latest-wins UDP snapshot per tick: streamed state (positions), never
+	// resent. Each snapshot names the TCP control message it was built on
+	// (controlUs) and receivers hold it until that message has arrived. A
+	// snapshot that already contains a control change not yet sent by TCP names
+	// itself, so receivers never apply it: the TCP message that follows carries
+	// that change. It still counts as a sign of life for the UDP lane.
 	if (m_relay && m_link && m_link->UdpActive())
 	{
 		const uint64_t udpNow = AsyncNowUs();
@@ -811,8 +821,10 @@ void CSimNetBoard::RunAsyncExchange()
 		{
 			const uint64_t interval = 1000000ULL / m_tickRateHz;
 			// A peer counts as heard for 3.5 ticks (at least 150 ms) after its last snapshot.
-			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize, NextSourceStampUs(udpNow),
-				std::max<uint64_t>(150000ULL, interval * 7 / 2));
+			const uint64_t stampUs = NextSourceStampUs(udpNow);
+			m_link->SendPresentation(CommRAM + 0x100, m_segmentSize, stampUs,
+				std::max<uint64_t>(150000ULL, interval * 7 / 2),
+				(m_udpPrimary && ControlMessagePending()) ? stampUs : m_asyncLastTcpSourceUs);
 			m_udpNextSendUs = m_udpNextSendUs && udpNow - m_udpNextSendUs < interval
 				? m_udpNextSendUs + interval : udpNow + interval;
 		}
@@ -834,6 +846,7 @@ void CSimNetBoard::RunAsyncExchange()
 		// Refresh the direct-neighbour clock for sample-age estimates.
 		// While UDP carries the race the ring is silent: no originated segments
 		// and no hop-clock pings (TickStartSync keeps its 1 Hz keepalive ping).
+		ClassifyOutgoing(nowUs);
 		const bool udpSilent = UdpPrimarySilent(nowUs);
 		const int64_t clockRttUs = m_link->GetIncomingClock().rtt;
 		const uint64_t clockPingIntervalUs = std::max<uint64_t>(500000ULL, uint64_t(std::max<int64_t>(0, clockRttUs)));
@@ -860,7 +873,9 @@ void CSimNetBoard::RunAsyncExchange()
 		{
 			m_tickPhase = Online::ConsumeTick(m_tickPhase, frameMilliHz);
 			const uint64_t sourceStampUs = NextSourceStampUs(nowUs);
+			m_asyncLastTcpSourceUs = sourceStampUs;
 			++m_statTcpOriginated;
+			if (m_udpPrimary) NoteControlMessage();
 			auto wire = Dayto2pe::MakeTimedSegment(CommRAM + 0x100, m_segmentSize, nowUs, uint32_t(FrameDurationUs() + 0.5), sourceStampUs);
 			m_link->Send(wire.data(), wire.size());
 			m_asyncLastSent.assign(CommRAM + 0x100, CommRAM + 0x100 + m_segmentSize);
@@ -940,6 +955,7 @@ void CSimNetBoard::RunAsyncExchange()
 			{
 				memcpy(m_asyncKeyframe.data() + offset, payload, m_segmentSize);
 				m_asyncKeyframeValid[incomingHops] = 1;
+				m_asyncKeyframeSourceUs[incomingHops] = sourceUs;
 			}
 			// A newer UDP snapshot may already fill this slot; never step back in time.
 			if (sourceUs >= m_asyncLatestSourceUs[incomingHops] || incomingHops + 1 == m_numMachines)
@@ -1054,6 +1070,10 @@ void CSimNetBoard::Reset(void)
 	m_udpLogged = false;
 	m_udpReadySinceUs = 0;
 	m_udpPrimary = false;
+	m_udpByteActivity.clear();
+	m_udpStreamed.clear();
+	m_udpClassSample.clear();
+	m_udpClassNextUs = 0;
 	m_asyncKeyframe.clear();
 	m_asyncKeyframeValid.clear();
 	m_asyncPhase = AsyncPhase::start;
@@ -1070,6 +1090,8 @@ void CSimNetBoard::Reset(void)
 	m_asyncWorking.clear();
 	m_asyncLatest.clear();
 	m_asyncLatestSourceUs.clear();
+	m_asyncKeyframeSourceUs.clear();
+	m_asyncLastTcpSourceUs = 0;
 	m_gameNet.ResetPresentation();
 	if (m_async && Buffer)
 	{
