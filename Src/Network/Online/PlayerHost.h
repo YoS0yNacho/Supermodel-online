@@ -6,6 +6,7 @@
 #include "Network/RelayUpnp.h"
 #include "Network/RelayUdpWire.h"
 #include "PlayerRoom.h"
+#include "AdaptiveTickRate.h"
 #include "RoomDirectory.h"
 #ifndef _WIN32
 #include <netinet/tcp.h>
@@ -60,6 +61,9 @@ private:
   Member auth;Conn* channels[2]={};std::array<uint8_t,16> nonce{};
   uint32_t ip=0;sockaddr_in endpoint{};uint64_t hello=0,creditAt=0;double credit=0;
   RelayUdp::Header latest{};bool seen=false;uint8_t mask=0;
+  // Congestion evidence: uplink (snapshots this peer sends us) and, from its
+  // hello feedback, downlink (what it receives from us).
+  DelayMeter uplinkDelay;LossMeter uplinkLoss;unsigned feedbackQueueMs=0,feedbackLossPercent=0;uint64_t feedbackAt=0;
  };
  uint16_t port;std::array<uint8_t,16> probe;
  std::atomic<bool> stop{false},booted{false},bound{false},armed{false},started{false},failed{false},finished{false};
@@ -67,6 +71,32 @@ private:
  PlayerRoom::Settings roomSettings;bool roomReady=false;std::unique_ptr<PlayerRoom> room;uint32_t nextConnection=1;
  std::vector<Peer> peers;std::vector<std::unique_ptr<Conn>> connections;
  unsigned tick=20;size_t segment=0;uint64_t guid=0,armTime=0;Socket tcp=Bad,udp=Bad;std::thread worker;
+ // Adaptive tick rate (every member advertised the capability): one-second
+ // windows of per-peer queueing delay / loss, host TCP backlog stalls and event
+ // loop lag drive the ladder controller; changes go out as RLT1 on channel 0.
+ bool adaptive=false;AdaptiveTickRate controller;uint64_t windowStartUs=0,loopPrevUs=0,loopLagUs=0,stallUs=0;unsigned sendFailures=0;
+ std::atomic<unsigned> currentTick{0},rateChanges{0};
+ void NoteLoop(uint64_t now){if(loopPrevUs&&now>loopPrevUs&&now-loopPrevUs>20000)loopLagUs+=now-loopPrevUs;loopPrevUs=now;}
+ void AdaptTick(uint64_t now){
+  if(!started||failed||!adaptive)return;
+  if(!windowStartUs){windowStartUs=now;return;}
+  if(now-windowStartUs<1000000)return;
+  bool congested=false;
+  for(auto& p:peers){
+   if(p.uplinkDelay.Close()>=QueueDelayThresholdUs||p.uplinkLoss.ClosePercent()>=LossThresholdPercent)congested=true;
+   if(p.feedbackAt&&now-p.feedbackAt<3000000&&(p.feedbackQueueMs*1000>=uint64_t(QueueDelayThresholdUs)||p.feedbackLossPercent>=LossThresholdPercent))congested=true;
+  }
+  // Host side: a ring connection that could not drain for a while, UDP sends
+  // refused by the kernel, or the loop itself late for a quarter of the second.
+  if(stallUs>=300000||sendFailures>=5||loopLagUs>=250000)congested=true;
+  stallUs=loopLagUs=0;sendFailures=0;windowStartUs=now;
+  if(controller.Update(congested,now)){
+   tick=controller.current;currentTick=tick;++rateChanges;
+   std::vector<uint8_t> b;Put(b,1);Put(b,tick);const auto msg=Frame("RLT1",b);
+   for(auto& p:peers)if(p.channels[0]&&!p.channels[0]->Queue(msg)){Fail();return;}
+   std::fprintf(stderr,"Player host: update tick rate %s to %u Hz (%s, ceiling %u Hz).\n",congested?"lowered":"restored",tick,congested?"congestion":"link clean",controller.cap);
+  }
+ }
  static bool Nonzero(const uint8_t* p,size_t n){for(size_t i=0;i<n;++i)if(p[i])return true;return false;}
  Conn* Target(const Conn& c){if(c.index<0)return nullptr;size_t n=peers.size(),i=size_t(c.index);return c.channel==0?peers[(i+1)%n].channels[1]:peers[(i+n-1)%n].channels[0];}
  void Fail(){failed=true;for(auto& c:connections){if(c->fd!=Bad){RelayUpnp::Close(c->fd);c->fd=Bad;}}for(auto& p:peers){p.hello=0;p.channels[0]=p.channels[1]=nullptr;}}
@@ -99,9 +129,10 @@ private:
   for(auto& p:peers)if(!p.channels[0]||!p.channels[1])return;
   for(size_t i=0;i<peers.size();++i)for(unsigned ch=0;ch<2;++ch){auto& c=*peers[i].channels[ch];auto target=Target(c);if(!target || !c.Queue(target->hello)){Fail();return;}
    std::vector<uint8_t> b;Put(b,1);Put(b,tick);if(!c.Queue(Frame("RLT1",b))){Fail();return;}
+   if(adaptive){b.clear();Put(b,1);Put(b,1);Put(b,controller.cap);Put(b,controller.floor);if(!c.Queue(Frame("RLT2",b))){Fail();return;}}
    if(ch==0){b.clear();Put(b,1);Put(b,port);Put(b,uint32_t(i));Put(b,uint32_t(peers.size()));b.insert(b.end(),peers[i].auth.cookie.begin(),peers[i].auth.cookie.end());if(!c.Queue(Frame("RLU1",b))){Fail();return;}}
    b.clear();Put(b,1);Put(b,uint32_t(i));Put(b,uint32_t(peers.size()));Put(b,ch);if(!c.Queue(Frame("RLA1",b))){Fail();return;}
-  }started=true;std::fprintf(stderr,"Player host: TCP ring and UDP gameplay started for %u cabinets; central server carries no gameplay.\n",unsigned(peers.size()));
+  }started=true;windowStartUs=0;std::fprintf(stderr,"Player host: TCP ring and UDP gameplay started for %u cabinets; central server carries no gameplay%s.\n",unsigned(peers.size()),adaptive?"; adaptive tick rate":"");
  }
  void PollUdp(){
   for(unsigned budget=0;budget<128;++budget){uint8_t bytes[1201];sockaddr_in address{};
@@ -116,15 +147,18 @@ private:
    }
    RelayUdp::Header h;if(!started || failed || !RelayUdp::Parse(bytes,size_t(n),h) || h.origin>=peers.size())continue;
    auto& s=peers[h.origin];if(std::memcmp(h.token,s.auth.cookie.data(),16) || address.sin_addr.s_addr!=s.ip)continue;
-   auto now=Now();if(h.kind==RelayUdp::Hello){if(s.hello && now-s.hello<100000)continue;s.endpoint=address;s.hello=now;h.kind=RelayUdp::Ack;std::memcpy(bytes,&h,sizeof(h));sendto(udp,reinterpret_cast<char*>(bytes),int(sizeof(h)),0,reinterpret_cast<sockaddr*>(&address),sizeof(address));continue;}
+   auto now=Now();if(h.kind==RelayUdp::Hello){if(s.hello && now-s.hello<100000)continue;s.endpoint=address;s.hello=now;
+    if(adaptive){s.feedbackQueueMs=h.total;s.feedbackLossPercent=h.part;s.feedbackAt=now;h.total=0;h.part=0;}
+    h.kind=RelayUdp::Ack;std::memcpy(bytes,&h,sizeof(h));sendto(udp,reinterpret_cast<char*>(bytes),int(sizeof(h)),0,reinterpret_cast<sockaddr*>(&address),sizeof(address));continue;}
    if(h.kind!=RelayUdp::Snapshot || !s.hello || now-s.hello>3000000 || address.sin_port!=s.endpoint.sin_port)continue;
+   if(adaptive&&h.part==0){s.uplinkDelay.Note(int64_t(now)-int64_t(h.sourceUs));s.uplinkLoss.Note(h.sequence);}
    const double rate=double(RelayUdp::MaxEncodedSize+3*RelayUdp::HeaderSize)*tick,burst=rate/4+RelayUdp::MaxEncodedSize;
    s.credit=std::min(burst,s.credit+(s.creditAt?double(now-s.creditAt)/1000000*rate:0));s.creditAt=now;if(s.credit<n)continue;s.credit-=n;
    if(s.seen && h.sequence!=s.latest.sequence && !RelayUdp::Newer(h.sequence,s.latest.sequence))continue;
    if(!s.seen || h.sequence!=s.latest.sequence){s.latest=h;s.seen=true;s.mask=0;}
    if(h.sourceUs!=s.latest.sourceUs || h.total!=s.latest.total || h.parts!=s.latest.parts || s.mask&(1u<<h.part))continue;
    s.mask|=uint8_t(1u<<h.part);
-   for(size_t i=0;i<peers.size();++i){auto& dest=peers[i];if(i==h.origin || !dest.hello || now-dest.hello>3000000)continue;std::memcpy(h.token,dest.auth.cookie.data(),16);std::memcpy(bytes,&h,sizeof(h));sendto(udp,reinterpret_cast<char*>(bytes),n,0,reinterpret_cast<sockaddr*>(&dest.endpoint),sizeof(dest.endpoint));}
+   for(size_t i=0;i<peers.size();++i){auto& dest=peers[i];if(i==h.origin || !dest.hello || now-dest.hello>3000000)continue;std::memcpy(h.token,dest.auth.cookie.data(),16);std::memcpy(bytes,&h,sizeof(h));if(sendto(udp,reinterpret_cast<char*>(bytes),n,0,reinterpret_cast<sockaddr*>(&dest.endpoint),sizeof(dest.endpoint))<0&&adaptive)++sendFailures;}
   }
  }
  void Run(bool upnp){
@@ -147,8 +181,9 @@ private:
     directory=std::make_unique<RoomDirectory>(roomSettings,room->listedCount,room->listedState);
    }}
    if(room){room->Pump(armed,started,failed);if(room->Closed()){Fail();break;}}
-   if(!armed){std::lock_guard<std::mutex> l(mutex);if(configReady){tick=config.tick;segment=Segment(config.game);guid=Guid(config.game);for(auto& member:config.members){Peer p;p.auth=member;p.credit=double(RelayUdp::MaxEncodedSize+3*RelayUdp::HeaderSize)*tick/4+RelayUdp::MaxEncodedSize;peers.push_back(p);}armTime=Now();armed=true;}}
-   PollUdp();StartIfReady();
+   if(!armed){std::lock_guard<std::mutex> l(mutex);if(configReady){tick=config.tick;segment=Segment(config.game);guid=Guid(config.game);
+     adaptive=!config.members.empty();for(auto& member:config.members)adaptive=adaptive&&member.adaptive;controller.Reset(tick);currentTick=tick;for(auto& member:config.members){Peer p;p.auth=member;p.credit=double(RelayUdp::MaxEncodedSize+3*RelayUdp::HeaderSize)*tick/4+RelayUdp::MaxEncodedSize;peers.push_back(p);}armTime=Now();armed=true;}}
+   PollUdp();StartIfReady();{const auto loopNow=Now();NoteLoop(loopNow);AdaptTick(loopNow);}
    fd_set read,write;FD_ZERO(&read);FD_ZERO(&write);FD_SET(tcp,&read);Socket largest=tcp;
    for(auto& p:connections){auto& c=*p;if(c.fd==Bad)continue;auto target=started?Target(c):nullptr;
     if(!c.replyOnly && c.input.size()<49152 && (!target || target->Queued()<262144))FD_SET(c.fd,&read);
@@ -191,6 +226,7 @@ private:
      c.activity=Now();if(!Message(c,packet)){good=false;break;}if(c.replyOnly)break;
     }
     auto now=Now();bool control=room&&room->Registered(c.id);if((c.index<0 && (control?now-c.activity>40000000:now-c.born>10000000)) || (c.Queued() && now-c.progress>30000000) || (c.replyOnly && !c.Queued()))good=false;
+    if(adaptive&&c.index>=0&&c.Queued()&&now-c.progress>stallUs)stallUs=now-c.progress;
     if(!good){if(room)room->Drop(c.id);if(c.index>=0){Fail();break;}RelayUpnp::Close(c.fd);c.fd=Bad;}
    }
    connections.erase(std::remove_if(connections.begin(),connections.end(),[](const auto& c){return c->fd==Bad;}),connections.end());

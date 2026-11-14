@@ -35,7 +35,7 @@ public:
    if(std::memcmp(h.token,s.auth.token.data(),16) || rx->address.host!=s.auth.ip) continue;
    if(h.kind==Hello) {
     if(s.hello && now-s.hello<100000) continue;
-    s.endpoint=rx->address;s.hello=now;h.kind=Ack;
+    s.endpoint=rx->address;s.hello=now;h.kind=Ack;h.total=0;h.part=0; // feedback fields are not echoed
     // The Ack carries this host's clock so every cabinet can express sample times on it.
     const uint64_t clock=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     std::memcpy(tx->data,&h,sizeof(h));std::memcpy(tx->data+sizeof(h),&clock,AckClockSize);

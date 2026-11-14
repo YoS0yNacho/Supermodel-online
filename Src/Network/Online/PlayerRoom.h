@@ -14,7 +14,7 @@ namespace Online {
 class PlayerRoom {
 public:
  using Bytes=std::vector<uint8_t>;using Token=std::array<uint8_t,16>;
- struct Member {Token ticket{},cookie{};};
+ struct Member {Token ticket{},cookie{};bool adaptive=false;/* lobby HELLO bit 8: accepts mid-session tick rate changes */};
  struct Settings {uint32_t id=0,game=0,tick=20,ip=0;uint16_t port=0;std::string title;Token owner{};sockaddr_in directory{};};
  using Send=std::function<bool(uint32_t,const Bytes&)>;
  using Launch=std::function<bool(unsigned,unsigned,const std::vector<Member>&)>;
@@ -46,13 +46,14 @@ public:
     bool owner=std::memcmp(b+44,settings.owner.data(),16)==0;
     if(!(Read(b+4)&(1u<<settings.game))||(!owner&&(!order.size()||!Zero(b+44)))||(owner&&ownerId)||order.size()>=Capacity())return false;
     if(owner&&ntohl(ip)!=0x7f000001)return false;
-    c.optionsCapable=(Read(b+8)&2)!=0;c.nativeCapable=(Read(b+8)&4)!=0;c.hornetCapable=(Read(b+8)&16)!=0;c.raceCapable=(Read(b+8)&32)!=0;c.pingCapable=(Read(b+8)&128)!=0;
+    c.optionsCapable=(Read(b+8)&2)!=0;c.nativeCapable=(Read(b+8)&4)!=0;c.hornetCapable=(Read(b+8)&16)!=0;c.raceCapable=(Read(b+8)&32)!=0;c.pingCapable=(Read(b+8)&128)!=0;c.adaptiveCapable=(Read(b+8)&8)!=0;c.videoCapable=(Read(b+8)&256)!=0;
     if(owner && c.nativeCapable)options=NativeRoomSettings::Defaults(settings.game);
     if((options&NativeRoomSettings::Enabled)&&!c.nativeCapable){Error(id,"Update this client: native room settings are enabled.");return false;}
     if(NativeRoomSettings::CarLimit(settings.game)){for(unsigned car=1;car<=NativeRoomSettings::CarLimit(settings.game);++car){bool used=false;for(auto member:order)used|=clients.at(member).nativeCar==car;if(!used){c.nativeCar=car;break;}}}
     if(NativeRoomSettings::HasHornet(settings.game,options)&&!c.hornetCapable){Error(id,"Update this client: Hornet is enabled in this room.");return false;}
     if(NativeRoomSettings::HasRealPlayers(settings.game,options)&&!c.raceCapable){Error(id,"Update this client: Real players only is enabled in this room.");return false;}
     if(NativeRoomSettings::HasNoCollisions(settings.game,options)&&!c.raceCapable){Error(id,"Update this client: collisions are disabled in this room.");return false;}
+    if(NativeRoomSettings::HasVideo60(options)&&!c.videoCapable){Error(id,"Update this client: 60 Hz video is enabled in this room.");return false;}
     if(options && !c.optionsCapable){Error(id,"Update this client: Secret Cars is enabled in this room.");return false;}
     c.name=Name(b+12,32);if(owner)ownerId=id;c.number=nextMember++;c.role=1;order.push_back(id);clients.emplace(id,c);
     send(id,Frame("HEL1"));Broadcast();for(auto& m:history)send(id,m);
@@ -83,6 +84,7 @@ public:
     if(NativeRoomSettings::HasHornet(settings.game,value)){for(auto member:order)if(!clients.at(member).hornetCapable){Error(id,"Update all room members before enabling Hornet.");return true;}}
     if(NativeRoomSettings::HasRealPlayers(settings.game,value)){for(auto member:order)if(!clients.at(member).raceCapable){Error(id,"Update all room members before enabling Real players only.");return true;}}
     if(NativeRoomSettings::HasNoCollisions(settings.game,value)){for(auto member:order)if(!clients.at(member).raceCapable){Error(id,"Update all room members before disabling collisions.");return true;}}
+    if(NativeRoomSettings::HasVideo60(value)){for(auto member:order)if(!clients.at(member).videoCapable){Error(id,"Update all room members before selecting 60 Hz video.");return true;}}
     options=value;Broadcast();return true;
    }
    if(kind=="OCN1"&&n==8){
@@ -96,7 +98,7 @@ public:
     if(id!=ownerId||state||order.size()<2){Error(id,"Only the master can start with at least two members.");return true;}
     if(AllNative()&&NativeRoomSettings::CarLimit(settings.game)){for(auto member:order)if(!clients.at(member).nativeCar){Error(id,"Every player must select a unique CAR NUMBER before Start Link.");return true;}}
     std::vector<Member> auth;std::vector<Token> issued;
-    try{for(auto member:order){Frozen f;f.name=clients.at(member).name;f.number=clients.at(member).number;f.nativeCar=AllNative()?clients.at(member).nativeCar:0;do{f.auth.ticket=Random();}while(std::find(issued.begin(),issued.end(),f.auth.ticket)!=issued.end());issued.push_back(f.auth.ticket);do{f.auth.cookie=Random();}while(std::find(issued.begin(),issued.end(),f.auth.cookie)!=issued.end());issued.push_back(f.auth.cookie);frozen.push_back(f);auth.push_back(f.auth);}}
+    try{for(auto member:order){Frozen f;f.name=clients.at(member).name;f.number=clients.at(member).number;f.nativeCar=AllNative()?clients.at(member).nativeCar:0;f.auth.adaptive=clients.at(member).adaptiveCapable;do{f.auth.ticket=Random();}while(std::find(issued.begin(),issued.end(),f.auth.ticket)!=issued.end());issued.push_back(f.auth.ticket);do{f.auth.cookie=Random();}while(std::find(issued.begin(),issued.end(),f.auth.cookie)!=issued.end());issued.push_back(f.auth.cookie);frozen.push_back(f);auth.push_back(f.auth);}}
     catch(...){frozen.clear();Error(id,"Secure ticket generation unavailable. Recreate the room.");return true;}
     if(!launch(settings.game,settings.tick,auth)){frozen.clear();Error(id,"Native host could not prepare. Recreate the room.");return true;}
     frozenNative=AllNative();state=1;launchPending=true;deadline=now+90000000;Broadcast();return true;
@@ -123,7 +125,7 @@ public:
   if(started&&state==1){state=2;Broadcast();}listedState=state;listedCount=unsigned(order.size());
  }
 private:
- struct Client {uint32_t id=0,number=0,car=0,nativeCar=0,pingMs=0;unsigned role=0,requests=0;bool optionsCapable=false,nativeCapable=false,hornetCapable=false,raceCapable=false,pingCapable=false;uint64_t window=Now();std::string name;};
+ struct Client {uint32_t id=0,number=0,car=0,nativeCar=0,pingMs=0;unsigned role=0,requests=0;bool optionsCapable=false,nativeCapable=false,hornetCapable=false,raceCapable=false,pingCapable=false,adaptiveCapable=false,videoCapable=false;uint64_t window=Now();std::string name;};
  struct Frozen {Member auth;std::string name;uint32_t number=0,rank=0,rankOwner=0,nativeCar=0;uint64_t rankTime=0;};
  Settings settings;Send send;Launch launch;std::map<uint32_t,Client> clients;std::vector<uint32_t> order;std::vector<Frozen> frozen;std::vector<Bytes> history;
  uint32_t ownerId=0,nextMember=1,seq=1,state=0,options=0;bool closed=false,launchPending=false,frozenNative=false;uint64_t deadline=0;
@@ -136,7 +138,7 @@ private:
  void Error(uint32_t id,const std::string& text){Bytes b;Text(b,text,160);send(id,Frame("OLE1",b));}
  void Snapshot(uint32_t id){auto it=clients.find(id);if(it==clients.end())return;Bytes b;Put(b,1);Put(b,it->second.number);Put(b,settings.id);send(id,Frame("OLB1",b));b.clear();
   Put(b,settings.id);Put(b,settings.game);Put(b,state);Put(b,uint32_t(order.size()));Put(b,state?frozen.at(0).number:clients.at(ownerId).number);Text(b,settings.title,64);
-  if(state){for(auto& f:frozen){Put(b,f.number);Text(b,f.name,32);}}else for(auto member:order){Put(b,clients.at(member).number);Text(b,clients.at(member).name,32);}send(id,Frame("OLR1",b));b.clear();Put(b,settings.id);Put(b,settings.port);Put(b,3);Put(b,0);send(id,Frame("OLU2",b));if(it->second.optionsCapable){b.clear();Put(b,settings.id);Put(b,options);send(id,Frame("ORO1",b));}
+  if(state){for(auto& f:frozen){Put(b,f.number);Text(b,f.name,32);}}else for(auto member:order){Put(b,clients.at(member).number);Text(b,clients.at(member).name,32);}send(id,Frame("OLR1",b));b.clear();Put(b,settings.id);Put(b,settings.port);Put(b,3);Put(b,0);send(id,Frame("OLU2",b));if(it->second.optionsCapable){b.clear();Put(b,settings.id);Put(b,it->second.videoCapable?options:options&~NativeRoomSettings::Video60);send(id,Frame("ORO1",b));}
   if(it->second.nativeCapable){b.clear();Put(b,settings.id);Put(b,AllNative()?1:0);Put(b,uint32_t(order.size()));
    for(size_t i=0;i<order.size();++i){Put(b,state?frozen[i].number:clients.at(order[i]).number);Put(b,AllNative()?(state?frozen[i].nativeCar:clients.at(order[i]).nativeCar):0);}send(id,Frame("ORN1",b));}
   if(it->second.pingCapable){b.clear();Put(b,settings.id);Put(b,uint32_t(order.size()));

@@ -8,6 +8,7 @@
 #define INCLUDED_RELAY_UDP_CLIENT_H
 #include "RelayUpnp.h"
 #include "RelayUdpHost.h"
+#include "Online/AdaptiveTickRate.h"
 #include "SDLIncludes.h"
 #include <atomic>
 #include <chrono>
@@ -27,7 +28,7 @@ public:
  static constexpr uint64_t MaxAgeUs=2000000;
  static uint64_t Now() { return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()); }
  CRelayUdpClient(const std::string& host,uint16_t port,const uint8_t* token,unsigned index,unsigned count,size_t size,const RelayUdp::HostConfig* hosted=nullptr)
-  :m_index(index),m_count(count),m_size(size),m_samples(count),m_assemblies(count),m_alive(count),m_heard(count),m_heardMeUs(count),m_sequences(count),m_peerBases(count),m_held(count),m_peerMasks(count) {
+  :m_index(index),m_count(count),m_size(size),m_samples(count),m_assemblies(count),m_alive(count),m_heard(count),m_heardMeUs(count),m_sequences(count),m_peerBases(count),m_held(count),m_peerMasks(count),m_delayMeters(count),m_lossMeters(count) {
   std::memcpy(m_token.data(),token,16);
   if(SDLNet_ResolveHost(&m_server,host.c_str(),port)<0) return;
   if(hosted) { m_hosted=true;m_hostConfig=*hosted;m_hostAddress.host=hosted->ip;m_hostAddress.port=SDL_SwapBE16(hosted->port);if(index==0) SDLNet_ResolveHost(&m_hostAddress,"127.0.0.1",hosted->port); }
@@ -43,6 +44,14 @@ public:
   if(m_socket) SDLNet_UDP_Close(m_socket);
  }
  bool SelfHostedActive() const { return m_usingHost.load(); }
+ // Adaptive hosts (RLT2) read the receive-side queueing delay / loss we put in
+ // every hello: Header::total = p50 queueing delay in ms over the last second,
+ // Header::part = loss percent. Older hosts reject hellos with those fields set,
+ // so they stay zero until the host has announced itself.
+ void EnableFeedback(bool on) { m_feedback=on; }
+ void SetTickRate(unsigned hz) { m_tickRate=std::clamp(hz,5u,60u); }
+ struct Feedback { unsigned queueMs=0,lossPercent=0; };
+ Feedback LastFeedback() { std::lock_guard<std::mutex> l(m_mutex);return m_lastFeedback; }
  bool Available() const { return m_socket!=nullptr; }
  unsigned Index() const { return m_index; }
  unsigned Count() const { return m_count; }
@@ -247,7 +256,9 @@ private:
    if(host) { std::lock_guard<std::mutex> s(m_sendMutex);host->Poll(rx,tx,now); }
    if(now>=nextHello) {
     RelayUdp::Header h;std::memcpy(h.token,m_token.data(),16);h.origin=uint16_t(m_index);
-    h.sequence=++helloSeq;h.sourceUs=now;helloWindow[helloSeq%helloWindow.size()]={helloSeq,now};send(h,nullptr,0,m_server);
+    h.sequence=++helloSeq;h.sourceUs=now;helloWindow[helloSeq%helloWindow.size()]={helloSeq,now};
+    if(m_feedback.load()) { const auto f=CloseFeedbackWindow(now);h.total=uint16_t(std::min(f.queueMs,65535u));h.part=uint8_t(std::min(f.lossPercent,100u)); }
+    send(h,nullptr,0,m_server);
     if(m_hosted) {
      send(h,nullptr,0,m_hostAddress);
      h.kind=RelayUdp::HostStatus;h.sequence=hostAck && now-hostAck<1000000?1:0;send(h,nullptr,0,m_server);
@@ -279,7 +290,7 @@ private:
      continue;
     }
     if(h.kind!=RelayUdp::Snapshot || h.origin>=m_count || h.origin==m_index) continue;
-    { std::lock_guard<std::mutex> l(m_mutex);m_sequences[h.origin].Note(h,m_stats); }
+    { std::lock_guard<std::mutex> l(m_mutex);m_sequences[h.origin].Note(h,m_stats);m_lossMeters[h.origin].Note(h.sequence); }
     std::vector<uint8_t> encoded,raw;
     const auto received=Now();
     const size_t maskSize=RelayUdp::MaskSize(m_size),plain=m_size+RelayUdp::TrailerSize;
@@ -305,6 +316,7 @@ private:
      // Tolerate a negative transit within the measurement error; reject implausible clocks.
      if(transit>=-int64_t(s.uncertaintyUs)-2000 && transit<=int64_t(MaxAgeUs)) {
       s.transitUs=uint64_t(std::max<int64_t>(0,transit));s.ageUs=s.transitUs+t.sampleAgeUs;s.uncertaintyUs+=t.sampleUncertaintyUs;s.timed=true;
+      m_delayMeters[h.origin].Note(transit); // m_mutex held
      }
     }
     ++m_stats.received;
@@ -340,8 +352,25 @@ private:
  std::vector<Alive> m_alive;std::vector<uint16_t> m_heard;std::vector<uint64_t> m_heardMeUs;std::vector<Sequences> m_sequences;
  std::vector<std::deque<PeerBase>> m_peerBases;std::vector<HeldSample> m_held;
  std::deque<PeerBase> m_localCandidates;PeerBase m_localBase;Stats m_stats;
+ // Receive-side congestion feedback for adaptive hosts (see EnableFeedback).
+ std::atomic<bool> m_feedback{false};std::atomic<unsigned> m_tickRate{60};
+ Feedback m_lastFeedback;uint64_t m_feedbackClosedUs=0;
+ Feedback CloseFeedbackWindow(uint64_t now) {
+  // Hellos go out twice a second; close the meters once a second so the loss
+  // percentage has a sensible sample count.
+  std::lock_guard<std::mutex> l(m_mutex);
+  if(m_feedbackClosedUs && now-m_feedbackClosedUs<900000) return m_lastFeedback;
+  m_feedbackClosedUs=now;Feedback out;
+  for(unsigned i=0;i<m_count;++i) {
+   if(i==m_index) continue;
+   out.queueMs=std::max(out.queueMs,unsigned(std::max<int64_t>(0,m_delayMeters[i].Close())/1000));
+   out.lossPercent=std::max(out.lossPercent,m_lossMeters[i].ClosePercent());
+  }
+  m_lastFeedback=out;return out;
+ }
  struct PeerMask { std::vector<uint8_t> bytes;uint64_t sourceUs=0; };
- std::vector<PeerMask> m_peerMasks;std::vector<uint8_t> m_mask;unsigned m_maskRepeat=0;uint64_t m_maskSentUs=0;
+ std::vector<PeerMask> m_peerMasks;std::vector<Online::DelayMeter> m_delayMeters;std::vector<Online::LossMeter> m_lossMeters; // meters under m_mutex
+ std::vector<uint8_t> m_mask;unsigned m_maskRepeat=0;uint64_t m_maskSentUs=0;
  uint64_t m_freshUs=300000;
  std::mutex m_sendMutex;UDPpacket* m_submitTx=nullptr;uint32_t m_seq=0;
  std::array<Clock,2> m_clocks{}; // 0 = central relay, 1 = creator host

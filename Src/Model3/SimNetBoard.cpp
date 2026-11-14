@@ -107,6 +107,8 @@ Result CSimNetBoard::Init(uint8_t* netRAMPtr, uint8_t* netBufferPtr)
 	const auto gameRelay = m_config["NetGameRelay"].ValueAsDefault<std::string>("");
 	const auto relay = centralRelay.empty() ? std::string() : gameRelay.empty() ? centralRelay : gameRelay;
 	m_relay = !relay.empty();
+	m_video60 = m_relay && Online::RelayVideo60(m_config);
+	if (m_video60) InfoLog("Relay: room runs 60 Hz emulated video (master option); frame timing uses 60 Hz instead of 57.524 Hz.");
 	if (m_relay && (!m_gameNet.Enabled() ||
 		!RelayProtocol::ParseEndpoint(relay,addr_out,port_out)))
 		return ErrorLog("Relay requires a supported exact-ROM async HLE game and HOST:PORT.");
@@ -799,16 +801,18 @@ void CSimNetBoard::FinishAsyncTesting()
 	m_state = State::ready;
 }
 
-void CSimNetBoard::SetTickRate(unsigned hz)
+void CSimNetBoard::SetTickRate(unsigned hz, bool midSession)
 {
 	const unsigned clamped = std::clamp(hz, 5u, 60u);
 	if (m_tickRateHz != clamped)
 	{
 		m_tickRateHz = clamped;
-		m_gameNet.nativePacing.Reset();
+		if (!midSession)
+			m_gameNet.nativePacing.Reset();
 		m_tickPhase = FrameMilliHz();
 		m_gameNet.SetTickRate(m_tickRateHz);
-		InfoLog("Async net board: update tick rate set to %u Hz", m_tickRateHz);
+		InfoLog(midSession ? "Async net board: update tick rate changed to %u Hz by the host (congestion control)"
+		                   : "Async net board: update tick rate set to %u Hz", m_tickRateHz);
 	}
 }
 
@@ -825,7 +829,7 @@ void CSimNetBoard::RunAsyncExchange()
 	{
 		const unsigned linkHz = m_link->RelayTickRate();
 		if (linkHz != m_tickRateHz)
-			SetTickRate(linkHz);
+			SetTickRate(linkHz, m_link->RelayAdaptiveTick());
 	}
 	// One latest-wins UDP snapshot per tick: streamed state (positions), never
 	// resent. Each snapshot names the TCP control message it was built on

@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import relay as relay  # noqa: E402
 online = relay.lobby
 
-GUI_FLAGS = 1 | 246  # exactly what LobbyClient::Worker sends: AsyncNet opt-in + capabilities (star fan-out bit 64, ping bit 128; --no-star clears 64)
+GUI_FLAGS = 1 | 510  # exactly what LobbyClient::Worker sends: AsyncNet opt-in + capabilities (adaptive tick bit 8, star fan-out bit 64, ping bit 128, Video60 bit 256; --no-star clears 64)
 
 
 class Client:
@@ -69,6 +69,7 @@ async def main():
     ap.add_argument('--players', type=int, default=2)
     ap.add_argument('--title', default='ROM test')
     ap.add_argument('--no-star', action='store_true', help='advertise GUIs without star fan-out so the relay keeps the ring')
+    ap.add_argument('--options', type=int, default=None, help='room options mask the master sets before Start Link (1024 = 60 Hz video); pass the same value as -lobby-options= to each cabinet')
     args = ap.parse_args()
     host, port = args.relay.rsplit(':', 1)
     game = [g for g, _ in online.GAMES].index(args.game)
@@ -78,6 +79,11 @@ async def main():
     room = await players[0].create(game, args.title)
     for p in players[1:]:
         await p.join(room)
+    if args.options is not None:
+        players[0].send(b'ORO1', struct.pack('<II', room, args.options))
+        for p in players:
+            while struct.unpack('<II', await p.until(b'ORO1'))[1] != args.options:
+                pass
     players[0].send(b'OLT1', struct.pack('<I', room))
     launches = [online.LAUNCH.unpack_from(await p.until(b'OLG1')) for p in players]  # OLG1/3/5 share the LAUNCH prefix
     for p in players:

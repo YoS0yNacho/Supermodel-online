@@ -64,7 +64,9 @@ inline bool Parse(const void* bytes,size_t n,Header& h) {
  std::memcpy(&h,bytes,sizeof(h));
  if(h.magic!=Header{}.magic || h.version!=Version) return false;
  if(h.kind==Ack) return n==HeaderSize+AckClockSize && !h.part && !h.parts && !h.total;
- if(h.kind==Hello || h.kind==HostStatus || h.kind==Route) return n==HeaderSize && !h.part && !h.parts && !h.total;
+ // A hello may carry the sender's receive-side feedback for adaptive hosts (total: queueing ms, part: loss %).
+ if(h.kind==Hello) return n==HeaderSize && !h.parts;
+ if(h.kind==HostStatus || h.kind==Route) return n==HeaderSize && !h.part && !h.parts && !h.total;
  if(h.kind!=Snapshot || h.total<2 || h.total>MaxEncodedSize || !h.sourceUs || h.sourceUs>uint64_t(INT64_MAX)) return false;
  const size_t parts=(h.total+ChunkSize-1)/ChunkSize;
  return h.parts==parts && h.part<parts && n==HeaderSize+std::min(ChunkSize,size_t(h.total)-h.part*ChunkSize);

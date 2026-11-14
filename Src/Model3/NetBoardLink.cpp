@@ -306,6 +306,7 @@ CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::stri
     m_udpHandler = m_server->RegisterHandler(RelayProtocol::UdpConfig::ID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
     m_udpHostHandler = m_server->RegisterHandler(RelayProtocol::UdpHostConfigID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
     m_relayTickRateHandler = m_server->RegisterHandler(RelayProtocol::TickRate::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayTickRate(c,p,n); });
+    m_relayAdaptiveHandler = m_server->RegisterHandler(RelayProtocol::AdaptiveTick::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayAdaptiveTick(c,p,n); });
     m_relayStarHandler = m_server->RegisterHandler(RelayProtocol::Star::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayStar(c,p,n); });
     m_relayReadyHandler = m_server->RegisterHandler(RelayProtocol::Ready::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayReady(c,p,n); });
     m_relayErrorHandler = m_server->RegisterHandler(RelayProtocol::Error::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayError(c,p,n); });
@@ -329,6 +330,7 @@ CNetBoardLink::~CNetBoardLink(void)
   m_udpHandler.Reset();
   m_udpHostHandler.Reset();
   m_relayTickRateHandler.Reset();
+  m_relayAdaptiveHandler.Reset();
   m_relayReadyHandler.Reset();
   m_relayErrorHandler.Reset();
   m_joinHandler.Reset();
@@ -391,11 +393,36 @@ bool CNetBoardLink::OnRelayTickRate(const std::shared_ptr<CTCPConnection>& c, co
   const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
   if (info.version != RelayProtocol::Version ||
       info.tickRate < RelayProtocol::MinTickRate || info.tickRate > RelayProtocol::MaxTickRate ||
-      channel > 1 || m_relayAssigned[channel] || m_relayTickRateSeen[channel] || m_relayFailed) return false;
+      channel > 1 || m_relayFailed) return false;
+  if (m_relayAssigned[0] && m_relayAssigned[1])
+  {
+    // Mid-session change from an adaptive host (RLT2 announced it): the latest
+    // value wins, never above the announced ceiling. The board applies it on
+    // its next exchange and the predictors re-tune themselves.
+    if (!m_relayAdaptive.load(std::memory_order_relaxed) || info.tickRate > m_relayTickCap.load(std::memory_order_relaxed)) return false;
+    if (m_relayTickRate.exchange(info.tickRate, std::memory_order_acq_rel) != info.tickRate)
+      InfoLog("Relay: host changed the update tick rate to %u Hz (adaptive, ceiling %u Hz)", info.tickRate, m_relayTickCap.load(std::memory_order_relaxed));
+    if (m_udp) m_udp->SetTickRate(info.tickRate);
+    return true;
+  }
+  if (m_relayAssigned[channel] || m_relayTickRateSeen[channel]) return false;
   const unsigned other = channel ^ 1;
   if (m_relayTickRateSeen[other] && m_relayTickRate.load(std::memory_order_relaxed) != info.tickRate) return false;
   m_relayTickRate.store(info.tickRate, std::memory_order_release);
   m_relayTickRateSeen[channel] = true;
+  return true;
+}
+bool CNetBoardLink::OnRelayAdaptiveTick(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
+{
+  if (size != sizeof(RelayProtocol::AdaptiveTick)) return false;
+  RelayProtocol::AdaptiveTick info; memcpy(&info, p, size);
+  std::lock_guard<std::mutex> lock(m_mutex);
+  const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
+  if (info.version != RelayProtocol::Version || info.flags != 1 || channel > 1 || m_relayAssigned[channel] || m_relayFailed ||
+      info.cap < RelayProtocol::MinTickRate || info.cap > RelayProtocol::MaxTickRate || info.floor < RelayProtocol::MinTickRate || info.floor > info.cap) return false;
+  m_relayTickCap.store(info.cap, std::memory_order_release);
+  m_relayAdaptive.store(true, std::memory_order_release);
+  if (m_udp) m_udp->EnableFeedback(true);
   return true;
 }
 bool CNetBoardLink::OnRelayStar(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
@@ -428,6 +455,8 @@ bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const
     InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz, ring segments %s",
       ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed),
       m_relayStar.load(std::memory_order_relaxed)?"fanned out by the relay":"forwarded hop by hop");
+  if (m_relayAssigned[0] && m_relayAssigned[1] && m_relayAdaptive.load(std::memory_order_relaxed))
+    InfoLog("Relay: adaptive tick rate, ceiling %u Hz; the host lowers it under congestion", m_relayTickCap.load(std::memory_order_relaxed));
   m_condition.notify_all(); return true;
 }
 bool CNetBoardLink::OnRelayError(const std::shared_ptr<CTCPConnection>& c, const uint8_t* p, size_t size)
@@ -470,6 +499,7 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
   if(count && std::memcmp(hc.peers[0].token.data(),cfg.token,16)) return false;
  }
  m_udp=std::make_unique<CRelayUdpClient>(host,uint16_t(cfg.port),cfg.token,cfg.index,cfg.count,size,hosted?&hc:nullptr);
+ if(m_relayAdaptive.load(std::memory_order_relaxed)) m_udp->EnableFeedback(true);
  InfoLog("Relay UDP: snapshot lane configured (UDP port %u); in-race snapshots use UDP, setup/start control and fallback use TCP",cfg.port);
  return true;
 }

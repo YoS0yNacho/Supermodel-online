@@ -11,7 +11,7 @@ struct OnlineGui {
   char title[64] = "My lobby";
   char chatInput[160] = "";
   int game = 0;
-  int udpHosting = 0, udpPort = 1971;
+  int udpHosting = 0, udpPort = 1971, hostTickRate = 20;  // self-host update rate ceiling, 5-60 Hz
   bool autoConnectPending = false;
   bool spectate = false;
   bool cliRelayOverride = false;

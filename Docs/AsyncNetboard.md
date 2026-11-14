@@ -203,6 +203,34 @@ true path. Representative numbers (roughness rms / mean error, world units):
 `RUBBERBAND_REPORT_ONLY=1` prints the table without asserting on it, for
 tuning.
 
+## Adaptive update tick rate
+
+The update tick rate that a relay or self-host room assigns (`RLT1`) is a
+ceiling. When every cabinet in the room advertised the capability (lobby HELLO
+bit 8) the host also sends `RLT2 {version, flags, ceiling, floor}` after the
+initial `RLT1`; from then on it may send further `RLT1` frames mid-session and
+the client applies them without touching its race pacing state
+(`SimNetBoard::SetTickRate(hz, midSession=true)`): the exchange interval, the
+predictor horizon and the correction smoothing re-tune to the new rate, the
+60 Hz setup/start/first-race-frames pacing is untouched. Rates above the
+announced ceiling, or any mid-session `RLT1` from a host that never sent
+`RLT2`, are ignored.
+
+Each client also measures its own downlink: `RelayUdpClient` keeps a
+per-origin one-way delay meter (arrival minus sender stamp; the running minimum
+is treated as the uncongested baseline and the excess as queueing delay) and a
+sequence-number loss meter, closes a window every 900 ms and puts the worst
+peer's p50 queueing delay (ms) and loss (%) into the next UDP hello
+(`Header::total` / `Header::part`). The feedback is only enabled after `RLT2`,
+so pre-adaptive hosts keep receiving all-zero hellos. The host zeroes the two
+fields before echoing the ACK.
+
+The ladder/threshold logic lives in `Src/Network/Online/AdaptiveTickRate.h`
+and is covered socket-free by the `adaptive-tick` scenario in
+`Tests/AsyncNetboardTest.cpp`; `Docs/OnlineLobbies.md` describes the host-side
+evidence, the GUI slider for self-hosted rooms (default 20 Hz, 5-60) and the
+relay flags `--no-adaptive-tick` / `--simulate-congestion`.
+
 ## Daytona USA 2 Power Edition boot time
 
 With a net board attached, `dayto2pe` spends its NETWORK CHECKING screen (one
@@ -295,6 +323,9 @@ Coverage includes:
   malformed ready packets, and connection closure.
 - Watchdog expiration by advancing its stored timestamp, nonblocking reset, and
   safe reinitialization after an upper-bank reset.
+- Adaptive tick-rate meters and ladder controller (`adaptive-tick`): queueing
+  delay baseline, loss percentage with reordering, step-down/step-up timing,
+  ceiling clipping.
 
 These are synthetic board/protocol tests, not native-ROM races. Jitter/loss,
 long-term stability and competitive correctness remain unvalidated.

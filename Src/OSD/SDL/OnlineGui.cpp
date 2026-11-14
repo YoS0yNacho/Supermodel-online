@@ -301,6 +301,11 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
       if(udpHosting) {
         ImGui::SetNextItemWidth(110.0f*scale);
         ImGui::InputInt("Host TCP/UDP port",&udpPort,0,0);
+        ImGui::SetNextItemWidth(110.0f*scale);
+        ImGui::SliderInt("Tick rate (Hz)",&hostTickRate,5,60,"%d Hz",ImGuiSliderFlags_AlwaysClamp);
+        if(hostTickRate<5) hostTickRate=5; if(hostTickRate>60) hostTickRate=60;
+        ImGui::SameLine();ImGui::TextDisabled("(?)");
+        if(ImGui::IsItemHovered()) ImGui::SetTooltip("Network update rate ceiling for this room. Your host lowers it automatically (down to 10 Hz)\nwhile a player's connection or your upload is congested and restores it when the link is clean again.\nDefault 20 Hz; 60 Hz = one update per frame. Players keep moving smoothly at any rate.");
         ImGui::TextWrapped("The creator hosts the room, chat, standings and all TCP/UDP gameplay. Central only lists the room. TCP and UDP are tested at creation; failure switches the room to central relay hosting and announces it in chat. Your IP is shared with players.");
         if(udpPort<1024 || udpPort>65535) ImGui::TextDisabled("Enter a host port from 1024 to 65535.");
       } else {
@@ -310,7 +315,7 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
       const bool canCreate=game>=0 && unsigned(game)<Online::GameCount && (Available(dir)&(1u<<game)) && HasPrintableText(title) && (!udpHosting || (udpPort>=1024 && udpPort<=65535));
       ImGui::BeginDisabled(!canCreate);
       if(ImGui::Button("Create",ImVec2(110.0f*scale,0))) {
-        client.Create(uint32_t(game),title,udpHosting!=0,uint16_t(udpPort));
+        client.Create(uint32_t(game),title,udpHosting!=0,uint16_t(udpPort),unsigned(hostTickRate));
         ImGui::CloseCurrentPopup();
       }
       ImGui::EndDisabled();
@@ -337,7 +342,24 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
       const auto room=std::find_if(s.rooms.begin(),s.rooms.end(),[&](const Online::Room& r){return r.id==s.room;});
       if(room!=s.rooms.end()) {
         const bool frozen=room->state!=0 || room->hostChecking;
+        {
+          // Every game: the master picks the emulated video rate for the whole room.
+          ImGui::TextUnformatted("Emulated video (all cabinets)");
+          const bool video60=NativeRoomSettings::HasVideo60(room->options);
+          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
+          ImGui::SetNextItemWidth(240.0f*scale);
+          if(ImGui::BeginCombo("Refresh rate",video60?"60 Hz":"57.524 Hz (original hardware)")){
+            if(ImGui::Selectable("57.524 Hz (original hardware)",!video60)&&video60)client.SetRoomOptions(room->id,room->options&~NativeRoomSettings::Video60);
+            if(ImGui::Selectable("60 Hz",video60)&&!video60)client.SetRoomOptions(room->id,room->options|NativeRoomSettings::Video60);
+            ImGui::EndCombo();
+          }
+          ImGui::EndDisabled();
+          ImGui::TextDisabled("Every cabinet emulates the same rate; software frame limiting stays on,");
+          ImGui::TextDisabled("your own VSync setting is kept. Master only; all clients must be updated.");
+          ImGui::Spacing();
+        }
         if(NativeRoomSettings::Supported(room->game)){
+          ImGui::Separator();
           ImGui::TextUnformatted("Shared native game settings");
           ImGui::BeginDisabled(room->master!=s.self || frozen || !room->nativeSettingsSupported);
           int difficulty=int(NativeRoomSettings::Difficulty(room->options)),mode=int(NativeRoomSettings::Mode(room->options));

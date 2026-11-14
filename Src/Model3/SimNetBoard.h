@@ -68,7 +68,9 @@ public:
 	bool HoldForRaceStart(bool atGate, bool nativeEntry = false) override;
 	void SetDaytona2CpuRouting(const Dayto2pe::CpuRouting& routing) override { m_gameNet.daytona.m_cpuRouting = routing; }
 	void SetScudRouting(const Scud::Routing& r) override { m_gameNet.scud.routing=r; }
-	void SetTickRate(unsigned hz);
+	// midSession: an adaptive host changed the rate while racing; keep the race
+	// pacing state instead of restarting the 60 Hz settling window.
+	void SetTickRate(unsigned hz, bool midSession = false);
 	unsigned GetTickRate() const { return m_tickRateHz; }
 	void Reset(void);
 
@@ -136,9 +138,9 @@ private:
 	// Async state is owned exclusively by the emulation thread. Socket I/O is
 	// already performed by CNetServer/CTCPConnection, never against guest RAM.
 	std::atomic<bool> m_onlineFailed{false};
-	bool m_relay = false, m_relayNativeReady = false;
-	unsigned FrameMilliHz() const { return Online::FrameMilliHz(m_relay); }
-	double FrameDurationUs() const { return Online::FrameDurationUs(m_relay); }
+	bool m_relay = false, m_video60 = false, m_relayNativeReady = false;
+	unsigned FrameMilliHz() const { return Online::FrameMilliHz(m_relay, m_video60); }
+	double FrameDurationUs() const { return Online::FrameDurationUs(m_relay, m_video60); }
 	bool m_async = false;
 	enum class AsyncPhase { start, guid, verify, index, count };
 	AsyncPhase m_asyncPhase = AsyncPhase::start;

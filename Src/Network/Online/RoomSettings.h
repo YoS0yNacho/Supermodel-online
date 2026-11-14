@@ -7,7 +7,11 @@ namespace NativeRoomSettings {
 // Bit0 is game-specific: original Daytona Hornet or Scud Plus Secret Cars.
 // Bit8 (256) is NoCollisions: all cars ghost through each other.
 // Bit9 (512) is RealPlayers: no CPU cars; solo play is native time attack.
-constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlayers=512;
+// Bit10 (1024) is Video60: every cabinet emulates 60 Hz video instead of the
+// 57.524 Hz original rate. All games; chosen by the master for the whole room.
+constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlayers=512, Video60=1024;
+constexpr uint32_t AllBits=2047;
+inline bool HasVideo60(uint32_t options){return (options&Video60)!=0;}
 inline bool HasHornet(unsigned game,uint32_t options){return game==0 && (options&Hornet);}
 inline bool HasRealPlayers(unsigned game,uint32_t options){return game<4 && (options&RealPlayers);}
 inline bool HasNoCollisions(unsigned game,uint32_t options){return game<4 && (options&NoCollisions);}
@@ -19,9 +23,9 @@ inline unsigned ModeCount(unsigned game){return game<2?7:game<4?3:(game==4||game
 inline unsigned Difficulty(uint32_t options){return (options>>2)&7;}
 inline unsigned Mode(uint32_t options){return (options>>5)&7;}
 inline bool Valid(unsigned game,uint32_t options){
- if(game>=7 || (options&~1023u) || ((options&SecretCars)&&game!=0&&game!=3))return false;
+ if(game>=7 || (options&~AllBits) || ((options&SecretCars)&&game!=0&&game!=3))return false;
  if((options&(RealPlayers|NoCollisions)) && game>=4)return false;
- if(!(options&Enabled))return !(options&~(SecretCars|RealPlayers|NoCollisions));
+ if(!(options&Enabled))return !(options&~(SecretCars|RealPlayers|NoCollisions|Video60));
  return Supported(game) && Difficulty(options)<DifficultyCount(game) && Mode(options)<ModeCount(game);
 }
 inline uint32_t Defaults(unsigned game){return Supported(game)?Enabled|(game<4?4u:0u):0;}

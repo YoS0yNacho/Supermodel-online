@@ -52,7 +52,7 @@ connections. No additional control port or web browser is used.
 ## Configurable tick rate (`--tick-rate`)
 
 The default requested network tick rate is `60` Hz; relay sessions run at
-`57.524` emulated frames/s, so transmission is capped at one originating
+`57.524` (or `60` with the room's 60 Hz option) emulated frames/s, so transmission is capped at one originating
 snapshot per emulated frame. On weak relay
 devices, metered connections, or larger multi-cabinet lobbies, the relay can
 advertise a lower update tick rate (`5`–`60` Hz) to every connected emulator:
@@ -72,8 +72,60 @@ pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
 - Receive-side motion predictors (`daytona2`, `dayto2pe`, `scud`, `scudplus`,
   `srally2`, `lemans24`) automatically adapt their horizon, trajectory
   smoothing, and 2D/3D turn-rate extrapolation to the configured tick rate so
-  remote cars continue moving smoothly every emulated frame (57.524 FPS online) even at low tick rates (e.g.
+  remote cars continue moving smoothly every emulated frame (57.524 FPS online, or 60 with the room option) even at low tick rates (e.g.
   `10`–`30` Hz).
+
+## Adaptive tick rate (congestion control)
+
+The configured tick rate is a **ceiling**, not a fixed rate. Whenever every
+member of a room advertised the capability (lobby HELLO bit 8, every build
+since this change), the room host lowers the rate while the link or the host
+is congested and restores it once the link has been clean again:
+
+- **Self-hosted rooms**: the Create Lobby dialog gets a *Tick rate (Hz)* slider
+  (5-60, default **20**) when *Self-host room + TCP/UDP* is selected. The
+  creator's own host (`Src/Network/Online/PlayerHost.h`) applies the ceiling
+  and adapts below it; the central relay's `--tick-rate` does not apply to
+  these rooms.
+- **Central relay rooms**: `--tick-rate` is the ceiling (default 60).
+  `--no-adaptive-tick` keeps it fixed.
+
+How a host decides (`Src/Network/Online/AdaptiveTickRate.h`, mirrored in
+`relay.py`), once per second:
+
+- *Uplink* of every cabinet: one-way delay of its UDP snapshots measured as
+  arrival time minus the sender's stamp. No clock sync is needed: the running
+  minimum is the uncongested path and the excess over it is queueing (the
+  LEDBAT idea; the minimum inflates 0.25 ms/s so drift cannot pin it).
+  p50 queueing >= 40 ms, or >= 5 % loss from the sequence numbers, marks the
+  second congested.
+- *Downlink* of every cabinet: each client measures the same queueing delay /
+  loss on what it receives and reports them in its twice-a-second UDP hello
+  (`Header::total` ms, `Header::part` %), only after the host announced itself
+  with `RLT2`, so older hosts never see the fields.
+- *The host itself*: a ring connection that cannot drain for 300 ms, UDP sends
+  refused by the kernel, or the host loop running a quarter second late.
+
+The ladder is 60-45-30-24-20-15-12-10 Hz clipped to the ceiling, floor 10 Hz
+(or the ceiling if lower). Two consecutive congested seconds step down one
+rung, at most once every 3 s; 20 consecutive clean seconds step up one rung,
+at most once every 20 s. Each change is one `RLT1` on the cabinet's first
+channel; the client logs `update tick rate changed to N Hz by the host`, keeps
+its race pacing state (no 60 Hz settling burst) and the predictors re-tune
+their horizon and smoothing to the new rate, so remote cars keep moving every
+frame throughout. Setup, the start barrier and the first 60 race frames still
+run at 60 Hz regardless.
+
+`--simulate-congestion FROM-TO` (relay.py, test/CI only) treats every adaptive
+room as congested between FROM and TO seconds after Start Link. Measured on the
+2-cabinet Scud Race rig with `--tick-rate 30 --simulate-congestion 40-52`: the
+relay stepped 30 -> 24 -> 20 -> 15 Hz during the window and restored 20 -> 24 ->
+30 Hz afterwards at 20 s intervals; both cabinets applied every change, the
+link stayed up (1000+ ring round trips) and a race started on the UDP lane with
+the feedback hellos. No spurious step occurred during the race on the loaded
+test machine. Mixed versions: a room with one pre-adaptive client runs at the
+fixed ceiling; an old creator-hosted UDP fan-out (legacy mode 1) that rejects
+feedback hellos simply makes clients fall back to the central UDP path.
 
 ## UDP race traffic (default) and `--tcp-only`
 
@@ -422,16 +474,37 @@ policy without game ROMs. They are not a substitute for an actual-ROM or Windows
 GUI smoke test.
 
 
-## Mandatory relay refresh and returning to Online
+## Room video rate (57.524 / 60 Hz), throttle and returning to Online
 
-All relay sessions force **57.524 Hz emulation** after global/game INI and CLI
-settings have been resolved. Software frame limiting is mandatory and its
-in-game toggle is disabled online. Display VSync is disabled for relay sessions
-so a 50/60/120 Hz monitor cannot dictate cabinet speed. This is an emulation
-rate requirement, not a guarantee the physical monitor supports a 57.524 Hz
-video mode. Offline settings are unchanged and these overrides are not saved.
-Relay tick rates remain real-time Hz (capped by one send per emulated frame);
-transport timing/age metadata uses the enforced frame duration.
+Every relay session runs all cabinets at the **same emulated video rate**,
+chosen by the room master for the whole room in **Options -> Emulated video
+(all cabinets)**, for every game:
+
+- **57.524 Hz (original hardware)** - the default.
+- **60 Hz** - room option bit 1024 (`NativeRoomSettings::Video60`). Lobby
+  clients advertise capability bit 256; the relay (or a self-hosting
+  creator's `PlayerRoom`) only accepts the option when every member has it,
+  rejects joins from older clients while it is set, and masks the bit out of
+  room listings sent to clients that predate it. The launch message carries
+  the option to every cabinet, which applies it after global/game INI and CLI
+  settings have been resolved.
+
+Software frame limiting at that rate is mandatory and its in-game toggle is
+disabled online. **Display VSync is no longer forced off**: your own `VSync`
+setting is kept. With VSync on, the throttle still paces emulation at
+57.524/60 Hz and the buffer swap merely waits for the next display refresh;
+choose 60 Hz in the room if everyone has a 60 Hz display and wants the swap
+and emulation aligned. This is an emulation rate, not a guarantee the monitor
+supports a matching video mode. Offline settings are unchanged and these
+overrides are not saved. Relay tick rates remain real-time Hz (capped by one
+send per emulated frame); transport timing/age metadata uses the room's frame
+duration (`Online::FrameMilliHz(relay, video60)`).
+
+Headless rigs: `Tests/lobby_tickets.py --options 1024` sets the option before
+Start Link and each cabinet is launched with `-lobby-options=1024` next to its
+`-lobby-ticket=`. Verified on the 2-cabinet Scud Race rig with `-vsync`:
+`RefreshRate=60`, `Throttle=1`, `VSync=1` in both logs, race started and ran
+on the UDP lane.
 
 If either board channel disconnects, the relay reports failure, or the HLE
 networking detects an unrecoverable link/start-sync error, the cabinet exits

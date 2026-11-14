@@ -2088,6 +2088,7 @@ static void Help(void)
   puts("  -async-netboard         Use asynchronous net-board exchange");
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
   puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
+  puts("  -lobby-options=<n>      Room options mask of that room (test rigs; 1024 = 60 Hz video)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
   puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
@@ -2172,6 +2173,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-game-relay",            "NetGameRelay"            },
     { "-lobby-ticket",          "NetRelayTicket"          },
     { "-net-smoothing",         "NetPredictionSmoothing"  },
+    { "-lobby-options",         "NetNativeRoomOptions"    },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };

@@ -56,7 +56,9 @@ public:
   void Connect(const std::string& endpoint, const std::string& name, uint32_t available, bool asyncEnabled);
   void Disconnect();
   Snapshot Get() const;
-  void Create(uint32_t game, const std::string& title, bool selfHostUdp=false, uint16_t udpPort=1971);
+  // tickRate: update rate ceiling (5-60 Hz) of a self-hosted room; the creator's host
+  // lowers it under congestion. Ignored for central relay rooms.
+  void Create(uint32_t game, const std::string& title, bool selfHostUdp=false, uint16_t udpPort=1971, unsigned tickRate=20);
   void Join(uint32_t room);
   void Leave();
   void Start(uint32_t room);

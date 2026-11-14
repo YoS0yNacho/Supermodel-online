@@ -30,6 +30,16 @@ struct TickRate : NetProtocol::MessageHeader {
   uint32_t version = Version, tickRate = DefaultTickRate;
   TickRate() : MessageHeader(ID,sizeof(TickRate)) {}
 };
+// RLT2: the host adapts the tick rate during the session between `floor` and
+// `cap` (RLT1 before RLA1 carries the starting rate) and will send further RLT1
+// messages while the room runs. Sent only to clients whose lobby HELLO set the
+// adaptive capability bit; such clients report queueing delay / loss in their
+// UDP hellos so the host can see downlink congestion too.
+struct AdaptiveTick : NetProtocol::MessageHeader {
+  static constexpr uint32_t ID = NetProtocol::ID("RLT2");
+  uint32_t version = Version, flags = 1, cap = DefaultTickRate, floor = 10;
+  AdaptiveTick() : MessageHeader(ID,sizeof(AdaptiveTick)) {}
+};
 // RLS1: the relay fans every timed ring segment out to all cabinets itself
 // (hop count rewritten per receiver, origin echoed at once); cabinets must not
 // forward peer segments. Sent before RLA1, only when every member's lobby
@@ -59,7 +69,7 @@ struct UdpConfig : NetProtocol::MessageHeader {
 static constexpr uint32_t UdpHostConfigID=NetProtocol::ID("RLU2");
 #pragma pack(pop)
 static_assert(sizeof(HybridJoin)==56 && sizeof(UdpConfig)==40,"Hybrid wire sizes");
-static_assert(sizeof(Join)==40 && sizeof(Ready)==24 && sizeof(TickRate)==16 && sizeof(Error)==16 && sizeof(Star)==16,"Relay wire sizes");
+static_assert(sizeof(Join)==40 && sizeof(Ready)==24 && sizeof(TickRate)==16 && sizeof(Error)==16 && sizeof(Star)==16 && sizeof(AdaptiveTick)==24,"Relay wire sizes");
 static_assert(sizeof(LobbyJoin)==56,"Lobby ticket wire size");
 inline bool ParseTicket(const std::string& text, uint8_t (&bytes)[16]) {
   if(text.size()!=32) return false;

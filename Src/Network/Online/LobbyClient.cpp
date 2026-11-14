@@ -193,6 +193,7 @@ struct LobbyClient::State {
   std::mutex mutex;
   Snapshot view;
   std::deque<std::vector<uint8_t>> outgoing;
+  std::atomic<unsigned> hostTick{20};  // self-hosted room ceiling chosen in the Create dialog
 };
 LobbyClient::LobbyClient():state(std::make_shared<State>()) {}
 LobbyClient::~LobbyClient() { Disconnect(); }
@@ -216,7 +217,7 @@ void LobbyClient::Queue(const char* id,std::vector<uint8_t> body) {
     state->outgoing.push_back(Frame(id,body)); state->view.error.clear();
   }
 }
-void LobbyClient::Create(uint32_t game,const std::string& title,bool selfHostUdp,uint16_t udpPort) { std::vector<uint8_t> b; Put(b,game); Text(b,title,64); Put(b,selfHostUdp?3:0); Put(b,selfHostUdp?udpPort:0); Queue("OLC4",b); }
+void LobbyClient::Create(uint32_t game,const std::string& title,bool selfHostUdp,uint16_t udpPort,unsigned tickRate) { state->hostTick=std::clamp(tickRate,5u,60u); std::vector<uint8_t> b; Put(b,game); Text(b,title,64); Put(b,selfHostUdp?3:0); Put(b,selfHostUdp?udpPort:0); Queue("OLC4",b); }
 void LobbyClient::Join(uint32_t room) { std::vector<uint8_t> b; Put(b,room); Queue("OLJ1",b); }
 void LobbyClient::Leave() { bool native;{std::lock_guard<std::mutex> l(state->mutex);native=state->view.hostedRoom;}if(native)state->back=true;else Queue("OLL1"); }
 void LobbyClient::Start(uint32_t room) { std::vector<uint8_t> b; Put(b,room); Queue("OLT1",b); }
@@ -242,7 +243,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
     SocketOwner owner;
     if(!OpenNonblockingSocket(s->stop,route.host,route.port,owner)) return;
     Socket fd=owner.socket;
-    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&Online::GameMaskAll); Put(hello,(enabled?1u:0u)|246u)/*2 options, 4 native, 16 Hornet, 32 race, 64 star fan-out, 128 ping*/; Text(hello,name,32);
+    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&Online::GameMaskAll); Put(hello,(enabled?1u:0u)|510u)/*2 options, 4 native, 8 adaptive tick rate, 16 Hornet, 32 race, 64 star fan-out, 128 ping, 256 Video60 room option*/; Text(hello,name,32);
     std::vector<uint8_t> output=Frame("HEL1",{'S','u','p','e','r','m','o','d','e','l',' ','O','n','l','i','n','e'});
     if(route.native)hello.insert(hello.end(),route.key.begin(),route.key.end());
     const auto registration=Frame(Srally2Research::LobbyHello,hello);output.insert(output.end(),registration.begin(),registration.end());
@@ -321,7 +322,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Require(!route.native && admitted && !collecting && b.size()==100);
           Route next;next.native=true;next.host=std::to_string(b[16])+"."+std::to_string(b[17])+"."+std::to_string(b[18])+"."+std::to_string(b[19]);auto port=U32(b,12);Require(port>=1024&&port<=65535);next.port=uint16_t(port);std::memcpy(next.key.data(),b.data()+84,16);
           if(host){
-            Require(U32(b,0)==hostRoom);PlayerRoom::Settings settings;settings.id=hostRoom;settings.game=U32(b,4);settings.tick=U32(b,8);settings.port=next.port;settings.title=String(b,20,64);settings.owner=next.key;
+            Require(U32(b,0)==hostRoom);PlayerRoom::Settings settings;settings.id=hostRoom;settings.game=U32(b,4);settings.tick=s->hostTick.load();settings.port=next.port;settings.title=String(b,20,64);settings.owner=next.key;
 #ifdef _WIN32
             int length=sizeof(settings.directory);
 #else
@@ -336,7 +337,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           if(host && U32(b,0)==hostRoom){host->Stop();retiredHosts.push_back(host);host.reset();bindPending=armPending=false;std::lock_guard<std::mutex> lock(s->mutex);s->view.playerHost.reset();}
         } else if(kind=="OHR1") {
           Require(host && b.size()>=16 && U32(b,0)==hostRoom);
-          PlayerHost::Config config;config.game=U32(b,4);config.tick=U32(b,8);auto count=U32(b,12);Require(count>=2 && count<=16 && b.size()==16+32*count);
+          PlayerHost::Config config;config.game=U32(b,4);config.tick=s->hostTick.load();auto count=U32(b,12);Require(count>=2 && count<=16 && b.size()==16+32*count);
           for(uint32_t i=0;i<count;++i){PlayerHost::Member m;std::memcpy(m.ticket.data(),b.data()+16+32*i,16);std::memcpy(m.cookie.data(),b.data()+32+32*i,16);config.members.push_back(m);}
           if(host->Configure(config))armPending=true;
           else {std::vector<uint8_t> body;Put(body,hostRoom);Put(body,0);std::lock_guard<std::mutex> lock(s->mutex);s->outgoing.push_back(Frame("OHA1",body));}

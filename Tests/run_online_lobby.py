@@ -171,7 +171,7 @@ async def main():
         except asyncio.IncompleteReadError:
             pass
         bogus = await asyncio.open_connection('127.0.0.1', port)
-        bogus[1].write(relay.frame(b'HEL1', b'x') + relay.frame(b'OEH6', online.HELLO.pack(1, 127, 1 | 256, online.fixed('Bogus', 32))))
+        bogus[1].write(relay.frame(b'HEL1', b'x') + relay.frame(b'OEH6', online.HELLO.pack(1, 127, 1 | 512, online.fixed('Bogus', 32))))
         try:  # rejected before any greeting
             kind, _, _ = await asyncio.wait_for(relay.read_frame(bogus[0]), 3)
             assert kind != b'HEL1', 'unknown capability bit accepted'
@@ -181,6 +181,49 @@ async def main():
         for cl in (pinger, peer): cl.close()
         await wait_for(lambda: ping_room not in hub.rooms)
         print('PASS lobby ping: OLQ2 stamp echo, ORP1 rows per member, clamp, legacy poll unchanged, unknown capability rejected')
+
+        # Video60 room option (bit 1024, lemans24 = no native settings): master only, every member must
+        # advertise capability 256, older option-capable clients never see the bit and cannot join.
+        async def options_seen(cl, room, expected):
+            # True once a complete snapshot shows `expected` for the room (older queued snapshots are skipped).
+            latest = None
+            for _ in range(200):
+                try:
+                    kind, data, _ = await cl.next()
+                except asyncio.TimeoutError:
+                    return latest == expected
+                if kind == b'ORO1' and struct.unpack('<II', data)[0] == room:
+                    latest = struct.unpack('<II', data)[1]
+                elif kind == b'OLZ1' and latest == expected:
+                    return True
+            return False
+        v_master = await client(name='VMaster', enabled=1 | 2 | 256)
+        v_old = await client(name='VOld', enabled=1 | 2)
+        v_new = await client(name='VNew', enabled=1 | 2 | 256)
+        v_room = await v_master.create(5)
+        await v_old.join(v_room)
+        v_master.send(b'ORO1', struct.pack('<II', v_room, 1024))
+        assert b'60 Hz' in await v_master.until(b'OLE1')  # VOld lacks the capability
+        v_old.send(b'OLL1')
+        await wait_for(lambda: len(hub.rooms[v_room].members) == 1)
+        await v_new.join(v_room)
+        v_new.send(b'ORO1', struct.pack('<II', v_room, 1024))
+        assert b'Only the master' in await v_new.until(b'OLE1')
+        v_master.send(b'ORO1', struct.pack('<II', v_room, 1024))
+        assert await options_seen(v_master, v_room, 1024) and await options_seen(v_new, v_room, 1024)
+        v_old.send(b'OLQ1')
+        assert await options_seen(v_old, v_room, 0)  # bit masked for pre-Video60 clients
+        v_old.send(b'OLJ1', struct.pack('<I', v_room))
+        assert b'60 Hz' in await v_old.until(b'OLE1')
+        v_master.send(b'ORO1', struct.pack('<II', v_room, 2048))
+        assert b'Only the master' in await v_master.until(b'OLE1')  # above the defined mask
+        v_master.send(b'OLT1', struct.pack('<I', v_room))
+        for cl in (v_master, v_new):
+            data = await cl.until(b'OLG3')  # launch carries the options mask the cabinets apply
+            assert struct.unpack_from('<I', data, 32)[0] == 1024
+        for cl in (v_master, v_old, v_new): cl.close()
+        await hub.destroy(hub.rooms[v_room], 'video60 test')
+        print('PASS Video60 room option: capability gating, master only, masked for old clients, launch mask')
 
         # srally2 supports the role encodings for at most four cabinets.
         rally = [await client(name=f'Rally{i}') for i in range(5)]

@@ -80,6 +80,10 @@ public:
   int RelayIndex();
   unsigned RelayCount();
   unsigned RelayTickRate() const { return m_relayTickRate.load(std::memory_order_acquire); }
+  // True once the host announced (RLT2) that it adapts the tick rate during the
+  // session; RelayTickRate() then follows its mid-session RLT1 messages.
+  bool RelayAdaptiveTick() const { return m_relayAdaptive.load(std::memory_order_acquire); }
+  unsigned RelayTickCap() const { return m_relayTickCap.load(std::memory_order_acquire); }
   // True once the relay announced star fan-out (RLS1) for this session.
   bool RelayStar() const { return m_relayStar.load(std::memory_order_acquire); }
   bool IsRelay() const { return m_relay; }
@@ -173,6 +177,7 @@ private:
   std::unique_ptr<CRelayUdpClient> m_udp;
   CNetServer::Registration m_udpHandler, m_udpHostHandler;
   bool OnRelayTickRate(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
+  bool OnRelayAdaptiveTick(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayStar(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayReady(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayError(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
@@ -194,7 +199,8 @@ private:
   std::atomic<bool> m_relayStar{false};
   bool m_relayFailed = false;
   unsigned m_relayIndex = 0, m_relayCount = 0;
-  std::atomic<unsigned> m_relayTickRate{60};
+  std::atomic<unsigned> m_relayTickRate{60}, m_relayTickCap{60};
+  std::atomic<bool> m_relayAdaptive{false};
 
   std::mutex m_mutex;
   std::condition_variable m_condition;
@@ -208,7 +214,7 @@ private:
   bool m_earlySend = true;              // false: advance on arrival only (star fan-out)
   std::atomic<uint64_t> m_earlyForwarded{0};
 
-  CNetServer::Registration m_relayTickRateHandler, m_relayStarHandler, m_relayReadyHandler, m_relayErrorHandler;
+  CNetServer::Registration m_relayTickRateHandler, m_relayAdaptiveHandler, m_relayStarHandler, m_relayReadyHandler, m_relayErrorHandler;
   CNetServer::Registration m_joinHandler;
   CNetServer::Registration m_dataHandler;
   CNetServer::Registration m_disconnectHandler;

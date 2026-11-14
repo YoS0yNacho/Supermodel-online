@@ -6,6 +6,7 @@
 #include "Network/Games/Daytona2/Daytona2Prediction.h"
 #include "Network/Games/CorrectionSmoothing.h"
 #include "Network/Games/Daytona2/BootScene.h"
+#include "Network/Online/AdaptiveTickRate.h"
 // ROM-free tests of the real HLE board and TCP transport. GPL-3.0-or-later.
 #include "Supermodel.h"
 #include "Util/NewConfig.h"
@@ -117,6 +118,49 @@ int main(int argc, char** argv)
   const std::string scenario = argv[1], game = argv[2];
   const unsigned n = std::stoul(argv[3]);
   assert(unsigned(argc) == 4 + 2 * n);
+  if (scenario == "adaptive-tick")
+  {
+    // Host-side congestion control, no sockets: the meters must flag queueing
+    // and loss, the ladder must step down fast, hold, and recover slowly, and
+    // never leave [floor, cap].
+    using namespace Online;
+    DelayMeter delay;
+    for (int i = 0; i < 60; ++i) delay.Note(1000000 + (i % 7) * 1000);  // unknown clock offset, 0-6 ms jitter
+    assert(delay.Close() < 10000);
+    for (int i = 0; i < 60; ++i) delay.Note(1000000 + 80000 + (i % 7) * 1000);  // 80 ms of standing queue
+    assert(delay.Close() >= QueueDelayThresholdUs);
+    LossMeter loss;
+    for (uint32_t seq = 1; seq <= 41; ++seq) if (seq % 10) loss.Note(seq);  // 4 of 41 missing
+    assert(loss.ClosePercent() == 9);
+    LossMeter late;  // a reordered arrival is not loss
+    for (uint32_t seq = 100; seq <= 115; ++seq) { if (seq == 108) continue; late.Note(seq); if (seq == 109) late.Note(108); }
+    assert(late.ClosePercent() == 0);
+    AdaptiveTickRate ctl; ctl.Reset(30);
+    assert(ctl.current == 30 && ctl.cap == 30 && ctl.floor == 10);
+    uint64_t now = 1000000;
+    auto second = [&](bool congested) { now += 1000000; return ctl.Update(congested, now); };
+    assert(!second(true));                      // one congested second: wait
+    assert(second(true) && ctl.current == 24);  // two in a row: step down
+    assert(!second(true) && !second(true));     // dwell 3 s between steps
+    assert(second(true) && ctl.current == 20);
+    for (int i = 0; i < 12; ++i) second(true);
+    assert(ctl.current == 10);                  // floor reached
+    assert(!second(true) && ctl.current == 10); // never below the floor
+    bool changed = false;
+    for (int i = 0; i < 19; ++i) changed |= second(false);
+    assert(!changed && ctl.current == 10);      // 19 clean seconds: not yet
+    assert(second(false) && ctl.current == 12); // 20 clean seconds: one step up
+    for (int i = 0; i < 19; ++i) second(false);
+    assert(ctl.current == 12);                  // 20 s dwell before the next step up
+    for (int i = 0; i < 200; ++i) second(false);
+    assert(ctl.current == 30);                  // back at the ceiling, not above
+    AdaptiveTickRate low; low.Reset(8);
+    assert(low.floor == 8 && low.current == 8);
+    for (int i = 0; i < 10; ++i) low.Update(true, now += 1000000);
+    assert(low.current == 8);                   // cap below 10 Hz: nothing to adapt
+    std::cout << "PASS adaptive-tick: meters flag queueing/loss, ladder steps 30-24-20-15-12-10 and recovers\n";
+    return 0;
+  }
   if (scenario == "boot-scene")
   {
     // Session-only PE boot patch, no ROM: a RAM image with the loader's words at the

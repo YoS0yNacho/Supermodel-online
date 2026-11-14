@@ -364,6 +364,116 @@ class Channel:
         self.hybrid = False
 
 
+
+# ---- adaptive tick rate (mirror of Src/Network/Online/AdaptiveTickRate.h) ------
+# The relay lowers a room's update tick rate while the link or the relay is
+# congested and restores it after the link has been clean for a while. Only
+# rooms whose every member advertised lobby HELLO bit 8 adapt; they get RLT2
+# before RLA1 and mid-session RLT1 messages on their first channel.
+ADAPTIVE_CAPABILITY = 8
+VIDEO_CAPABILITY = 256  # understands room option bit 1024 (Video60) and runs the room's emulated video rate
+VIDEO60_OPTION = 1024
+QUEUE_DELAY_THRESHOLD_US = 40000
+LOSS_THRESHOLD_PERCENT = 5
+ADAPTIVE_TICK = struct.Struct('<IIII')  # version, flags, cap, floor
+
+
+class DelayMeter:
+    """One-way delay without synchronized clocks: queueing = delay - running minimum."""
+    __slots__ = ('baseline', 'window')
+
+    def __init__(self):
+        self.baseline = None
+        self.window = []
+
+    def note(self, delay_us):
+        if self.baseline is None or delay_us < self.baseline:
+            self.baseline = delay_us
+        if len(self.window) < 4096:
+            self.window.append(delay_us - self.baseline)
+
+    def close(self):
+        p50 = 0
+        if self.window:
+            self.window.sort()
+            p50 = self.window[len(self.window) // 2]
+            self.window = []
+        if self.baseline is not None:
+            self.baseline += 250
+        return p50
+
+
+class LossMeter:
+    __slots__ = ('seen', 'last', 'expected', 'received')
+
+    def __init__(self):
+        self.seen, self.last, self.expected, self.received = False, 0, 0, 0
+
+    def note(self, seq):
+        if not self.seen:
+            self.seen, self.last, self.expected, self.received = True, seq, 1, 1
+            return
+        gap = (seq - self.last) & 0xffffffff
+        if gap == 0 or gap > 0x80000000:
+            self.received += 1
+            return
+        self.expected += gap
+        self.received += 1
+        self.last = seq
+
+    def close_percent(self):
+        percent = 0
+        if self.expected >= 10 and self.received < self.expected:
+            percent = (self.expected - self.received) * 100 // self.expected
+        self.expected = self.received = 0
+        return percent
+
+
+class AdaptiveTickRate:
+    LADDER = (60, 45, 30, 24, 20, 15, 12, 10)
+    CONGESTED_SECONDS, CLEAN_SECONDS = 2, 20
+    DOWN_DWELL, UP_DWELL = 3.0, 20.0
+
+    def __init__(self, cap):
+        self.cap = self.current = max(MIN_TICK_RATE, min(MAX_TICK_RATE, int(cap)))
+        self.floor = min(10, self.cap)
+        self.congested = self.clean = 0
+        self.last_change = None
+
+    @classmethod
+    def lower(cls, rate, floor):
+        best = floor
+        for step in cls.LADDER:
+            if floor <= step < rate and step > best:
+                best = step
+        return min(best, rate)
+
+    @classmethod
+    def higher(cls, rate, cap):
+        best = cap
+        for step in cls.LADDER:
+            if rate < step <= cap and step < best:
+                best = step
+        return max(best, rate)
+
+    def update(self, congested, now):
+        """Once per second; True when self.current changed."""
+        if congested:
+            self.clean = 0
+            self.congested += 1
+            if (self.congested >= self.CONGESTED_SECONDS and self.current > self.floor
+                    and (self.last_change is None or now - self.last_change >= self.DOWN_DWELL)):
+                self.current, self.last_change, self.congested = self.lower(self.current, self.floor), now, 0
+                return True
+            return False
+        self.congested = 0
+        self.clean += 1
+        if (self.clean >= self.CLEAN_SECONDS and self.current < self.cap
+                and (self.last_change is None or now - self.last_change >= self.UP_DWELL)):
+            self.current, self.last_change, self.clean = self.higher(self.current, self.cap), now, 0
+            return True
+        return False
+
 class Room:
     def __init__(self, log=print, latency_ms=0, jitter_ms=0, tick_rate=DEFAULT_TICK_RATE, on_change=None, can_gc=None):
         tick_rate = int(tick_rate)
@@ -396,6 +506,17 @@ class Room:
         self.star_open = False
         self.star_seen = set()
         self.star_held = []
+        # Adaptive tick rate (every member advertised it; see AdaptiveTickRate).
+        self.adaptive = False
+        self.adaptive_ctl = None
+        self.adaptive_timer = None
+        self.adaptive_due = 0.0
+        self.adaptive_stall_at = {}
+        self.adaptive_stall = 0.0
+        self.adaptive_changes = 0
+        # Test aid: treat the room as congested during [start+from, start+to) seconds.
+        self.adaptive_simulate = None
+        self.adaptive_started = 0.0
 
     def _notify(self):
         if self.on_change is not None:
@@ -468,6 +589,9 @@ class Room:
         if self.udp is not None:
             CONFIG = relay_udp.CONFIG
         tick_pkt = frame(b'RLT1', TICK_RATE.pack(VERSION, self.tick_rate)) if self.tick_rate != DEFAULT_TICK_RATE else b''
+        if self.adaptive:
+            self.adaptive_ctl = AdaptiveTickRate(self.tick_rate)
+            tick_pkt += frame(b'RLT2', ADAPTIVE_TICK.pack(VERSION, 1, self.adaptive_ctl.cap, self.adaptive_ctl.floor))
         star_pkt = frame(b'RLS1', STAR.pack(VERSION, 1)) if self.star_active else b''
         for i, channels in enumerate(players):
             for number, channel in channels.items():
@@ -496,11 +620,66 @@ class Room:
             self.log(f'FAKE LATENCY active for this session: {self.latency.describe()}')
         if self.tick_rate != DEFAULT_TICK_RATE:
             self.log(f'TICK RATE active for this session: {self.tick_rate} Hz')
+        if self.adaptive:
+            self.adaptive_started = time.monotonic()
+            self.adaptive_due = self.adaptive_started + 1.0
+            self.adaptive_timer = asyncio.get_running_loop().call_later(1.0, self.adaptive_tick)
+            self.log(f'ADAPTIVE TICK RATE active for this session: ceiling {self.adaptive_ctl.cap} Hz, floor {self.adaptive_ctl.floor} Hz')
         if self.star_active:
             self.star_tick()
             self.log('STAR FAN-OUT active for this session: ring segments delivered to every cabinet directly')
         self.log(f'STARTED {len(players)} cabinets; no late joins or live master migration')
         return True
+
+    # ---- adaptive tick rate -------------------------------------------------
+    def adaptive_tick(self):
+        """Once per second: close the congestion window, step the ladder, announce."""
+        self.adaptive_timer = None
+        if not self.adaptive or not self.started or self.failed or self.adaptive_ctl is None:
+            return
+        now = time.monotonic()
+        late = now - self.adaptive_due  # the relay itself running behind
+        congested = late >= 0.25
+        for s in self.udp_sessions:
+            if s is None:
+                continue
+            if s.uplink_delay.close() >= QUEUE_DELAY_THRESHOLD_US or s.uplink_loss.close_percent() >= LOSS_THRESHOLD_PERCENT:
+                congested = True
+            if s.feedback_at and now - s.feedback_at < 3.0 and (s.feedback_queue_ms * 1000 >= QUEUE_DELAY_THRESHOLD_US or s.feedback_loss >= LOSS_THRESHOLD_PERCENT):
+                congested = True
+        # TCP: a cabinet whose receive channel has stayed above the low-water mark
+        # for 300 ms is not draining what the ring/relay sends it.
+        for index, channels in enumerate(self.players.values()):
+            for channel in channels.values():
+                transport = channel.writer.transport
+                backlog = 0 if transport.is_closing() else transport.get_write_buffer_size()
+                key = (index, channel.number)
+                if backlog > WRITE_LOW_WATER:
+                    since = self.adaptive_stall_at.setdefault(key, now)
+                    if now - since >= 0.3:
+                        congested = True
+                else:
+                    self.adaptive_stall_at.pop(key, None)
+        if self.adaptive_simulate is not None:
+            lo, hi = self.adaptive_simulate
+            if lo <= now - self.adaptive_started < hi:
+                congested = True
+        if self.adaptive_ctl.update(congested, now):
+            self.tick_rate = self.adaptive_ctl.current
+            self.adaptive_changes += 1
+            for s in self.udp_sessions:
+                if s is not None:
+                    s.rate = (relay_udp.MAX_ENCODED + 3 * relay_udp.HEADER.size) * self.tick_rate  # bundled module, bound at startup
+            pkt = frame(b'RLT1', TICK_RATE.pack(VERSION, self.tick_rate))
+            for channels in self.players.values():
+                channel = channels.get(0)
+                if channel is not None and not channel.writer.is_closing():
+                    with contextlib.suppress(OSError, RuntimeError):
+                        channel.writer.write(pkt)
+            self.log(f'TICK RATE {"lowered" if congested else "restored"} to {self.tick_rate} Hz '
+                     f'({"congestion" if congested else "link clean"}; ceiling {self.adaptive_ctl.cap} Hz)')
+        self.adaptive_due += 1.0
+        self.adaptive_timer = asyncio.get_running_loop().call_later(max(0.05, self.adaptive_due - time.monotonic()), self.adaptive_tick)
 
     # ---- star fan-out -------------------------------------------------------
     @staticmethod
@@ -688,6 +867,9 @@ class Room:
             self.udp.unregister(self)
         self.stop_pumps()
         self.star_stop()
+        if self.adaptive_timer is not None:
+            self.adaptive_timer.cancel()
+            self.adaptive_timer = None
         self.log(f'ROOM FAILED: {reason}. Create a new lobby and restart all clients.')
         err_pkt = frame(b'RLE1', struct.pack('<II', 5, 0))
         for channels in self.players.values():
@@ -934,7 +1116,8 @@ async def serve(args):
                     tick_rate=args.tick_rate)
     hub = Hub(protocol, log=lambda line: print(line, flush=True),
               latency_ms=args.latency_ms, jitter_ms=args.jitter_ms,
-              tick_rate=args.tick_rate, autostart=args.autostart)
+              tick_rate=args.tick_rate, autostart=args.autostart,
+              adaptive_tick=not args.no_adaptive_tick, adaptive_simulate=args.simulate_congestion)
     server = await asyncio.start_server(hub.handle, args.bind, args.port, limit=65536)
     UdpRelay = relay_udp.UdpRelay
     udp = None
@@ -976,6 +1159,14 @@ async def serve(args):
         await server.wait_closed()
 
 
+def parse_window(text):
+    lo, _, hi = text.partition('-')
+    lo, hi = float(lo), float(hi)
+    if not 0 <= lo < hi <= 3600:
+        raise argparse.ArgumentTypeError('expected FROM-TO seconds, e.g. 20-40')
+    return lo, hi
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bind', default='127.0.0.1', help='listen address (default: loopback); use a VPN address or 0.0.0.0 for remote clients')
@@ -987,6 +1178,11 @@ def main():
                         help='fake one-way latency in ms added to relayed game traffic after Start Link (default 0 = off)')
     parser.add_argument('--jitter-ms', type=int, default=0, dest='jitter_ms',
                         help='random +/- jitter in ms applied to --latency-ms; 0 = constant delay')
+    parser.add_argument('--no-adaptive-tick', action='store_true', dest='no_adaptive_tick',
+                        help='keep --tick-rate fixed; by default rooms whose clients all support it lower the rate '
+                             'under congestion (down to 10 Hz) and restore it when the link is clean')
+    parser.add_argument('--simulate-congestion', type=parse_window, default=None, dest='simulate_congestion', metavar='FROM-TO',
+                        help='test/CI only: treat every adaptive room as congested between FROM and TO seconds after Start Link')
     parser.add_argument('--autostart', type=int, default=0, dest='autostart', metavar='N',
                         help='test/CI only: launch a lobby automatically once N cabinets have joined '
                              '(0 = normal, master presses Start Link)')
@@ -1060,7 +1256,10 @@ def parse(data):
         return None
     if kind == ACK:
         return h if len(data) == HEADER.size + ACK_CLOCK.size and not (part or parts or total) else None
-    if kind in (HELLO, HOST_STATUS, ROUTE):
+    if kind == HELLO:
+        # Adaptive-room clients report receive-side queueing (total, ms) and loss (part, %).
+        return h if len(data) == HEADER.size and not parts else None
+    if kind in (HOST_STATUS, ROUTE):
         return h if len(data) == HEADER.size and not (part or parts or total) else None
     if kind != SNAPSHOT or not 2 <= total <= MAX_ENCODED or not 0 < stamp <= 0x7fffffffffffffff:
         return None
@@ -1071,7 +1270,8 @@ def parse(data):
 
 
 class Session:
-    __slots__ = ('room', 'index', 'token', 'ip', 'address', 'last_hello', 'credit', 'credit_at', 'rate', 'last_seq', 'seen', 'stamp', 'total', 'parts', 'mask', 'host_ready', 'status_at', 'status_stamp')
+    __slots__ = ('room', 'index', 'token', 'ip', 'address', 'last_hello', 'credit', 'credit_at', 'rate', 'last_seq', 'seen', 'stamp', 'total', 'parts', 'mask', 'host_ready', 'status_at', 'status_stamp',
+                 'uplink_delay', 'uplink_loss', 'feedback_queue_ms', 'feedback_loss', 'feedback_at')
     def __init__(self, room, index, ip):
         self.room, self.index, self.ip = room, index, ip
         self.token = secrets.token_bytes(16)
@@ -1084,6 +1284,11 @@ class Session:
         self.seen = False
         self.host_ready = self.status_at = 0.0
         self.status_stamp = 0
+        # Congestion evidence for adaptive rooms: what this cabinet sends us and,
+        # from its hello feedback, what it receives from us.
+        self.uplink_delay, self.uplink_loss = DelayMeter(), LossMeter()
+        self.feedback_queue_ms = self.feedback_loss = 0
+        self.feedback_at = 0.0
 
 
 class UdpRelay(asyncio.DatagramProtocol):
@@ -1181,6 +1386,8 @@ class UdpRelay(asyncio.DatagramProtocol):
                 self.dropped += 1
                 return
             s.address, s.last_hello = address, now
+            if s.room.adaptive:
+                s.feedback_queue_ms, s.feedback_loss, s.feedback_at = total, part, now
             # The relay clock lets cabinets measure each other's snapshot age.
             self.transport.sendto(HEADER.pack(b'UGP1', WIRE_VERSION, ACK, 0, 0, token, seq, origin, 0, stamp)
                                   + ACK_CLOCK.pack(time.monotonic_ns() // 1000), address)
@@ -1215,6 +1422,9 @@ class UdpRelay(asyncio.DatagramProtocol):
             self.dropped += 1
             return
         s.mask |= 1 << part
+        if part == 0 and s.room.adaptive:
+            s.uplink_delay.note(time.monotonic_ns() // 1000 - stamp)
+            s.uplink_loss.note(seq)
         self.accepted += 1
         self.bytes_in += len(data)
         body = data[HEADER.size:]
@@ -1245,7 +1455,7 @@ class UdpRelay(asyncio.DatagramProtocol):
         if self.transport is not None:
             self.transport.close()
 
-''')
+''',{name:globals()[name] for name in ('DelayMeter','LossMeter')})
 
 online_lobby=_bundled_module('online_lobby',r'''
 #!/usr/bin/env python3
@@ -1321,13 +1531,13 @@ def native_car_limit(game):
 
 
 def valid_room_options(game, value):
-    if not 0 <= game < 7 or value & ~1023 or (value & 1 and game not in (0, 3)):
+    if not 0 <= game < 7 or value & ~2047 or (value & 1 and game not in (0, 3)):
         return False
     base = 4 if game == 6 else game
     if value & 768 and base >= 4:
         return False
     if not value & 2:
-        return not value & ~769
+        return not value & ~(769 | VIDEO60_OPTION)
     game = base
     return game < 5 and ((value >> 2) & 7) < (5 if game == 4 else 4) and ((value >> 5) & 7) < (7 if game < 2 else 3 if game < 4 else 2)
 
@@ -1371,11 +1581,13 @@ class Lobby:
 
 
 class Hub:
-    def __init__(self, legacy, log=print, launch_timeout=90, latency_ms=0, jitter_ms=0, tick_rate=DEFAULT_TICK_RATE, autostart=0):
+    def __init__(self, legacy, log=print, launch_timeout=90, latency_ms=0, jitter_ms=0, tick_rate=DEFAULT_TICK_RATE, autostart=0, adaptive_tick=True, adaptive_simulate=None):
         self.legacy, self.log, self.launch_timeout = legacy, log, launch_timeout
         self.autostart = autostart  # 0 = manual Start Link (normal operation)
         self.latency_ms, self.jitter_ms = latency_ms, jitter_ms
         self.tick_rate = tick_rate
+        self.adaptive_tick = adaptive_tick  # rooms whose members all support it adapt below tick_rate
+        self.adaptive_simulate = adaptive_simulate
         self.clients, self.rooms, self.tickets = {}, {}, {}
         self.next_client = self.next_room = 1
         self.lounge_chat = []  # (seq, 0, sender, message)
@@ -1462,7 +1674,9 @@ class Hub:
             elif c.get('host_capable'):
                 self.send(c, b'OLU1', struct.pack('<III', room.id, getattr(room.board, 'host_udp_port', 0), 1 if getattr(room.board, 'host_udp_port', 0) else 0))
             if c.get('options_capable'):
-                self.send(c, b'ORO1', struct.pack('<II', room.id, room.options))
+                # Pre-Video60 clients never see bit 1024 (they cannot join such a room anyway).
+                shown = room.options if c.get('video_capable') else room.options & ~VIDEO60_OPTION
+                self.send(c, b'ORO1', struct.pack('<II', room.id, shown))
             if c.get('ping_capable'):
                 # Each member's RTT to this host (what it reported in its last OLQ2); 0 = not measured yet.
                 body = struct.pack('<II', room.id, len(members))
@@ -1547,6 +1761,8 @@ class Hub:
         room.deadline = time.monotonic() + self.launch_timeout
         room.board.guid = GAMES[room.game][1]
         room.board.star = all(m.get('star_capable') for m in room.members)
+        room.board.adaptive = self.adaptive_tick and all(m.get('adaptive_capable') for m in room.members)
+        room.board.adaptive_simulate = self.adaptive_simulate
         # Reserve native cabinet order BEFORE any emulator sockets arrive.
         # Fast slaves cannot become MASTER by completing their ROM load first.
         for index, member in enumerate(room.members):
@@ -1677,6 +1893,9 @@ class Hub:
                 return
             if room.game < 4 and value & 256 and not all(m.get('race_capable') for m in room.members):
                 self.error(c, 'Update all room members before disabling collisions.')
+                return
+            if value & VIDEO60_OPTION and not all(m.get('video_capable') for m in room.members):
+                self.error(c, 'Update all room members before selecting 60 Hz video.')
                 return
             room.options = value
             self.broadcast()
@@ -1818,6 +2037,9 @@ class Hub:
                 if room.game < 4 and room.options & 256 and not c.get('race_capable'):
                     self.error(c, 'Update this client: collisions are disabled in this room.')
                     return
+                if room.options & VIDEO60_OPTION and not c.get('video_capable'):
+                    self.error(c, 'Update this client: 60 Hz video is enabled in this room.')
+                    return
                 if room.options and not c.get('options_capable'):
                     self.error(c, 'Update this client: Secret Cars is enabled in this room.')
                     return
@@ -1853,9 +2075,9 @@ class Hub:
         if len(body) != HELLO.size:
             raise ValueError('lobby hello size')
         version, mask, enabled, name = HELLO.unpack(body)
-        # Capability bits: 1 AsyncNet, 2 room options, 4 native settings, 8 (reserved), 16 Hornet,
-        # 32 race options, 64 star fan-out, 128 ping (OLQ2 poll / OLP2 echo / ORP1 rows).
-        if version != VERSION or enabled & ~255 or mask & ~((1 << len(GAMES)) - 1) or len(self.clients) >= 64:
+        # Capability bits: 1 AsyncNet, 2 room options, 4 native settings, 8 adaptive tick rate, 16 Hornet,
+        # 32 race options, 64 star fan-out, 128 ping (OLQ2 poll / OLP2 echo / ORP1 rows), 256 Video60 room option.
+        if version != VERSION or enabled & ~511 or mask & ~((1 << len(GAMES)) - 1) or len(self.clients) >= 64:
             raise ValueError('lobby version/limit/flags')
         c = dict(id=self.next_client, writer=writer, name=text(name, 'Player'), mask=mask, async_=bool(enabled & 1), room=0)
         c['options_capable'] = bool(enabled & 2)
@@ -1863,7 +2085,9 @@ class Hub:
         c['hornet_capable'] = bool(enabled & 16)  # course-selection semantics; old car shortcut is not compatible
         c['race_capable'] = bool(enabled & 32)
         c['star_capable'] = bool(enabled & 64)  # accepts RLS1: the relay fans ring segments out, the client does not forward
+        c['adaptive_capable'] = bool(enabled & ADAPTIVE_CAPABILITY)  # accepts RLT2 and mid-session RLT1, reports UDP feedback
         c['ping_capable'] = bool(enabled & 128)  # polls with OLQ2 and shows ORP1 pings in the room
+        c['video_capable'] = bool(enabled & VIDEO_CAPABILITY)
         c['ping_ms'] = 0
         c['async'] = c.pop('async_')
         c['host_capable'] = host_capable
@@ -2075,7 +2299,7 @@ class Hub:
         for room in tuple(self.rooms.values()):
             await self.destroy(room, 'Relay stopped.')
 
-''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE')})
+''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE','ADAPTIVE_CAPABILITY','VIDEO_CAPABILITY','VIDEO60_OPTION')})
 
 # Public namespaces for source tests/tools; compatibility names are in memory
 # only. None of these modules is a separate file or relay launcher.
