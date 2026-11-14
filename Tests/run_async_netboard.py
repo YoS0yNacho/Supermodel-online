@@ -203,6 +203,7 @@ async def main(binary, only=None):
         ("start-checkpoint", "dayto2pe", 2, .01),
         ("start-disconnect", "dayto2pe", 2, .01),
         ("predict-rubberband", "dayto2pe", 1, 0),
+        ("boot-scene", "dayto2pe", 1, 0),
         ("predict", "dayto2pe", 2, .05),
         ("predict", "dayto2pe", 3, .025),
         ("predict", "dayto2pe", 1, 0),

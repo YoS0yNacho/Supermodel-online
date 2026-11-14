@@ -1749,6 +1749,7 @@ Util::Config::Node DefaultConfig()
   config.Set("SimulateNet", true, "Network");
   config.Set("AsyncNet", false, "Network");
   config.Set("NetPredictionSmoothing", unsigned(1), "Network");
+  config.Set("NetBootScenePatch", true, "Network");
   config.Set<std::string>("NetRelay", "", "Network", "", "");
   config.Set<std::string>("OnlineRelay", Online::DefaultRelayEndpoint, "Online", "", "");
   config.Set<std::string>("OnlineServers", Online::DefaultRelayServers, "Online", "", "");
@@ -2088,6 +2089,7 @@ static void Help(void)
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
   puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
+  puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
          "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
   printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
@@ -2218,6 +2220,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-white-flash",         { "NoWhiteFlash",     false } },
     { "-net",                 { "Network",          true } },
     { "-no-net",              { "Network",          false } },
+    { "-no-boot-scene-patch", { "NetBootScenePatch", false } },
     { "-simulate-netboard",   { "SimulateNet",      true } },
     { "-async-netboard",      { "AsyncNet",         true } },
     { "-sync-netboard",       { "AsyncNet",         false } },

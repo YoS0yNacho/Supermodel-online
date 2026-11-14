@@ -5,6 +5,7 @@
 #include "Network/Games/Daytona2/Daytona2StartSync.h"
 #include "Network/Games/Daytona2/Daytona2Prediction.h"
 #include "Network/Games/CorrectionSmoothing.h"
+#include "Network/Games/Daytona2/BootScene.h"
 // ROM-free tests of the real HLE board and TCP transport. GPL-3.0-or-later.
 #include "Supermodel.h"
 #include "Util/NewConfig.h"
@@ -116,6 +117,34 @@ int main(int argc, char** argv)
   const std::string scenario = argv[1], game = argv[2];
   const unsigned n = std::stoul(argv[3]);
   assert(unsigned(argc) == 4 + 2 * n);
+  if (scenario == "boot-scene")
+  {
+    // Session-only PE boot patch, no ROM: a RAM image with the loader's words at the
+    // documented addresses must be patched by exactly one word, anything else refused.
+    namespace BS = Daytona2BootScene;
+    using BS::Apply;
+    std::vector<uint8_t> ram(0x800000, 0);
+    auto put = [&](uint32_t addr, uint32_t word) { std::memcpy(&ram[addr], &word, 4); };
+    auto get = [&](uint32_t addr) { uint32_t w; std::memcpy(&w, &ram[addr], 4); return w; };
+    assert(Apply("dayto2pe", false, ram.data(), ram.size()) == BS::Result::Disabled);
+    assert(Apply("daytona2", true, ram.data(), ram.size()) == BS::Result::WrongGame);
+    assert(Apply("dayto2pe", true, ram.data(), 0x1000) == BS::Result::NotReady);
+    assert(Apply("dayto2pe", true, ram.data(), ram.size()) == BS::Result::NotReady);  // not copied yet
+    put(BS::Address - 4, BS::Before); put(BS::Address, BS::Original); put(BS::Address + 4, BS::After);
+    put(BS::HookEntry, BS::HookEntryWord); put(BS::HookCall, BS::HookCallWord);
+    assert(Apply("dayto2pe", true, ram.data(), ram.size()) == BS::Result::UnexpectedInstruction);  // caller context missing
+    put(BS::DestBuild, BS::DestBuildWord);
+    std::vector<uint8_t> expected = ram;
+    assert(Apply("dayto2pe", true, ram.data(), ram.size()) == BS::Result::Applied);
+    assert(get(BS::Address) == BS::Patched && get(BS::Address) == 0x3be07f00u);  // li r31, 0x7f00
+    std::memcpy(&expected[BS::Address], &BS::Patched, 4);
+    assert(ram == expected);  // nothing but that word
+    assert(Apply("dayto2pe", true, ram.data(), ram.size()) == BS::Result::AlreadyApplied);
+    put(BS::Address, 0x60000000u);
+    assert(Apply("dayto2pe", true, ram.data(), ram.size()) == BS::Result::UnexpectedInstruction);
+    std::cout << "PASS boot-scene: dayto2pe boot viewport is moved by one verified word\n";
+    return 0;
+  }
   if (scenario == "predict-rubberband")
   {
     // Receive-side predictor alone, no transport: a car that brakes,

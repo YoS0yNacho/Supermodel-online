@@ -217,6 +217,7 @@
 #include "Network/Games/Scud/RaceOptions.h"
 #include "Network/Games/Scud/Collision.h"
 #include "Network/Games/Daytona2/Hornet.h"
+#include "Network/Games/Daytona2/BootScene.h"
 #include "Network/Games/Daytona2/RaceOptions.h"
 #include "Network/Games/Daytona2/Collision.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
@@ -2120,6 +2121,18 @@ static unsigned GetCPUClockFrequencyInHz(const Game &game, Util::Config::Node &c
 
 void CModel3::RunMainBoardFrame(void)
 {
+  // Session-only: the link check otherwise draws a hidden 13 000-node course at a few FPS.
+  if (m_game.name == "dayto2pe" && m_runNetBoard && m_config["NetBootScenePatch"].ValueAsDefault<bool>(true))
+  {
+    const auto result = Daytona2BootScene::Apply(m_game.name.c_str(), true, ram, 0x800000);
+    if (result == Daytona2BootScene::Result::Applied)
+      InfoLog("Daytona USA 2 Power Edition: hidden boot scene disabled for the network check");
+    else if (result == Daytona2BootScene::Result::UnexpectedInstruction && !m_bootSceneWarned)
+    {
+      m_bootSceneWarned = true;
+      InfoLog("Daytona USA 2 Power Edition: boot program not recognized, boot scene left alone");
+    }
+  }
   if (m_game.name == "daytona2" && m_config["NetRoomHornet"].ValueAsDefault<bool>(false) &&
       !m_config["NetRelayTicket"].ValueAsDefault<std::string>("").empty())
   {

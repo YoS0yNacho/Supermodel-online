@@ -333,6 +333,7 @@ private:
   std::shared_ptr<CNetServer> m_server;
   INetBoard   *NetBoard;      // Net board
   bool		    m_runNetBoard;
+  bool          m_bootSceneWarned = false;  // dayto2pe boot-scene patch refused (logged once)
 };
 
 

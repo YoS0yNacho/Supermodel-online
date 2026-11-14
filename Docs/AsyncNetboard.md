@@ -203,6 +203,37 @@ true path. Representative numbers (roughness rms / mean error, world units):
 `RUBBERBAND_REPORT_ONLY=1` prints the table without asserting on it, for
 tuning.
 
+## Daytona USA 2 Power Edition boot time
+
+With a net board attached, `dayto2pe` spends its NETWORK CHECKING screen (one
+link exchange per emulated frame, a few hundred exchanges) drawing a course it
+never shows: the boot program DMA-copies a canned Real3D database from CROM bank
+5 (about 13 000 culling nodes, 5 000 models, 1 MB of polygons) and a viewport
+that points at it to culling RAM `0x8E000000`, then idles while the opaque 2D
+text layer hides the result. On a software renderer that is 2-3 FPS, so the
+check takes minutes; `daytona2` submits an empty viewport in the same phase.
+
+The fix is a session-only RAM code patch in the style of the Hornet and secret
+cars options (`Src/Network/Games/Daytona2/BootScene.h`), applied by
+`CModel3::RunMainBoardFrame` for `dayto2pe` whenever a net board is attached.
+It changes one word of the database loader (RAM `0x13B34`, `lwz r31,0x1c(r1)`
+-> `li r31,0x7f00`) so that the boot viewport is copied to the unused hole
+`0x8E007F00` instead of `0x8E000000`; culling RAM at the real viewport slot
+keeps its reset zeros, so the check renders an empty frame at full speed. The
+patch verifies the words before and after the target plus the hook entry, its
+caller and the `oris r3,r31,0x8e00` that builds the destination, and refuses
+anything else; nothing is written to the ROM set, NVRAM, or the config file.
+The loader's bookkeeping (pointer-list offsets at `0x737918/0x737928`) and
+every other boot DMA are unchanged, and the game writes its own viewport from
+RAM `0x660010` once the link check passes.
+
+Measured on the 2-cabinet relay rig (llvmpipe): the viewport DMA lands at
+`8E007F00`, the check runs at ~57 FPS, ~280 ring round trips in the first
+20 s of the link (was ~25), link check about 15 s (was over 150 s), and the
+attract mode screenshots match an unpatched run. `-no-boot-scene-patch`
+(`NetBootScenePatch = 0` in the ini) keeps the original behaviour; the ROM-free
+`boot-scene` scenario in `Tests/run_async_netboard.py` covers the patch logic.
+
 ## Important limitations
 
 **Full local frame speed is not the same as correct linked gameplay.** The game
