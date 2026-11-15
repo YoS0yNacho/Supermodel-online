@@ -3,6 +3,7 @@
 #ifndef INCLUDED_ONLINE_PLAYER_ROOM_H
 #define INCLUDED_ONLINE_PLAYER_ROOM_H
 #include "Network/RelayUpnp.h"
+#include "LobbyClient.h"
 #include "RoomSettings.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
 #include <array>
@@ -11,6 +12,8 @@
 #include <map>
 #include <random>
 namespace Online {
+// Lobby HELLO limits shared by the central relay (relay.py) and the creator-hosted room.
+inline constexpr uint32_t HelloCapabilityMask=511; // 1 AsyncNet, 2 options, 4 native, 8 adaptive tick, 16 Hornet, 32 race, 64 star, 128 ping, 256 Video60
 class PlayerRoom {
 public:
  using Bytes=std::vector<uint8_t>;using Token=std::array<uint8_t,16>;
@@ -42,7 +45,11 @@ public:
   auto it=clients.find(id);
   if(it==clients.end()){
    Client c;c.id=id;
-   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~127u)==0&&(Read(b+8)&1)&&!(Read(b+8)&~255u)/*AsyncNet + capability bits 2,4,16,32,64,128*/&&state==0&&!closed){
+   // Same HELLO as relay.py accepts: every lobby game bit (GameMaskAll) and the
+   // AsyncNet flag plus capability bits 2..256 (options, native, adaptive tick,
+   // Hornet, race, star, ping, Video60). Newer-than-known bits are rejected so
+   // the owner never hosts a client it cannot serve.
+   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~GameMaskAll)==0&&(Read(b+8)&1)&&!(Read(b+8)&~HelloCapabilityMask)&&state==0&&!closed){
     bool owner=std::memcmp(b+44,settings.owner.data(),16)==0;
     if(!(Read(b+4)&(1u<<settings.game))||(!owner&&(!order.size()||!Zero(b+44)))||(owner&&ownerId)||order.size()>=Capacity())return false;
     if(owner&&ntohl(ip)!=0x7f000001)return false;

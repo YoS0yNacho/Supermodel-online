@@ -122,6 +122,49 @@ int main(int argc,char**argv) {
     chat0.Disconnect();chat1.Disconnect();
     std::cout<<"PASS C++ GUI client + lobby/in-game chat -> ticket -> production two-channel link: "<<Online::Games[game]<<std::endl;
   }
+  {
+    // Self-hosted room (Hosting = "Self-host room + TCP/UDP"): after the relay's
+    // reachability test the creator is handed off to its own PlayerHost
+    // (127.0.0.1), joiners are redirected to the creator and the central relay
+    // only lists the room. The hosted room must accept the current GUI HELLO:
+    // all eight ROM mask bits and capability bits up to 256 (60 Hz video).
+    const unsigned game=7;
+    const uint16_t hostPort=uint16_t(20000+(port*7)%30000);
+    Online::LobbyClient master,slave;
+    master.Connect(endpoint,"Self Host",Online::GameMaskAll,true);slave.Connect(endpoint,"Self Guest",Online::GameMaskAll,true);
+    Wait([&]{return master.Get().connected&&slave.Get().connected;});
+    master.Create(game,"self-host regression",true,hostPort,20);
+    // Handoff completes only after the host answered the TCP+UDP probe: the creator must
+    // end up connected to its own room, not "Disconnected" with an error.
+    Wait([&]{const auto v=master.Get();if(!v.error.empty())std::cerr<<"creator error: "<<v.error<<" status: "<<v.status<<std::endl;assert(v.error.empty());return v.connected&&v.hostedRoom&&v.room!=0;});
+    const auto hosted=master.Get();assert(hosted.playerHost&&hosted.endpoint=="127.0.0.1:"+std::to_string(hostPort)&&hosted.directoryEndpoint==endpoint);
+    assert(hosted.rooms.size()==1&&hosted.rooms[0].id==hosted.room&&hosted.rooms[0].game==game&&hosted.rooms[0].udpMode==3&&hosted.rooms[0].udpPort==hostPort&&hosted.rooms[0].members.size()==1);
+    Wait([&]{for(const auto& r:slave.Get().rooms)if(r.id==hosted.room&&r.udpMode==3&&!r.hostChecking)return true;return false;});
+    slave.Join(hosted.room);
+    Wait([&]{const auto v=slave.Get();assert(v.error.empty());return v.connected&&v.hostedRoom&&v.room==hosted.room;});
+    Wait([&]{return master.Get().rooms.size()==1&&master.Get().rooms[0].members.size()==2&&slave.Get().rooms.size()==1&&slave.Get().rooms[0].members.size()==2;});
+    assert(master.Get().rooms[0].members[0].name=="Self Host"&&master.Get().rooms[0].members[1].name=="Self Guest");
+    master.SendChat("Hosted lobby chat");
+    Wait([&]{return !slave.Get().roomChat.empty()&&slave.Get().roomChat.back().text=="Hosted lobby chat"&&slave.Get().roomChat.back().car==1;});
+    slave.Start(hosted.room);Wait([&]{return !slave.Get().error.empty();});assert(!slave.Get().launch);
+    master.Start(hosted.room);
+    Wait([&]{return master.Get().launch&&slave.Get().launch;});
+    const auto a=master.Get(),b=slave.Get();
+    assert(a.game==game&&b.game==game&&a.index==0&&b.index==1&&a.count==2&&b.count==2&&a.ticket!=b.ticket);
+    assert(a.gameEndpoint=="127.0.0.1:"+std::to_string(hostPort)&&b.gameEndpoint==a.gameEndpoint);
+    const auto host=a.playerHost; // Main.cpp keeps the creator's host alive for the session
+    master.Disconnect();slave.Disconnect();
+    auto s0=std::make_shared<CNetServer>(0,"Self-host master",false),s1=std::make_shared<CNetServer>(0,"Self-host slave",false);
+    assert(s0->Start()&&s1->Start());
+    CNetBoardLink l0(s0,"127.0.0.1",hostPort,true,guids[game],a.ticket),l1(s1,"127.0.0.1",hostPort,true,guids[game],b.ticket);
+    assert(l0.Connect()&&l1.Connect());
+    Wait([&]{return l0.RelayIndex()>=0&&l1.RelayIndex()>=0;});
+    assert(l0.RelayIndex()==0&&l1.RelayIndex()==1&&l0.RelayCount()==2&&l1.RelayCount()==2);
+    std::vector<uint8_t> payload(sizes[game],0x5A),received;
+    l0.Send(payload.data(),payload.size());Wait([&]{return l1.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);
+    l1.Send(payload.data(),payload.size());Wait([&]{return l0.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);
+    std::cout<<"PASS self-hosted room: probe -> creator/joiner handoff -> hosted lobby/chat -> Start Link -> creator-hosted two-channel link: "<<Online::Games[game]<<std::endl;
+  }
   for (unsigned game = 0; game < 2; ++game) {
     constexpr unsigned count = 16;
     std::vector<std::unique_ptr<Online::LobbyClient>> players;

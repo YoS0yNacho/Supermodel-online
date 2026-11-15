@@ -7,7 +7,7 @@
 #include <iostream>
 int main() {
   for (unsigned game=0;game<Online::GameCount;++game) {
-    const unsigned expected=game<2?16:game==4?4:game==5?6:8;
+    const unsigned expected=game<2?16:game==4?4:game==5?6:game==7?4:8; // dirtdvls: MACHINE ID 1..4
     assert(Online::MaxPlayers(game)==expected);
     assert(GameNetwork::MaxCabinets(Online::Games[game])==expected);
   }

@@ -292,7 +292,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
       }
       if(FD_ISSET(fd,&read)) {
         uint8_t bytes[2048]; int n=recv(fd,reinterpret_cast<char*>(bytes),sizeof(bytes),0);
-        if(n==0) throw std::runtime_error("Relay disconnected; update relay if it does not support Online lobbies");
+        if(n==0) throw std::runtime_error(route.native?"Creator room closed the connection; the room host runs an incompatible build or left":"Relay disconnected; update relay if it does not support Online lobbies");
         if(n<0) { if(!WouldBlock()) throw std::runtime_error("Relay receive failed"); }
         else { input.insert(input.end(),bytes,bytes+n);received=Clock::now(); }
       }

@@ -471,7 +471,10 @@ python3 Tests/run_online_session_policy.py
 ```
 
 The runners exercise the HLE board, online C++ client, lobby protocol and session
-policy without game ROMs. They are not a substitute for an actual-ROM or Windows
+policy without game ROMs. `run_online_client.py` also drives a complete
+self-hosted room through the real relay lobby: reachability probe, creator and
+joiner handoff to the creator's `PlayerHost`, hosted lobby chat, Start Link and
+the creator-hosted two-channel game link. They are not a substitute for an actual-ROM or Windows
 GUI smoke test.
 
 
