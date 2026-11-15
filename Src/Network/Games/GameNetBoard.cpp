@@ -68,6 +68,7 @@ bool CSimNetBoard::ConfigureGameNet()
  if(m_gameNet.m_syncStart && Scud::IsSupportedGame(m_gameInfo.name)) ConfigureScudPrediction();
  else if(m_gameNet.m_syncStart && Srally2::IsSupportedGame(m_gameInfo.name)) ConfigureSrally2Prediction();
  else if(m_gameNet.m_syncStart && Lemans24::IsSupportedGame(m_gameInfo.name)) ConfigureLemans24Prediction();
+ else if(m_gameNet.m_syncStart && Dirtdvls::IsSupportedGame(m_gameInfo.name)) ConfigureDirtdvlsPrediction();
  m_gameNet.m_appliedTickRate = m_tickRateHz;
  return true;
 }
@@ -78,6 +79,7 @@ void CSimNetBoard::ApplyGamePrediction() {
  else if(m_gameNet.m_syncStart && Scud::IsSupportedGame(m_gameInfo.name)) ApplyScudPrediction();
  else if(m_gameNet.m_syncStart && Srally2::IsSupportedGame(m_gameInfo.name)) ApplySrally2Prediction();
  else if(m_gameNet.m_syncStart && Lemans24::IsSupportedGame(m_gameInfo.name)) ApplyLemans24Prediction();
+ else if(m_gameNet.m_syncStart && Dirtdvls::IsSupportedGame(m_gameInfo.name)) ApplyDirtdvlsPrediction();
 }
 void CSimNetBoard::RecordGameSnapshot() {
  m_gameNet.m_asyncSnapshotAge=unsigned(std::min<uint64_t>(m_gameNet.m_predictionFrame-m_gameNet.m_asyncRoundStartFrame,18));
@@ -201,6 +203,7 @@ bool CSimNetBoard::HoldForRaceStart(bool atGate, bool nativeEntry)
 		for (auto& predictor : m_gameNet.daytona.m_daytoPredictors) predictor.Reset();
 		for (auto& predictor : m_gameNet.daytona.m_cpuPredictors) predictor.Reset();
 		for (auto& predictor : m_gameNet.lemans24.predictors) predictor.Reset();
+		for (auto& predictor : m_gameNet.dirtdvls.predictors) predictor.Reset();
 		for (auto& predictor : m_gameNet.scud.predictors) predictor.Reset();
 		for (auto& predictor : m_gameNet.srally2.predictors) predictor.Reset();
 		InfoLog("%s start RELEASE cabinet=%u epoch=%u clock_us=%llu deadline_us=%llu late_ms=%.3f held_ms=%.3f", m_gameInfo.name.c_str(),

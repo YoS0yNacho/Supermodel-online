@@ -1,11 +1,14 @@
 #include "ScudPacket.h"
 #include "Srally2Packet.h"
 #include "Lemans24Packet.h"
+#include "DirtdvlsPacket.h"
 #include "Network/Games/Policy.h"
+#include "Network/Games/NativeSessionSettings.h"
 #include "Network/Games/Daytona2/Daytona2StartSync.h"
 #include "Network/Games/Daytona2/Daytona2Prediction.h"
 #include "Network/Games/CorrectionSmoothing.h"
 #include "Network/Games/Daytona2/BootScene.h"
+#include "Network/Games/Daytona2/MixReverse.h"
 #include "Network/Online/AdaptiveTickRate.h"
 // ROM-free tests of the real HLE board and TCP transport. GPL-3.0-or-later.
 #include "Supermodel.h"
@@ -189,6 +192,37 @@ int main(int argc, char** argv)
     std::cout << "PASS boot-scene: dayto2pe boot viewport is moved by one verified word\n";
     return 0;
   }
+  if (scenario == "mix-reverse")
+  {
+    // Always-on PE patch, no ROM: the car-select leaf that refuses Reverse on course 0 (MIX)
+    // loses exactly one branch; other revisions, other games and half-copied images are refused.
+    namespace MR = Daytona2MixReverse;
+    using MR::Apply;
+    std::vector<uint8_t> ram(0x800000, 0);
+    auto put = [&](uint32_t addr, uint32_t word) { std::memcpy(&ram[addr], &word, 4); };
+    auto get = [&](uint32_t addr) { uint32_t w; std::memcpy(&w, &ram[addr], 4); return w; };
+    assert(Apply("daytona2", ram.data(), ram.size()) == MR::Result::WrongGame);
+    assert(Apply(nullptr, ram.data(), ram.size()) == MR::Result::WrongGame);
+    assert(Apply("dayto2pe", ram.data(), 0x1000) == MR::Result::NotReady);
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::NotReady);  // program not copied yet
+    constexpr size_t ctx = sizeof(MR::Context) / 4, aft = sizeof(MR::After) / 4;
+    for (size_t i = 0; i < ctx; ++i) put(MR::Address - uint32_t(ctx * 4) + uint32_t(i * 4), MR::Context[i]);
+    put(MR::Address, MR::Original);
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::UnexpectedInstruction);  // brake/flag tail missing
+    for (size_t i = 0; i < aft; ++i) put(MR::Address + 4 + uint32_t(i * 4), MR::After[i]);
+    std::vector<uint8_t> expected = ram;
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::Applied);
+    assert(get(MR::Address) == MR::Patched && MR::Patched == 0x60000000u);  // beq -> nop
+    std::memcpy(&expected[MR::Address], &MR::Patched, 4);
+    assert(ram == expected);  // nothing but that word
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::AlreadyApplied);
+    put(MR::Address, 0x41820024u);  // a different branch: another revision
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::UnexpectedInstruction);
+    put(MR::Address, MR::Original); put(MR::Address + 4, 0x3c600010u);  // wrong brake load
+    assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::UnexpectedInstruction);
+    std::cout << "PASS mix-reverse: dayto2pe MIX course accepts Reverse after one verified word\n";
+    return 0;
+  }
   if (scenario == "predict-rubberband")
   {
     // Receive-side predictor alone, no transport: a car that brakes,
@@ -277,11 +311,11 @@ int main(int argc, char** argv)
     std::cout << "PASS predict-rubberband: error-proportional blend cuts correction noise at 100-300 ms\n";
     return 0;
   }
-  const bool relayCase = scenario == "start-relay" || scenario == "predict-relay-cpu" || scenario == "scud-relay-predict" || scenario == "srally2-relay-predict" || scenario == "lemans24-relay-predict" || scenario == "stream-relay-smoothness";
+  const bool relayCase = scenario == "start-relay" || scenario == "predict-relay-cpu" || scenario == "scud-relay-predict" || scenario == "srally2-relay-predict" || scenario == "lemans24-relay-predict" || scenario == "dirtdvls-relay-predict" || scenario == "stream-relay-smoothness";
   const bool cpuCase = scenario == "predict-cpu" || scenario == "predict-relay-cpu";
   const bool startCase = scenario.rfind("start", 0) == 0;
   const bool poseCase = scenario.rfind("predict", 0) == 0;
-  const unsigned segment = Scud::IsSupportedGame(game) ? 1024 : Srally2::IsSupportedGame(game) ? 2048 : Lemans24::IsSupportedGame(game) ? 0x0CC0 : startCase ? 848 : poseCase ? (scenario == "predict-size" ? 844 : 848) :
+  const unsigned segment = Scud::IsSupportedGame(game) ? 1024 : Srally2::IsSupportedGame(game) ? 2048 : Lemans24::IsSupportedGame(game) ? 0x0CC0 : Dirtdvls::IsSupportedGame(game) ? 0x0E00 : startCase ? 848 : poseCase ? (scenario == "predict-size" ? 844 : 848) :
     scenario == "zero" ? 0 : scenario == "oversize" ? 0xffff : Dayto2pe::IsSupportedGame(game) ? 848 : 64;
   std::vector<std::unique_ptr<Cabinet>> c;
   // Make every server/link before starting to advance the handshake.
@@ -534,6 +568,12 @@ int main(int argc, char** argv)
           for (unsigned bank : {0u, 0x10000u})
             memcpy(c[i]->buffer.data() + bank + 0x100, pkt.data(), segment);
         }
+        else if (Dirtdvls::IsSupportedGame(game))
+        {
+          auto pkt = MakeDirtdvlsRacePacket(i, n, frame, x, 5.0f, 10.0f, 0, 1024, 0);
+          for (unsigned bank : {0u, 0x10000u})
+            memcpy(c[i]->buffer.data() + bank + 0x100, pkt.data(), segment);
+        }
         else
         {
           std::vector<uint8_t> pkt(segment, uint8_t(0x20 + i));
@@ -567,6 +607,11 @@ int main(int argc, char** argv)
       {
         seenTick = Lemans24::Read8(raw, 0x850) & 0x7Fu;
         curX = Lemans24::ReadFloat(visible.data(), Lemans24::HumanPoseOffset + 0x08);
+      }
+      else if (Dirtdvls::IsSupportedGame(game))
+      {
+        seenTick = Dirtdvls::Read32(raw, Dirtdvls::SequenceOffset) & 0x7Fu;
+        curX = Dirtdvls::ReadFloat(visible.data(), Dirtdvls::HumanPoseOffset);
       }
       else
       {
@@ -786,6 +831,124 @@ int main(int argc, char** argv)
     assert(c[0]->board->m_gameNet.lemans24.predictors.empty());
     std::cout << "PASS " << scenario << ' ' << game << " cabinets=" << n
               << " all-to-all 3D human & " << numCpus << "-CPU poses predicted; Step 1.5 o^2 headers/wheels/self-echo untouched\n";
+    return 0;
+  }
+  if (scenario == "dirtdvls-predict" || scenario == "dirtdvls-relay-predict")
+  {
+    assert(Dirtdvls::IsSupportedGame(game) && n >= 2 && n <= Dirtdvls::MaxCabinets);
+    // Exact-ROM policy: EEPROM GAME ASSIGNMENTS, start gate and packet CRC.
+    {
+      auto e = MakeDirtdvlsFactoryEeprom();
+      assert(Dirtdvls::SettingsCRC(e) == 0x99b5);
+      auto saved = e; saved[6] = 2; saved[23] = 0x0101;
+      assert(Dirtdvls::SettingsCRC(saved) == 0x9b32); // MACHINE ID 2 saved by the real ROM
+      for (unsigned cab = 0; cab < Dirtdvls::MaxCabinets; ++cab) {
+        auto img = e;
+        assert(Dirtdvls::ConfigureRelayEeprom(img, cab, game));
+        assert((img[12] & 0xff) == (cab ? 1u : 0u) && (img[12] >> 8) == 2u);
+        assert((img[23] >> 8) == cab && (img[23] & 0xff) == 1u && img[13] == Dirtdvls::PacketSize);
+        assert(img[3] == Dirtdvls::SettingsCRC(img));
+        if (cab == 1) assert(img == saved || img[3] != e[3]);
+      }
+      auto bad = e; assert(!Dirtdvls::ConfigureRelayEeprom(bad, Dirtdvls::MaxCabinets, game));
+      bad = e; bad[3] ^= 1; assert(!Dirtdvls::ConfigureRelayEeprom(bad, 0, game));
+      bad = e; bad[13] = 0x0cc0; assert(!Dirtdvls::ConfigureRelayEeprom(bad, 0, game));
+      bad = e; assert(!Dirtdvls::ConfigureRelayEeprom(bad, 0, "lemans24"));
+      // Room settings for games without native options: the emulator-side
+      // Video60 bit must not block the MASTER/SLAVE assignment (every cabinet
+      // would otherwise boot as factory SLAVE); native options/car numbers do.
+      for (const char* name : {"dirtdvls", "lemans24"}) {
+        auto img = e;
+        assert(NativeSessionSettings::Apply(img, name, 0, 0));
+        assert(NativeSessionSettings::Apply(img, name, NativeRoomSettings::Video60, 0));
+        assert(img == e);
+        assert(!NativeSessionSettings::Apply(img, name, NativeRoomSettings::Video60 | NativeRoomSettings::Enabled, 0));
+        assert(!NativeSessionSettings::Apply(img, name, NativeRoomSettings::RealPlayers, 0));
+        assert(!NativeSessionSettings::Apply(img, name, 0, 1));
+      }
+      assert(Dirtdvls::AtStartGate(0x01040002u, 0) && !Dirtdvls::LeftStartGate(0x01040002u, 0));
+      assert(!Dirtdvls::AtStartGate(0x01040002u, 4) && Dirtdvls::LeftStartGate(0x01040002u, 4));
+      assert(!Dirtdvls::AtStartGate(0x01010002u, 0) && !Dirtdvls::AtStartGate(0x01040001u, 0));
+      assert(!Dirtdvls::AtStartGate(0x00040002u, 0) && !Dirtdvls::AtStartGate(0x01050002u, 0));
+      assert(Dirtdvls::InRaceScene(0x01000002u) && !Dirtdvls::InRaceScene(0x00010100u));
+      auto pkt = MakeDirtdvlsRacePacket(0, n, 7, 1.0f, 2.0f, 3.0f, 4, 5, 6);
+      assert(Dirtdvls::PacketCRCValid(pkt.data()));
+      Dirtdvls::WriteFloat(pkt.data(), Dirtdvls::HumanPoseOffset, 9.0f);
+      assert(!Dirtdvls::PacketCRCValid(pkt.data()));
+      Dirtdvls::HeaderSample hdr{};
+      assert(!Dirtdvls::DecodeHeader(pkt.data(), pkt.size(), 0, 1, n, hdr));
+      Dirtdvls::SealPacket(pkt.data());
+      assert(Dirtdvls::DecodeHeader(pkt.data(), pkt.size(), 0, 1, n, hdr) && hdr.seq7 == 7 && hdr.numCpuCars == Dirtdvls::MaxCpuCars);
+      assert(!Dirtdvls::DecodeHeader(pkt.data(), pkt.size(), 1, 0, n, hdr));
+      assert(!Dirtdvls::DecodeHeader(pkt.data(), pkt.size() - 1, 0, 1, n, hdr));
+    }
+    const unsigned numCpus = n < 8 ? std::min(8u - n, Dirtdvls::MaxCpuCars) : 0;
+    std::vector<std::vector<bool>> humanByCabSlot(n, std::vector<bool>(n - 1, false));
+    std::vector<std::vector<bool>> cpuByCabSlot(n, std::vector<bool>(n - 1, false));
+    std::vector<std::vector<bool>> crcByCabSlot(n, std::vector<bool>(n - 1, false));
+    const auto make = [&](unsigned i, unsigned frame) {
+      return MakeDirtdvlsRacePacket(i, n, frame,
+          float(i * 120.0 + 4.5 * double(frame)), float(10.0 + 0.15 * double(frame)),
+          float(i * 30.0 + 1.5 * double(frame)), 48, int16_t(2000 + int(frame * 36)), -24,
+          uint32_t(0x0BD6 - frame));
+    };
+    for (unsigned frame = 1; frame <= 500; ++frame) {
+      for (unsigned i = 0; i < n; ++i) {
+        auto p = make(i, frame);
+        for (unsigned bank : {0u, 0x10000u})
+          memcpy(c[i]->buffer.data() + bank + 0x100, p.data(), p.size());
+      }
+      tick();
+      for (unsigned i = 0; i < n; ++i) {
+        auto& b = *c[i]->board;
+        assert(b.m_state == State::ready);
+        const auto local = make(i, frame);
+        for (unsigned byte = 0; byte < segment; ++byte)
+          assert(b.ReadCommRAM8(0x100 + n * segment + byte) == local[byte]);
+        for (unsigned slot = 0; slot + 1 < n; ++slot) {
+          const auto* raw = b.m_asyncLatest.data() + slot * segment;
+          if (!Dirtdvls::Racing(Dirtdvls::Read32(raw, 0x00))) continue;
+          const unsigned remoteCab = (i + n - 1 - slot) % n;
+          assert(Dirtdvls::Read8(raw, Dirtdvls::MachineOffset) == remoteCab);
+          std::vector<uint8_t> visible(segment);
+          for (unsigned byte = 0; byte < segment; ++byte)
+            visible[byte] = b.ReadCommRAM8(0x100 + (slot + 1) * segment + byte);
+          for (unsigned byte = 0; byte < segment; ++byte) {
+            const unsigned off = byte ^ 2;
+            const auto inPose = [](unsigned base, unsigned o) { return o >= base && o < base + 0x18; };
+            const bool h = inPose(unsigned(Dirtdvls::HumanPoseOffset), off) ||
+                           (off >= Dirtdvls::HumanShadowOffset && off < Dirtdvls::HumanShadowOffset + 12);
+            bool cpuEdit = false;
+            for (unsigned ci = 0; ci < numCpus; ++ci)
+              if (remoteCab == 0 && inPose(unsigned(Dirtdvls::CpuRecordBase + ci * Dirtdvls::CpuRecordStride + Dirtdvls::CpuPoseOffset), off))
+                cpuEdit = true;
+            const bool crc = off >= Dirtdvls::CrcOffset && off < Dirtdvls::CrcOffset + 2;
+            if (!h && !cpuEdit && !crc) assert(visible[byte] == raw[byte]);
+            else if (visible[byte] != raw[byte]) {
+              if (h) humanByCabSlot[i][slot] = true;
+              if (cpuEdit) cpuByCabSlot[i][slot] = true;
+              if (crc) crcByCabSlot[i][slot] = true;
+            }
+          }
+          // Every presented receive copy must still pass the native receiver CRC.
+          assert(Dirtdvls::PacketCRCValid(visible.data()));
+          assert(Dirtdvls::Read32(visible.data(), Dirtdvls::RaceTimerOffset) == Dirtdvls::Read32(raw, Dirtdvls::RaceTimerOffset));
+        }
+      }
+    }
+    for (unsigned i = 0; i < n; ++i) {
+      for (unsigned slot = 0; slot + 1 < n; ++slot) {
+        const unsigned remoteCab = (i + n - 1 - slot) % n;
+        assert(humanByCabSlot[i][slot]);
+        assert(crcByCabSlot[i][slot]);
+        assert(cpuByCabSlot[i][slot] == (remoteCab == 0 && numCpus > 0));
+      }
+    }
+    assert(errors == 0);
+    c[0]->board->Reset();
+    assert(c[0]->board->m_gameNet.dirtdvls.predictors.empty());
+    std::cout << "PASS " << scenario << ' ' << game << " cabinets=" << n
+              << " all-to-all 3D human & MASTER " << numCpus << "-AI poses predicted and re-sealed (CRC-16); headers/timer/self-echo untouched\n";
     return 0;
   }
   if (startCase)

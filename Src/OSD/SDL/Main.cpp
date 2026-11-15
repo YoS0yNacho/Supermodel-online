@@ -119,6 +119,7 @@
 #include "OSD/ConfigFile.h"
 #include "Gui.h"
 #include "Network/Online/SessionPolicy.h"
+#include "Network/Online/LobbyClient.h"
 #include "Network/Online/LobbyReturn.h"
 #include "InGameChat.h"
 
@@ -1750,6 +1751,7 @@ Util::Config::Node DefaultConfig()
   config.Set("AsyncNet", false, "Network");
   config.Set("NetPredictionSmoothing", unsigned(1), "Network");
   config.Set("NetBootScenePatch", true, "Network");
+  config.Set("ScudPlusHiddenCarTextures", true, "Network");
   config.Set<std::string>("NetRelay", "", "Network", "", "");
   config.Set<std::string>("OnlineRelay", Online::DefaultRelayEndpoint, "Online", "", "");
   config.Set<std::string>("OnlineServers", Online::DefaultRelayServers, "Online", "", "");
@@ -2091,6 +2093,7 @@ static void Help(void)
   puts("  -lobby-options=<n>      Room options mask of that room (test rigs; 1024 = 60 Hz video)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
   puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
+  puts("  -no-hidden-car-textures Do not load Scud Race Plus secret-vehicle textures for other courses");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
          "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
   printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
@@ -2223,6 +2226,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-net",                 { "Network",          true } },
     { "-no-net",              { "Network",          false } },
     { "-no-boot-scene-patch", { "NetBootScenePatch", false } },
+    { "-no-hidden-car-textures", { "ScudPlusHiddenCarTextures", false } },
     { "-simulate-netboard",   { "SimulateNet",      true } },
     { "-async-netboard",      { "AsyncNet",         true } },
     { "-sync-netboard",       { "AsyncNet",         false } },
@@ -2517,6 +2521,21 @@ static int RunSession(int argc, char **argv)
       cmd_line.config.Set("SimulateNet", true);
       if (launcherConfig["NetGameRelay"].ValueAsDefault<std::string>("").empty())
         cmd_line.config.Set("NetGameRelay", guiOptions.relay);
+      // -lobby-options=<mask>: derive the same per-option switches the Online tab sets at launch.
+      {
+        const unsigned mask = launcherConfig["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+        std::string stem = requestedRom.substr(requestedRom.find_last_of("/\\") == std::string::npos ? 0 : requestedRom.find_last_of("/\\") + 1);
+        stem = stem.substr(0, stem.find('.'));
+        const auto game = std::find_if(Online::Games, Online::Games + Online::GameCount, [&](const char* name) { return stem == name; });
+        const unsigned index = unsigned(game - Online::Games);
+        if (mask && index < Online::GameCount)
+        {
+          cmd_line.config.Set("NetRoomSecretCars", index == 3 && (mask & NativeRoomSettings::SecretCars) != 0);
+          cmd_line.config.Set("NetRoomHornet", NativeRoomSettings::HasHornet(index, mask));
+          cmd_line.config.Set("NetRoomRealPlayers", NativeRoomSettings::HasRealPlayers(index, mask));
+          cmd_line.config.Set("NetRoomNoCollisions", NativeRoomSettings::HasNoCollisions(index, mask));
+        }
+      }
     }
     else
       loadGUI = true;

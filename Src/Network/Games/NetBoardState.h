@@ -3,6 +3,7 @@
 #define INCLUDED_GAME_NETBOARD_STATE_H
 #include "Daytona2/NetBoardState.h"
 #include "Lemans24/Prediction.h"
+#include "Dirtdvls/Prediction.h"
 #include "Scud/Prediction.h"
 #include "Srally2/Prediction.h"
 #include "RaceStart.h"
@@ -12,6 +13,7 @@ namespace GameNetwork {
 struct NetBoardState {
  Dayto2pe::NetBoardState daytona;
  Lemans24::State lemans24;
+ Dirtdvls::State dirtdvls;
  Scud::State scud;
  Srally2::State srally2;
  uint64_t guid=0, m_predictionFrame=0,m_asyncRoundStartFrame=0;
@@ -54,8 +56,8 @@ struct NetBoardState {
  void OnFrame() { ++m_predictionFrame; }
  void OnExchangeStarted() { m_asyncRoundStartFrame=m_predictionFrame; }
  void OnFailure() { if(m_syncStart && m_startWaiting) m_startFailed=true; }
- void SetTickRate(unsigned hz) { m_appliedTickRate=hz; daytona.SetTickRate(hz); lemans24.SetTickRate(hz); scud.SetTickRate(hz); srally2.SetTickRate(hz); }
- void ResetPresentation() { daytona.ResetPresentation();lemans24.Reset();scud.Reset();srally2.Reset();m_predictionFrame=m_asyncRoundStartFrame=0;m_asyncSnapshotAge=0; }
+ void SetTickRate(unsigned hz) { m_appliedTickRate=hz; daytona.SetTickRate(hz); lemans24.SetTickRate(hz); dirtdvls.SetTickRate(hz); scud.SetTickRate(hz); srally2.SetTickRate(hz); }
+ void ResetPresentation() { daytona.ResetPresentation();lemans24.Reset();dirtdvls.Reset();scud.Reset();srally2.Reset();m_predictionFrame=m_asyncRoundStartFrame=0;m_asyncSnapshotAge=0; }
 };
 }
 #endif

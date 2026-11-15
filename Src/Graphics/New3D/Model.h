@@ -151,6 +151,7 @@ struct Mesh
 	int		width		= 0;
 	int		height		= 0;
 	int		page		= 0;
+	bool	overlay		= false;	// x/y address the texture overlay page (bank 2), not texture RAM
 	bool	inverted	= false;
 
 	TexWrapMode wrapModeU = TexWrapMode::repeat;

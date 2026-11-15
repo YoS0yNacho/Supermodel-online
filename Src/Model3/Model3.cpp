@@ -214,12 +214,15 @@
 
 #include "Model3.h"
 #include "Network/Games/Scud/SecretCars.h"
+#include "Network/Games/Scud/HiddenCarTextures.h"
+#include "Graphics/TextureOverlay.h"
 #include "Network/Games/Scud/RaceOptions.h"
 #include "Network/Games/Scud/Collision.h"
 #include "Network/Games/Daytona2/Hornet.h"
 #include "Network/Games/Daytona2/BootScene.h"
 #include "Network/Games/Daytona2/RaceOptions.h"
 #include "Network/Games/Daytona2/Collision.h"
+#include "Network/Games/Daytona2/MixReverse.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
 #include "Network/Games/Srally2/PpcEntryPackingResearch.h"
 
@@ -2145,7 +2148,36 @@ void CModel3::RunMainBoardFrame(void)
   {
     const auto result = ScudPlusSecretCars::Apply(m_game.name.c_str(), true, ram, 0x800000);
     if (result == ScudPlusSecretCars::Result::Applied)
+    {
       InfoLog("Scud Plus: enabled the room's Secret Cars option");
+      // The secret vehicles only have textures in the Super Beginner set. Give
+      // the renderer their texels from the ROM so they look right on every course.
+      if (m_config["ScudPlusHiddenCarTextures"].ValueAsDefault<bool>(true))
+      {
+        std::shared_ptr<const TextureOverlay> overlay;
+        std::string why;
+        const auto built = ScudPlusHiddenCars::Build(m_game.name.c_str(), crom, 0x800000 + 0x8000000, overlay, &why);
+        if (built == ScudPlusHiddenCars::Result::Built)
+        {
+          GPU.SetTextureOverlay(overlay);
+          InfoLog("Scud Plus: secret-vehicle textures loaded for all courses");
+        }
+        else
+          ErrorLog("Scud Plus: secret-vehicle textures unavailable (%s); they will look wrong outside Super Beginner.", why.c_str());
+      }
+    }
+  }
+  if (m_game.name == "dayto2pe")
+  {
+    // Always on: the MIX course takes Reverse (brake at car select) like the other three.
+    const auto result = Daytona2MixReverse::Apply(m_game.name.c_str(), ram, 0x800000);
+    if (result == Daytona2MixReverse::Result::Applied)
+      InfoLog("Daytona USA 2 Power Edition: Reverse mode enabled on the MIX course");
+    else if (result == Daytona2MixReverse::Result::UnexpectedInstruction && !m_mixReverseWarned)
+    {
+      m_mixReverseWarned = true;
+      InfoLog("Daytona USA 2 Power Edition: car-select program not recognized, MIX Reverse left alone");
+    }
   }
   if ((m_game.name == "daytona2" || m_game.name == "dayto2pe") &&
       m_config["NetRoomRealPlayers"].ValueAsDefault<bool>(false) &&

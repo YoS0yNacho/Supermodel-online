@@ -7,6 +7,7 @@
 #include "Scud/Prediction.h"
 #include "Srally2/Prediction.h"
 #include "Lemans24/Prediction.h"
+#include "Dirtdvls/Prediction.h"
 namespace GameNetwork {
 inline bool PresentationCompatible(const std::string& game,const uint8_t* a,const uint8_t* b,size_t n,unsigned remote,unsigned local,unsigned machines) {
  if(!a || !b) return false;
@@ -16,6 +17,20 @@ inline bool PresentationCompatible(const std::string& game,const uint8_t* a,cons
   if(x.raceSubstate!=y.raceSubstate || x.raceSub!=y.raceSub || x.raceMode!=y.raceMode || x.senderIndex!=y.senderIndex || x.commMode!=y.commMode || x.numCpuCars!=y.numCpuCars) return false;
   if(Lemans24::Read16(a,Lemans24::HumanPoseOffset)!=Lemans24::Read16(b,Lemans24::HumanPoseOffset)) return false;
   for(unsigned i=0;i<x.numCpuCars;++i) if(Lemans24::Read16(a,Lemans24::CpuPoseBase+i*Lemans24::PoseStride)!=Lemans24::Read16(b,Lemans24::CpuPoseBase+i*Lemans24::PoseStride)) return false;
+  return true;
+ }
+ if(Dirtdvls::IsSupportedGame(game)) {
+  Dirtdvls::HeaderSample x{},y{};
+  if(!Dirtdvls::DecodeHeader(a,n,remote,local,machines,x) || !Dirtdvls::DecodeHeader(b,n,remote,local,machines,y)) return false;
+  // Same race scene/step and sender; the race timer and both pose records must be populated alike.
+  if(x.state!=y.state || x.senderIndex!=y.senderIndex || x.numCpuCars!=y.numCpuCars) return false;
+  if((Dirtdvls::Read32(a,Dirtdvls::RaceTimerOffset)==0)!=(Dirtdvls::Read32(b,Dirtdvls::RaceTimerOffset)==0)) return false;
+  Lemans24::PoseSample pa{},pb{};
+  if(Dirtdvls::DecodeCarPose(a,Dirtdvls::HumanPoseOffset,pa)!=Dirtdvls::DecodeCarPose(b,Dirtdvls::HumanPoseOffset,pb)) return false;
+  for(unsigned i=0;i<x.numCpuCars;++i) {
+   const size_t o=Dirtdvls::CpuRecordBase+i*Dirtdvls::CpuRecordStride+Dirtdvls::CpuPoseOffset;
+   if(Dirtdvls::DecodeCarPose(a,o,pa)!=Dirtdvls::DecodeCarPose(b,o,pb)) return false;
+  }
   return true;
  }
  if(Srally2::IsSupportedGame(game)) {

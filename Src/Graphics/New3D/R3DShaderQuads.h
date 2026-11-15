@@ -255,7 +255,7 @@ static const char* fragmentShaderR3DQuads = R"glsl(
 
 #version 410 core
 
-uniform usampler2D textureBank[2];			// entire texture sheet
+uniform usampler2D textureBank[3];			// texture RAM pages 0 and 1, texture overlay page
 
 // texturing
 uniform bool	textureEnabled;
@@ -270,6 +270,7 @@ uniform bool	alphaTest;
 uniform bool	discardAlpha;
 uniform ivec2	textureWrapMode;
 uniform int		texturePage;
+uniform int		textureBaseBank;	// bank the base texture is read from (texturePage, or 2 for the overlay)
 
 // general
 uniform vec3	fogColour;

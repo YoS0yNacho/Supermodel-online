@@ -63,6 +63,9 @@ struct Poly
 	POLY_STATE		state;		// alpha or normal?
 	unsigned		numVerts;	// triangle (3) or quad (4)
 	const UINT32	*header;	// pointer to Real3D 7-word polygon header
+	bool			overlay = false;	// texture comes from the overlay sheet (see TextureOverlay.h) ...
+	int				overlayX = 0;		// ... at this position instead of the header's
+	int				overlayY = 0;
 };
 
 /*
@@ -340,6 +343,16 @@ public:
 	void SetVROMIsPolygonRAM(bool enable) override;
 
 	/*
+	 * AttachTextureOverlay(overlay):
+	 *
+	 * Attaches an auxiliary texture page (see Graphics/TextureOverlay.h). It
+	 * gets its own texture sheet when the texture maps have room for a ninth
+	 * one; otherwise it is ignored. Models listed in the overlay are cached
+	 * with their textured polygons pointing into that sheet.
+	 */
+	void AttachTextureOverlay(const TextureOverlay *overlay) override;
+
+	/*
 	 * SetScreenSize(width, height):
 	 *
 	 * Set the native display coordinate range that viewport coordinates use.
@@ -416,7 +429,7 @@ private:
 	void 			DestroyModelCache(ModelCache *cache);
 	
 	// Texture management
-	void DecodeTexture(int format, int x, int y, int width, int height);
+	void DecodeTexture(int format, int x, int y, int width, int height);	// format bit 3 (8) selects the overlay sheet
 	
 	// Matrix stack
 	void	MultMatrix(UINT32 matrixOffset);
@@ -465,6 +478,10 @@ private:
 	const UINT32	*polyRAM;		// 4 MB
 	const UINT32	*vrom;			// 64 MB
 	const UINT16	*textureRAM;	// 8 MB
+
+	// Auxiliary texture page and the sheet it is decoded into (nullptr: none)
+	const TextureOverlay *m_textureOverlay = nullptr;
+	TexSheet             *m_overlaySheet = nullptr;
 	
 	// Error reporting
 	unsigned	errorMsgFlags;	// tracks which errors have been printed this frame

@@ -34,8 +34,8 @@ int main(int argc,char**argv) {
   Online::RoomChatClient badChat;badChat.Connect("invalid:::ep","abcd","P");assert(badChat.Get().closed&&!badChat.Get().error.empty());
   Online::RoomChatClient cancelChat;cancelChat.Connect("192.0.2.1:1970",std::string(32,'a'),"P");
   const auto beforeChat=std::chrono::steady_clock::now();cancelChat.Disconnect();assert(std::chrono::steady_clock::now()-beforeChat<std::chrono::milliseconds(100));
-  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b};
-  const size_t sizes[]={848,848,1024,1024,2048,3264,2048};
+  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c};
+  const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584};
   static_assert(sizeof(guids)/sizeof(*guids)==Online::GameCount);
   static_assert(sizeof(sizes)/sizeof(*sizes)==Online::GameCount);
   for(unsigned game=0;game<Online::GameCount;++game) {

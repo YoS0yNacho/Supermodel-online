@@ -222,6 +222,8 @@ private:
 	void ApplySrally2Prediction();
 	void ConfigureLemans24Prediction();
 	void ApplyLemans24Prediction();
+	void ConfigureDirtdvlsPrediction();
+	void ApplyDirtdvlsPrediction();
 	void RecordGameSnapshot();
 	void LogGameTransportReady();
 	void TickStartSync();

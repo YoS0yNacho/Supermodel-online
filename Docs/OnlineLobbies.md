@@ -70,7 +70,7 @@ pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
   instead of sending every emulated frame, while still forwarding peer hops and
   race-start sync tokens immediately without added delay.
 - Receive-side motion predictors (`daytona2`, `dayto2pe`, `scud`, `scudplus`,
-  `srally2`, `lemans24`) automatically adapt their horizon, trajectory
+  `srally2`, `lemans24`, `dirtdvls`) automatically adapt their horizon, trajectory
   smoothing, and 2D/3D turn-rate extrapolation to the configured tick rate so
   remote cars continue moving smoothly every emulated frame (57.524 FPS online, or 60 with the room option) even at low tick rates (e.g.
   `10`–`30` Hz).
@@ -286,7 +286,7 @@ python3 relay.py --bind 0.0.0.0 --port 1970 --latency-ms 120 --jitter-ms 25
   off; the range is 0-5000.
 - `--jitter-ms J` makes each frame's delay `N +/- J` ms (uniform, never below 0).
   `0` (default) means a constant delay; the range is 0-5000.
-- Only 848/1024/2048/3264-byte game board frames, `PIN1`/`PON1` pings are delayed, and only
+- Only 848/1024/2048/3264/3584-byte game board frames, `PIN1`/`PON1` pings are delayed, and only
   after Start Link. Lobby creation, joining and the room list are never delayed,
   and the relay still validates everything it forwards.
 - Each frame is delayed from its arrival time rather than by pausing the read
@@ -318,7 +318,7 @@ link; that is the intent of the setting.
    They must have the selected exact ROM locally. Games are never downloaded
    or transferred by the relay. The GUI checks filenames/required parent;
    the normal ROM loader still performs actual contents/CRC validation.
-6. The roster displays MASTER/SLAVE and car numbers. With **2–16 Daytona players** (Scud: 2–8, Sega Rally 2: 2–4 or 2–8 in the optional 8-player mode, Le Mans 24: 2–6), only
+6. The roster displays MASTER/SLAVE and car numbers. With **2–16 Daytona players** (Scud: 2–8, Sega Rally 2: 2–4 or 2–8 in the optional 8-player mode, Le Mans 24: 2–6, Dirt Devils: 2–4), only
    the creator can click **Start Link**. Until then everybody stays in the lobby.
 7. **Start Link automatically loads the chosen game on every joined cabinet.**
    The relay waits for both native channels from every member, then starts the
@@ -338,6 +338,7 @@ The supported selection is exactly:
 | Sega Rally 2 | `srally2.zip` (up to 4 cabinets) |
 | Sega Rally 2 - 8 Player | `srally2.zip` (up to 8 cabinets; select the optional mode) |
 | Le Mans 24 | `lemans24.zip` (up to 6 cabinets) |
+| Dirt Devils | `dirtdvls.zip` (up to 4 cabinets) |
 
 ## Room ping
 
@@ -389,7 +390,7 @@ Disconnect Online before using the ordinary **Load game** button.
 - **Leave lobby** keeps your relay connection; **Disconnect** leaves the server.
 - If the creator leaves a waiting lobby, that lobby closes; there is no master
   migration. Other players may create/join another lobby.
-- One relay supports up to **16 separate GUI lobbies**, with game-specific capacity (Daytona editions: 16, Scud editions: 8, Sega Rally 2: 4 (8-player mode: 8), Le Mans 24: 6).
+- One relay supports up to **16 separate GUI lobbies**, with game-specific capacity (Daytona editions: 16, Scud editions: 8, Sega Rally 2: 4 (8-player mode: 8), Le Mans 24: 6, Dirt Devils: 4).
   A client can join only one room at a time. Each room selects one exact game.
 - Once Start Link is pressed, the roster is locked: no late joins or live
   reconnect. If any game fails to load/connect within **90 seconds**, the room
@@ -527,3 +528,89 @@ race order, with permanent cabinet/name labels (`3P: name`, `1P: name`, etc.).
 It covers all seven lobby selections across six ROM families and is independent of chat/F8 visibility. Update `relay.py` and all emulator clients together. See
 [OnlineRaceStandings.md](OnlineRaceStandings.md) for native-rank addresses,
 phase/stale-data behavior, transport limits and verification scope.
+
+
+## Scud Race Plus secret vehicles on every course
+
+With the room's **Secret Cars** option (room option bit 1, session-only RAM
+patch `Src/Network/Games/Scud/SecretCars.h`), the bus, tank, cat and rocket
+can be chosen on any course. The game itself only ever shows them on Super
+Beginner, and that is where their textures live: Scud Race Plus keeps one
+2048x2048 texture RAM layout per course (texture lists in banked CROM bank 0 at
+`0x38040`, `0x38194`, `0x382E8`, `0x3843C`, `0x38590` = Super Beginner,
+28 LZSS-compressed 256x256 blocks each) and the other four lists load water,
+track and building texels into the exact rectangles the vehicle models point
+at. Unpatched, the vehicles therefore raced in those texels (wooden-barrel
+rocket, turtle-skinned bus, and so on) everywhere except Super Beginner.
+
+The fix (`Src/Network/Games/Scud/HiddenCarTextures.cpp`) does not touch
+texture RAM, because every free-looking cell of it is used by something later
+in a race, by link-play markers or by the car-select screen. Instead, when the
+Secret Cars patch is applied, Supermodel decodes the Super Beginner list
+straight from the CROM (same LZSS as the game's loader at `0x331AC`, same
+8x8-tile layout, mipmaps included), copies the 52 texture rectangles the 573
+vehicle models use into a private **texture overlay page**
+(`Src/Graphics/TextureOverlay.h`, one 2048x1024 Real3D page with its mipmap
+regions) and hands it to the renderer through `CReal3D::SetTextureOverlay`
+(attached on the render thread at the next `BeginFrame`). Both renderers
+redirect the textured polygons of exactly those VROM models to the overlay:
+
+- **New3D** adds a third `TextureBank` (texture unit 2, uniform
+  `textureBaseBank`); the mesh keeps its page so micro-textures still come from
+  the hardware pages.
+- **Legacy3D** allocates one extra texture sheet (format bit 3 in the
+  `CTextureRefs` key selects it); if the GPU cannot provide a ninth 2048x2048
+  sheet the overlay is ignored and the vehicles look as before.
+
+The model list comes from the game's own vehicle scene-graph templates in
+CROM bank 0 (culling-node images the program copies to culling RAM): every
+VROM model of those templates that samples a Super Beginner-only rectangle is
+redirected, which covers all 24 running-cat animation frames and the cat's
+face, the rocket and the tank at every level of detail (including the far
+LODs other cabinets see), the rocket rider's animation and the bus. Rectangles
+the vehicles share with the per-course common lists, and shared assets that
+every course loads its own copy of (the window reflection map, seats, the
+grille) stay in texture RAM so the vehicles keep the current course's
+versions. On Super Beginner the overlay is texel-identical to what the game
+loads, so nothing changes there. The
+emulated program, save states, NVRAM and the ROM set are untouched; the ROM is
+verified (list position, first header `00F6F040`, block headers, 28 entries)
+before anything is built, and other revisions simply log a warning and keep
+the old look. `-no-hidden-car-textures` (`ScudPlusHiddenCarTextures = 0`)
+disables it. ROM-free coverage: `python3 Tests/run_scud_hidden_car_textures.py`
+(LZSS, ROM validation, per-rectangle level-0 and mipmap copies, no overlaps);
+verified on the 2-cabinet relay rig with all four vehicles on Beginner,
+Medium, Expert and Super Beginner (Legacy3D; the New3D path compiles and
+loads but the rig's software GL cannot show it).
+
+## Daytona USA 2 Power Edition: Reverse on the MIX course
+
+Power Edition takes **Mirror** (hold Start while confirming the course) and
+**Reverse** (hold Brake while the car is being chosen and confirmed) on
+Beginner, Advanced and Expert, but the car-select program refuses Reverse on
+the MIX course even though the game ships the reversed data for it (reverse
+checkpoint tables, speed factors, scenery/voice event lists and the reversed
+section order all have a MIX entry). Supermodel now removes that single check
+for `dayto2pe`, always, online or offline, so MIX can be driven in Reverse and
+in Mirror + Reverse like the other courses.
+
+- Pick MIX, then hold Brake on **every** cabinet while the car is selected and
+  confirmed; the `REVERSE` badge appears under the car and the race starts at
+  the Beginner-course end of the point-to-point route. The link vote keeps the
+  original rule that all players must ask for it, exactly as on the other
+  courses.
+- The patch is a session-only RAM code change in the style of the boot-scene
+  patch (`Src/Network/Games/Daytona2/MixReverse.h`): one `beq` at RAM
+  `0xAF38C` (the "course is MIX" bail-out in the Reverse decision) becomes a
+  `nop`, after the three words before it (course byte load and compare) and
+  the seven words after it (brake value load, threshold test and flag store)
+  have been verified. Other revisions log a notice and keep the original
+  behaviour; ROM set, NVRAM and config are untouched.
+- Grand Prix / Endurance keep refusing Reverse (a different test on the game
+  mode byte), as in the original.
+
+ROM-free coverage: `python3 Tests/run_async_netboard.py --only mix-reverse`.
+Verified on the 2-cabinet relay rig: normal, Mirror, Reverse and Mirror +
+Reverse on MIX and Beginner, and a full reversed MIX run to the results screen
+(section order Beginner -> Expert -> Advanced, 7 checkpoints, time extensions
+and the lap/section counters behaving as on the normal direction).

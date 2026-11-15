@@ -90,6 +90,15 @@ public:
 	void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height) override;
 
 	/*
+	 * AttachTextureOverlay(overlay):
+	 *
+	 * Attaches an auxiliary texture page (see Graphics/TextureOverlay.h) as a
+	 * third texture bank. Models listed in the overlay are cached with their
+	 * textured meshes pointing into it.
+	 */
+	void AttachTextureOverlay(const TextureOverlay *overlay) override;
+
+	/*
 	* AttachMemory(cullingRAMLoPtr, cullingRAMHiPtr, polyRAMPtr, vromPtr,
 	* 				textureRAMPtr):
 	*
@@ -238,7 +247,7 @@ private:
 	// building the scene
 	int	GetTexFormat(int originalFormat, bool contour) const;
 	void SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph);
-	void CacheModel(Model *m, const UINT32 *data);
+	void CacheModel(Model *m, const UINT32 *data, UINT32 modelAddr);
 	void CopyVertexData(const R3DPoly& r3dPoly, std::vector<FVertex>& vertexArray);
 	void GetCoordinates(int width, int height, UINT16 uIn, UINT16 vIn, float uvScale, float& uOut, float& vOut) const;
 
@@ -317,7 +326,8 @@ private:
 	std::vector<FVertex> m_polyBufferRam;		// dynamic polys
 	std::vector<FVertex> m_polyBufferRom;		// rom polys
 	std::unordered_map<UINT32, std::shared_ptr<std::vector<Mesh>>> m_romMap;	// a hash table for all the ROM models. The meshes don't have model matrices or tex offsets yet
-	TextureBank			m_textureBank[2];
+	TextureBank			m_textureBank[3];		// texture RAM pages 0 and 1, and the texture overlay page
+	const TextureOverlay *m_textureOverlay = nullptr;
 
 	GLuint m_vao;
 	VBO m_vbo;								// large VBO to hold our poly data, start of VBO is ROM data, ram polys follow

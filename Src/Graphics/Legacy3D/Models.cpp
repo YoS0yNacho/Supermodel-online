@@ -107,6 +107,7 @@
 #include <cstring>
 #include "Supermodel.h"
 #include "Legacy3D.h"
+#include "Graphics/TextureOverlay.h"
 
 #ifdef DEBUG
 extern int g_testPolyHeaderIdx;
@@ -472,9 +473,9 @@ void CLegacy3D::InsertVertex(ModelCache *Cache, const Vertex *V, const Poly *P, 
   unsigned  texFormat = (P->header[6]>>7)&7;
   GLfloat   texWidth  = (GLfloat) (32<<((P->header[3]>>3)&7));
   GLfloat   texHeight = (GLfloat) (32<<((P->header[3]>>0)&7));
-  TexSheet  *texSheet = fmtToTexSheet[texFormat]; // get X, Y offset of texture sheet within texture map
-  GLfloat   texBaseX = (GLfloat)(texSheet->xOffset + GetTextureBaseX(P));
-  GLfloat   texBaseY = (GLfloat)(texSheet->yOffset + GetTextureBaseY(P));
+  TexSheet  *texSheet = P->overlay ? m_overlaySheet : fmtToTexSheet[texFormat]; // get X, Y offset of texture sheet within texture map
+  GLfloat   texBaseX = (GLfloat)(texSheet->xOffset + (P->overlay ? P->overlayX : GetTextureBaseX(P)));
+  GLfloat   texBaseY = (GLfloat)(texSheet->yOffset + (P->overlay ? P->overlayY : GetTextureBaseY(P)));
 
   /*
    * Lighting and Color Modulation:
@@ -1003,6 +1004,8 @@ struct VBORef *CLegacy3D::CacheModel(ModelCache *Cache, int lutIdx, UINT16 textu
   Vertex    Prev[4] = {};  // previous vertices
   bool      useStencil = true;
   bool      done = false;
+  // Models listed in the texture overlay draw their textures from the overlay sheet
+  const bool overlayModel = (m_textureOverlay != NULL) && (m_overlaySheet != NULL) && !Cache->dynamic && m_textureOverlay->HasModel(lutIdx);
   while (!done)
   {    
     // Set current header pointer (header is 7 words)
@@ -1030,6 +1033,16 @@ struct VBORef *CLegacy3D::CacheModel(ModelCache *Cache, int lutIdx, UINT16 textu
     int texBaseX = GetTextureBaseX(&P);
     int texBaseY = GetTextureBaseY(&P);    
     GLfloat uvScale   = (P.header[1]&0x40)?1.0f:(1.0f/8.0f);
+    if (overlayModel && texEnable)
+    {
+      unsigned overlayX, overlayY;
+      if (m_textureOverlay->Lookup(texBaseX, texBaseY, texWidth, texHeight, overlayX, overlayY))
+      {
+        P.overlay = true;
+        P.overlayX = texBaseX = overlayX;
+        P.overlayY = texBaseY = overlayY;
+      }
+    }
     
     // Determine whether this is an alpha polygon (TODO: when testing textures, test if texturing enabled? Might not matter)
     int isTranslucent = (P.header[6] & 0x00800000) == 0;
@@ -1072,8 +1085,9 @@ struct VBORef *CLegacy3D::CacheModel(ModelCache *Cache, int lutIdx, UINT16 textu
       // If model cache is static, record texture reference in model cache entry for later decoding.
       // If cache is dynamic, or if it's not possible to record the texture reference (due to lack of
       // memory) then decode the texture now.
-      if (Cache->dynamic || !Model->texRefs.AddRef(texFormat, texBaseX, texBaseY, texWidth, texHeight))
-        DecodeTexture(texFormat, texBaseX, texBaseY, texWidth, texHeight);
+      const int refFormat = texFormat | (P.overlay ? 8 : 0);  // bit 3: overlay sheet
+      if (Cache->dynamic || !Model->texRefs.AddRef(refFormat, texBaseX, texBaseY, texWidth, texHeight))
+        DecodeTexture(refFormat, texBaseX, texBaseY, texWidth, texHeight);
     }
     
     // Polygon normal is in upper 24 bits: sign + 1.22 fixed point

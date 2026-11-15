@@ -4,7 +4,7 @@
 # Run: pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
 # Same protocol/game identities/nonverbose core as the matching client release.
 
-"""GUI-lobby exact dayto2pe / daytona2 / scud / scudplus / srally2 / lemans24 async relay. Python 3.9+, standard library only.
+"""GUI-lobby exact dayto2pe / daytona2 / scud / scudplus / srally2 / lemans24 / dirtdvls async relay. Python 3.9+, standard library only.
 
 Clients: supermodel -relay=HOST:1970 opens the Online GUI.
 The lobby master presses Start Link.
@@ -30,10 +30,11 @@ _WINMM_HIGH_RES = False
 GUID = 0x5BF177DA34875  # legacy export, kept for existing Daytona launchers/tests
 GAMES = {GUID: ("dayto2pe", 848), 0x5BF177DA34876: ("scud", 1024),
          0x5BF177DA34877: ("scudplus", 1024), 0x5BF177DA34878: ("daytona2", 848),
-         0x5BF177DA34879: ("srally2", 2048), 0x5BF177DA3487B: ("srally2_8p", 2048), 0x5BF177DA3487A: ("lemans24", 3264)}
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6}
+         0x5BF177DA34879: ("srally2", 2048), 0x5BF177DA3487B: ("srally2_8p", 2048), 0x5BF177DA3487A: ("lemans24", 3264),
+         0x5BF177DA3487C: ("dirtdvls", 3584)}
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4}
 MAX_PLAYERS = 8
-MAX_FRAME_SIZE = 3320
+MAX_FRAME_SIZE = 3640  # largest native segment (dirtdvls 3584) + 8-byte header + 48-byte trailer
 MIN_TICK_RATE = 5
 MAX_TICK_RATE = 60
 DEFAULT_TICK_RATE = 60
@@ -58,7 +59,7 @@ PON1_ID = int.from_bytes(b'PON1', 'little')
 # the ring, and sends the origin its echo at once. Sega Rally 2 is included:
 # its barriers need every segment of every slot to reach the game in order,
 # which the client's publication rule guarantees regardless of the transport.
-STAR_GAMES = frozenset(('dayto2pe', 'daytona2', 'scud', 'scudplus', 'lemans24', 'srally2', 'srally2_8p'))
+STAR_GAMES = frozenset(('dayto2pe', 'daytona2', 'scud', 'scudplus', 'lemans24', 'srally2', 'srally2_8p', 'dirtdvls'))
 STAR = struct.Struct('<II')  # version, flags (1 = fan-out active)
 TIMED_HEADER = struct.Struct('<IHHIIQQQQ')  # magic, version, header size, segment size, hops, source, last hop send, age, uncertainty
 TIMED_MAGIC = 0x31544d44
@@ -1047,10 +1048,11 @@ async def warmup_jit(force=False):
         loop = asyncio.get_running_loop()
         room = Room(log=lambda *_: None)
         room.started = True
-        fast2 = 3264 + 8
-        fast1 = 3264 + 56
+        largest = max(size for _, size in GAMES.values())  # dirtdvls 3584
+        fast2 = largest + 8
+        fast1 = largest + 56
         valid = frozenset((8, 9, 10, 16, 56, fast2, fast1))
-        pkt = frame(b'NBD1', b'\x5a' * (3264 + 48))
+        pkt = frame(b'NBD1', b'\x5a' * (largest + 48))
         pin = frame(b'PIN1', b'\0' * 8)
         combo = pkt + pin
         iters = 1700
@@ -1238,9 +1240,9 @@ import socket
 HEADER = struct.Struct('<4sBBBB16sIHHQ')
 DATAGRAM = 1200
 CHUNK = DATAGRAM - HEADER.size
-# Largest native segment (3264) + 32-byte client trailer + 102-byte streamed-word
-# mask + 1 encoding byte.
-MAX_ENCODED = 3399
+# Largest native segment (dirtdvls 3584) + 40-byte client trailer + 112-byte
+# streamed-word mask + 1 encoding byte.
+MAX_ENCODED = 3737
 WIRE_VERSION = 5
 ACK_CLOCK = struct.Struct('<Q')  # relay monotonic microseconds appended to every ACK
 HELLO, ACK, SNAPSHOT, HOST_STATUS, ROUTE = 1, 2, 3, 4, 5
@@ -1475,8 +1477,9 @@ import socket
 # Stable GUI IDs, NOT alphabetic order or packet GUID arithmetic.
 GAMES = [("daytona2", 0x5bf177da34878), ("dayto2pe", 0x5bf177da34875),
          ("scud", 0x5bf177da34876), ("scudplus", 0x5bf177da34877),
-         ("srally2", 0x5bf177da34879), ("lemans24", 0x5bf177da3487a), ("srally2_8p", 0x5bf177da3487b)]
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6}
+         ("srally2", 0x5bf177da34879), ("lemans24", 0x5bf177da3487a), ("srally2_8p", 0x5bf177da3487b),
+         ("dirtdvls", 0x5bf177da3487c)]
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4}
 
 
 def max_players_for_game(game):
@@ -1531,7 +1534,7 @@ def native_car_limit(game):
 
 
 def valid_room_options(game, value):
-    if not 0 <= game < 7 or value & ~2047 or (value & 1 and game not in (0, 3)):
+    if not 0 <= game < 8 or value & ~2047 or (value & 1 and game not in (0, 3)):
         return False
     base = 4 if game == 6 else game
     if value & 768 and base >= 4:

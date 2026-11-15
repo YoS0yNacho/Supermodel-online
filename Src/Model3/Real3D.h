@@ -37,8 +37,13 @@
 #include "Graphics/IRender3D.h"
 #include "Util/NewConfig.h"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <unordered_map>
+
+struct TextureOverlay;
 
 /*
  * QueuedUploadTextures:
@@ -455,6 +460,19 @@ public:
    */
   void AttachRenderer(IRender3D *Render3DPtr);
 
+  /*
+   * SetTextureOverlay(overlay):
+   *
+   * Installs (or, with an empty pointer, removes) an auxiliary texture page
+   * for the renderer (see Graphics/TextureOverlay.h). May be called from the
+   * emulation thread at any time; the renderer picks it up at the start of
+   * its next frame. The Real3D keeps the object alive while it is attached.
+   *
+   * Parameters:
+   *    overlay   Shared pointer to an immutable overlay, or empty.
+   */
+  void SetTextureOverlay(std::shared_ptr<const TextureOverlay> overlay);
+
 
   /*
    * Init(vromPtr, BusObjectPtr, IRQObjectPtr, dmaIRQBit, hwConfig):
@@ -552,6 +570,14 @@ private:
 
   // Renderer attached to the Real3D
   IRender3D *Render3D = nullptr;
+
+  // Auxiliary texture page (see SetTextureOverlay). m_textureOverlay is the
+  // latest request, m_textureOverlayAttached is what the renderer currently
+  // holds a pointer to; both are only swapped in BeginFrame on the render thread.
+  std::mutex                            m_textureOverlayMutex;
+  std::shared_ptr<const TextureOverlay> m_textureOverlay;
+  std::shared_ptr<const TextureOverlay> m_textureOverlayAttached;
+  std::atomic<bool>                     m_textureOverlayPending{false};
 
   // Data passed from Model 3 object
   const uint32_t  *vrom = nullptr;          // Video ROM (polygon RAM if m_hwConfig.vromIsPolygonRAM)

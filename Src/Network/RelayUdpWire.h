@@ -17,7 +17,7 @@ constexpr size_t DatagramSize=1200, HeaderSize=40, ChunkSize=DatagramSize-Header
 // Every snapshot carries a 40-byte trailer after the native segment (see
 // Trailer), optionally followed by the sender's streamed-word mask: one bit per
 // aligned 32-bit word of the segment, set when that word travels by UDP alone.
-constexpr size_t MaxSegmentSize=3264, TrailerSize=40, MaxMaskSize=(MaxSegmentSize/4+7)/8;
+constexpr size_t MaxSegmentSize=3584, TrailerSize=40, MaxMaskSize=(MaxSegmentSize/4+7)/8;
 constexpr size_t MaxRawSize=MaxSegmentSize+TrailerSize+MaxMaskSize, MaxEncodedSize=MaxRawSize+1;
 inline size_t MaskSize(size_t segmentSize) { return (segmentSize/4+7)/8; }
 constexpr uint8_t FlagMask=1; // Trailer::flags: the streamed-word mask follows the trailer

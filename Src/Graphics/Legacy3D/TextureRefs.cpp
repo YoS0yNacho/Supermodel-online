@@ -64,7 +64,7 @@ void CTextureRefs::Clear()
 bool CTextureRefs::ContainsRef(unsigned fmt, unsigned x, unsigned y, unsigned width, unsigned height)
 {
 	// Pack texture reference into bitfield
-	unsigned texRef = (fmt&7)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
+	unsigned texRef = (fmt&15)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
 	
 	// Check if using array or hashset
 	if (m_size <= TEXREFS_ARRAY_SIZE)
@@ -85,7 +85,7 @@ bool CTextureRefs::ContainsRef(unsigned fmt, unsigned x, unsigned y, unsigned wi
 bool CTextureRefs::AddRef(unsigned fmt, unsigned x, unsigned y, unsigned width, unsigned height)
 {
 	// Pack texture reference into bitfield
-	unsigned texRef = (fmt&7)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
+	unsigned texRef = (fmt&15)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
 
 	// Check if using array or hashset
 	if (m_size <= TEXREFS_ARRAY_SIZE)
@@ -123,7 +123,7 @@ bool CTextureRefs::AddRef(unsigned fmt, unsigned x, unsigned y, unsigned width, 
 bool CTextureRefs::RemoveRef(unsigned fmt, unsigned x, unsigned y, unsigned width, unsigned height)
 {
 	// Pack texture reference into bitfield
-	unsigned texRef = (fmt&7)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
+	unsigned texRef = (fmt&15)<<24|(x&0x7E0)<<13|(y&0x7E0)<<7|(width&0x7E0)<<1|(height&0x7E0)>>5;
 
 	// Check if using array or hashset
 	if (m_size <= TEXREFS_ARRAY_SIZE)

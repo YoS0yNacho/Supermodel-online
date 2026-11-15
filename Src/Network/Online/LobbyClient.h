@@ -12,11 +12,11 @@
 #include <vector>
 namespace Online {
 class PlayerHost;
-inline constexpr const char* Games[] = {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "srally2_8p"};
-inline constexpr const char* Titles[] = {"Daytona USA 2", "Daytona USA 2 Power Edition", "Scud Race", "Scud Race Plus", Srally2Research::Title, "Le Mans 24", Srally2Research::EightTitle};
+inline constexpr const char* Games[] = {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "srally2_8p", "dirtdvls"};
+inline constexpr const char* Titles[] = {"Daytona USA 2", "Daytona USA 2 Power Edition", "Scud Race", "Scud Race Plus", Srally2Research::Title, "Le Mans 24", Srally2Research::EightTitle, "Dirt Devils"};
 inline constexpr unsigned GameCount = sizeof(Games) / sizeof(Games[0]);
 inline constexpr uint32_t GameMaskAll = (1u << GameCount) - 1;
-inline constexpr unsigned MaxPlayers(unsigned game) { return game < 2 ? 16u : game == 4 ? Srally2Research::StockCapacity : game == 5 ? 6u : 8u; }
+inline constexpr unsigned MaxPlayers(unsigned game) { return game < 2 ? 16u : game == 4 ? Srally2Research::StockCapacity : game == 5 ? 6u : game == 7 ? 4u : 8u; }
 // Both Rally entries use the exact same, unmodified owner archive.
 inline constexpr const char* RomGame(unsigned game){return game==6?"srally2":game<GameCount?Games[game]:"";}
 inline constexpr size_t MaxChatLength = 159;

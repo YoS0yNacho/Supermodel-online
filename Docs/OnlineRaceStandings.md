@@ -5,9 +5,9 @@ native race order, with their lobby car number and player name (for example,
 `3P: Alice`). CPU opponents affect the game's ranking but are not listed.
 Chat visibility and the in-game chat mute do not hide the panel.
 
-The panel is available for all seven lobby selections across six ROM families:
+The panel is available for all eight lobby selections across seven ROM families:
 Daytona USA 2, Daytona USA 2 Power Edition, Scud Race, Scud Race Plus, Sega
-Rally 2 (standard and optional 8-player modes), and Le Mans 24. Both Rally
+Rally 2 (standard and optional 8-player modes), Le Mans 24, and Dirt Devils. Both Rally
 modes use `srally2.zip`; the selected mode determines whether the room allows
 up to four or eight cabinets.
 

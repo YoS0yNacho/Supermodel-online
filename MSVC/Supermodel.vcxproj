@@ -409,6 +409,8 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClCompile Include="..\Src\Network\Games\GameModel3.cpp" />
     <ClCompile Include="..\Src\Network\Games\Lemans24\Lemans24NetBoard.cpp" />
     <ClCompile Include="..\Src\Network\Games\Lemans24\Lemans24Model3.cpp" />
+    <ClCompile Include="..\Src\Network\Games\Dirtdvls\DirtdvlsNetBoard.cpp" />
+    <ClCompile Include="..\Src\Network\Games\Dirtdvls\DirtdvlsModel3.cpp" />
     <ClCompile Include="..\Src\Network\Games\Scud\ScudNetBoard.cpp" />
     <ClCompile Include="..\Src\Network\Games\Scud\ScudModel3.cpp" />
     <ClCompile Include="..\Src\Network\Games\Srally2\Srally2NetBoard.cpp" />
@@ -639,6 +641,8 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClInclude Include="..\Src\Network\Games\Daytona2\TimedSegment.h" />
     <ClInclude Include="..\Src\Network\Games\Lemans24\Policy.h" />
     <ClInclude Include="..\Src\Network\Games\Lemans24\Prediction.h" />
+    <ClInclude Include="..\Src\Network\Games\Dirtdvls\Policy.h" />
+    <ClInclude Include="..\Src\Network\Games\Dirtdvls\Prediction.h" />
     <ClInclude Include="..\Src\Network\Games\Model3State.h" />
     <ClInclude Include="..\Src\Network\Games\NativeLinkPacing.h" />
     <ClInclude Include="..\Src\Network\Games\NativeRaceMembership.h" />

@@ -8,11 +8,14 @@
 #include "Srally2/Policy.h"
 namespace NativeSessionSettings {
 inline bool Apply(std::array<uint16_t,64>& image,const std::string& game,uint32_t options,unsigned carNumber){
- unsigned id=6;
- const char* names[]={"daytona2","dayto2pe","scud","scudplus","srally2","lemans24"};
- for(unsigned i=0;i<6;++i)if(game==names[i])id=i;
+ unsigned id=8;
+ const char* names[]={"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","srally2_8p","dirtdvls"};
+ for(unsigned i=0;i<8;++i)if(game==names[i])id=i;
  if(!NativeRoomSettings::Valid(id,options) || (carNumber && carNumber>NativeRoomSettings::CarLimit(id)))return false;
- if(id==5)return options==0 && carNumber==0;
+ // Le Mans 24 and Dirt Devils have no native difficulty/mode/car settings:
+ // only the emulator-side Video60 room option may be set (it never touches the
+ // EEPROM; the native MASTER/SLAVE assignment is done by ConfigureRelayEeprom).
+ if(id==5 || id==7)return !(options&~NativeRoomSettings::Video60) && carNumber==0;
  if(image[0]!=0x4d33 || image[1]!=0x5345 || image[2]!=0x4741)return false;
  if(id==4){
   if(image[5]!=Srally2::SettingsCRC(image))return false;

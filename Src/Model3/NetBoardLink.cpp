@@ -444,7 +444,7 @@ bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const
   std::lock_guard<std::mutex> lock(m_mutex);
   const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
   unsigned maxPlayers = m_relayGUID==Srally2Research::Guid?8u:0u;
-  for (const char* game : {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24"})
+  for (const char* game : {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "dirtdvls"})
     if (GameNetwork::GUID(game) == m_relayGUID) maxPlayers = GameNetwork::MaxCabinets(game);
   if (ready.version!=RelayProtocol::Version || ready.count<2 || ready.count>maxPlayers || ready.index>=ready.count ||
       channel>1 || ready.channel!=channel || m_relayAssigned[channel] || m_relayFailed ||
@@ -484,7 +484,7 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
  bool nonzero=false;for(auto b:cfg.token) nonzero|=b!=0;if(!nonzero) return false;
  size_t size=m_relayGUID==Srally2Research::Guid?2048u:0u;
  if(m_relayGUID==Srally2Research::Guid && cfg.count>8)return false;
- for(const char* game:{"daytona2","dayto2pe","scud","scudplus","srally2","lemans24"})
+ for(const char* game:{"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","dirtdvls"})
   if(GameNetwork::GUID(game)==m_relayGUID) { size=GameNetwork::PacketSize(game);if(cfg.count>GameNetwork::MaxCabinets(game)) return false; }
  if(!size) return false;
  std::string host;uint16_t unused;

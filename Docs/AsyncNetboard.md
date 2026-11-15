@@ -63,7 +63,7 @@ To return to frame-locked behavior, use `-sync-netboard` or `AsyncNet = false` o
 - Async uses a different GUID to reject accidentally mixed synchronized and
   async cabinets. This is a mode/protocol check, not a hash of the executable.
 - In the ready state, supported exact-ROM games (`dayto2pe`, `daytona2`, `scud`,
-  `scudplus`, `srally2`, `lemans24`) wrap each native segment in a 48-byte `TimedSegment`
+  `scudplus`, `srally2`, `lemans24`, `dirtdvls`) wrap each native segment in a 48-byte `TimedSegment`
   header (`hops`, monotonic timestamps, accumulated one-way `ageUs` and
   `uncertaintyUs`; the origin dates the segment by the game's last CommRAM
   write, `CSimNetBoard::SampleTiming`, so `uncertaintyUs` starts at the span
@@ -113,7 +113,7 @@ To return to frame-locked behavior, use `-sync-netboard` or `AsyncNet = false` o
 ## Race-start barrier timing
 
 Supported games (`dayto2pe`, `daytona2`, `scud`, `scudplus`, `lemans24`,
-`srally2`) hold each cabinet at a game-specific checkpoint just before the race
+`srally2`, `dirtdvls`) hold each cabinet at a game-specific checkpoint just before the race
 intro and release all of them at one agreed moment. The leader (lowest native
 participant) runs a three-step token exchange over the ring:
 
@@ -178,7 +178,7 @@ Two things caused it, both in the Daytona 2 predictor and both fixed:
 On top of that, `Src/Network/Games/CorrectionSmoothing.h` stretches `tau` for
 corrections that are small compared with how far the car moves per frame
 (`ErrorScaledTau`) and raises the knee of the far-latency term
-(`FarLatencyTau`). It is shared by the Daytona 2, Scud Race, Le Mans 24 and
+(`FarLatencyTau`). It is shared by the Daytona 2, Scud Race, Le Mans 24, Dirt Devils and
 Sega Rally 2 predictors. The strength is a knob:
 
 | `NetPredictionSmoothing` / `-net-smoothing=` | Effect |
@@ -326,6 +326,11 @@ Coverage includes:
 - Adaptive tick-rate meters and ladder controller (`adaptive-tick`): queueing
   delay baseline, loss percentage with reordering, step-down/step-up timing,
   ceiling clipping.
+- Dirt Devils (`dirtdvls-predict`, 2 and 4 cabinets): exact-ROM EEPROM GAME
+  ASSIGNMENTS (MASTER/SLAVE, MACHINE ID, settings CRC), start-gate state tuple,
+  packet CRC-16 acceptance, all-to-all human prediction plus MASTER-owned AI
+  records, and every presented receive copy re-sealed so the native receiver
+  still accepts it.
 
 These are synthetic board/protocol tests, not native-ROM races. Jitter/loss,
 long-term stability and competitive correctness remain unvalidated.

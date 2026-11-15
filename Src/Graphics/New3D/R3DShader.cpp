@@ -61,6 +61,7 @@ void R3DShader::Start()
 	m_fogIntensity		= 0.0f;
 	m_microTexID		= -1;
 	m_texturePage		= -1;
+	m_textureBaseBank	= -1;
 
 	m_baseTexInfo[0]	= -1;
 	m_baseTexInfo[1]	= -1;
@@ -125,7 +126,9 @@ bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 
 	m_locTextureBank[0]		= glGetUniformLocation(m_shaderProgram, "textureBank[0]");
 	m_locTextureBank[1]		= glGetUniformLocation(m_shaderProgram, "textureBank[1]");
+	m_locTextureBank[2]		= glGetUniformLocation(m_shaderProgram, "textureBank[2]");
 	m_locTexturePage		= glGetUniformLocation(m_shaderProgram, "texturePage");
+	m_locTextureBaseBank	= glGetUniformLocation(m_shaderProgram, "textureBaseBank");
 	m_locTexture1Enabled	= glGetUniformLocation(m_shaderProgram, "textureEnabled");
 	m_locTexture2Enabled	= glGetUniformLocation(m_shaderProgram, "microTexture");
 	m_locTextureAlpha		= glGetUniformLocation(m_shaderProgram, "textureAlpha");
@@ -232,6 +235,7 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 	if (m_dirtyMesh) {
 		glUniform1i(m_locTextureBank[0], 0);
 		glUniform1i(m_locTextureBank[1], 1);
+		glUniform1i(m_locTextureBank[2], 2);
 	}
 
 	if (m_dirtyMesh || m->textured != m_textured1) {
@@ -247,6 +251,13 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 	if (m_dirtyMesh || (m->page ^ m_transPage) != m_texturePage) {
 		glUniform1i(m_locTexturePage, m->page ^ m_transPage);
 		m_texturePage = (m->page ^ m_transPage);
+	}
+
+	// the base texture is read from the page, or from the overlay page (bank 2) for redirected meshes
+	const int baseBank = m->overlay ? 2 : (m->page ^ m_transPage);
+	if (m_dirtyMesh || baseBank != m_textureBaseBank) {
+		glUniform1i(m_locTextureBaseBank, baseBank);
+		m_textureBaseBank = baseBank;
 	}
 
 	if (m_dirtyMesh || m->microTextureMinLOD != m_microTexMinLOD) {

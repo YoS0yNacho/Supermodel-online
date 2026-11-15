@@ -227,7 +227,7 @@ vec4 GetTextureValue()
 
 	ivec2 tex1Pos = GetTexturePosition(iLevel, baseTexInfo.xy);
 	ivec2 tex1Size = GetTextureSize(iLevel, baseTexInfo.zw);
-	vec4 tex1Data = texBiLinear(textureBank[texturePage], textureWrapMode, vec2(tex1Size), tex1Pos, fsTexCoord, iLevel);
+	vec4 tex1Data = texBiLinear(textureBank[textureBaseBank], textureWrapMode, vec2(tex1Size), tex1Pos, fsTexCoord, iLevel);
 
 	// init second texel with blank data to avoid any potentially undefined behavior
 	vec4 tex2Data = vec4(0.0);
@@ -241,7 +241,7 @@ vec4 GetTextureValue()
 	{
 		ivec2 tex2Pos = GetTexturePosition(iLevel+1, baseTexInfo.xy);
 		ivec2 tex2Size = GetTextureSize(iLevel+1, baseTexInfo.zw);
-		tex2Data = texBiLinear(textureBank[texturePage], textureWrapMode, vec2(tex2Size), tex2Pos, fsTexCoord, iLevel+1);
+		tex2Data = texBiLinear(textureBank[textureBaseBank], textureWrapMode, vec2(tex2Size), tex2Pos, fsTexCoord, iLevel+1);
 
 		blendFactor = ffL;
 	}

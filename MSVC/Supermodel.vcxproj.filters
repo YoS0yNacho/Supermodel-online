@@ -608,6 +608,12 @@
     <ClCompile Include="..\Src\Network\Games\Lemans24\Lemans24Model3.cpp">
       <Filter>Source Files\Network</Filter>
     </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Dirtdvls\DirtdvlsNetBoard.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Src\Network\Games\Dirtdvls\DirtdvlsModel3.cpp">
+      <Filter>Source Files\Network</Filter>
+    </ClCompile>
     <ClCompile Include="..\Src\Network\Games\Scud\ScudNetBoard.cpp">
       <Filter>Source Files\Network</Filter>
     </ClCompile>
@@ -1133,6 +1139,12 @@
       <Filter>Header Files\Network</Filter>
     </ClInclude>
     <ClInclude Include="..\Src\Network\Games\Lemans24\Prediction.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Dirtdvls\Policy.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Dirtdvls\Prediction.h">
       <Filter>Header Files\Network</Filter>
     </ClInclude>
     <ClInclude Include="..\Src\Network\Games\Model3State.h">

@@ -25,6 +25,8 @@
 #include "Types.h"
 #include "Game.h"
 
+struct TextureOverlay;
+
 /*
  * IRender3D:
  *
@@ -75,6 +77,18 @@ public:
    * need this can ignore it.
    */
   virtual void SetScreenSize(float width, float height)
+  {
+  }
+
+  /*
+   * AttachTextureOverlay(overlay):
+   *
+   * Attaches (or, with nullptr, detaches) an auxiliary texture page that the
+   * renderer draws a known set of models from (see Graphics/TextureOverlay.h).
+   * Called between frames on the render thread; the object stays valid until
+   * the next call. Renderers that do not support it can ignore it.
+   */
+  virtual void AttachTextureOverlay(const TextureOverlay *overlay)
   {
   }
 

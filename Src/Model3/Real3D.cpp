@@ -254,8 +254,10 @@
 #include "CPU/PowerPC/ppc.h"
 #include "Util/BMPFile.h"
 #include "Util/BitCast.h"
+#include "Graphics/TextureOverlay.h"
 #include <cstring>
 #include <algorithm>
+#include <utility>
 
 // Macros that divide memory regions into pages and mark them as dirty when they are written to
 #define PAGE_WIDTH 12
@@ -586,8 +588,29 @@ uint32_t CReal3D::UpdateSnapshots(bool copyWhole)
   return cullLoCopied + cullHiCopied + polyCopied + textureCopied;
 }
 
+void CReal3D::SetTextureOverlay(std::shared_ptr<const TextureOverlay> overlay)
+{
+  {
+    std::lock_guard<std::mutex> lock(m_textureOverlayMutex);
+    m_textureOverlay = std::move(overlay);
+  }
+  m_textureOverlayPending = true;
+}
+
 void CReal3D::BeginFrame(void)
 {
+  // Hand a new (or removed) texture overlay to the renderer between frames
+  if (m_textureOverlayPending.exchange(false))
+  {
+    std::shared_ptr<const TextureOverlay> overlay;
+    {
+      std::lock_guard<std::mutex> lock(m_textureOverlayMutex);
+      overlay = m_textureOverlay;
+    }
+    m_textureOverlayAttached = overlay;
+    Render3D->AttachTextureOverlay(overlay.get());
+  }
+
   // If multi-threaded, perform now any queued texture uploads to renderer before rendering begins
   if (m_gpuMultiThreaded)
   {
@@ -1311,6 +1334,13 @@ void CReal3D::AttachRenderer(IRender3D *Render3DPtr)
     Render3D->AttachMemory(cullingRAMLo, cullingRAMHi, polyRAM, vrom, textureRAM);
 
   Render3D->SetVROMIsPolygonRAM(m_hwConfig.vromIsPolygonRAM);
+
+  // A new renderer starts without the overlay; re-attach it on its first frame
+  {
+    std::lock_guard<std::mutex> lock(m_textureOverlayMutex);
+    if (m_textureOverlay)
+      m_textureOverlayPending = true;
+  }
 
   DebugLog("Real3D attached a Render3D object\n");
 }

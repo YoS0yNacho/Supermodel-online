@@ -95,6 +95,17 @@ template<class Memory> NativeStanding ReadNativeStanding(Memory& mem, const std:
         (!results && (stage != 3 || sub < 2 || sub > 4))) return {};
     // Native overall rank; not the lap/progress/time or human-only counter.
     rank = mem.Read32(0x17fe60);
+  } else if (game == "dirtdvls") {
+    // Game state word: credited mode, game scene 2 (race) step 4 racing /
+    // step 5 finished, scene 3 = native results board (Dirtdvls/Policy.h).
+    const uint32_t state = mem.Read32(0x21afa8);
+    const unsigned mode = state >> 24, step = (state >> 16) & 0xff, scene = state & 0xff;
+    results = mode == 1 && ((scene == 2 && step == 5) || scene == 3);
+    if (mode != 1 || (!results && !(scene == 2 && step == 4 && mem.Read32(0x228ea0) != 0))) return {};
+    // One-based native rank table indexed by the local car object index.
+    const uint32_t car = mem.Read32(0x224270), cars = mem.Read32(0x22426c);
+    if (car < 8 && cars >= 1 && cars <= 8 && car < cars)
+      rank = mem.Read16(0x223078 + 2 * car);
   } else return {};
   // Native total includes CPU opponents. Only online humans are shown in HUD.
   // A missing rank never hides a verified race/results phase or invents a rank.

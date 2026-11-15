@@ -20,6 +20,7 @@
  **/
 
 #include "New3D.h"
+#include "Graphics/TextureOverlay.h"
 #include "Vec.h"
 #include <cmath>
 #include <algorithm>
@@ -128,6 +129,26 @@ void CNew3D::AttachMemory(const UINT32 *cullingRAMLoPtr, const UINT32 *cullingRA
 
 	m_textureBank[0].AttachMemory(textureRAMPtr);
 	m_textureBank[1].AttachMemory(textureRAMPtr + (2048*1024));
+}
+
+void CNew3D::AttachTextureOverlay(const TextureOverlay *overlay)
+{
+	m_textureOverlay = overlay;
+	m_textureBank[2].AttachMemory(overlay ? overlay->ram.data() : nullptr);
+
+	if (overlay) {
+		// the page is static: upload it once, all mipmap levels
+		static constexpr int mipXBase[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
+		static constexpr int mipYBase[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023 };
+		int width = 2048, height = 1024;
+		for (int i = 0; i < m_textureBank[2].GetNumberOfLevels(); i++) {
+			m_textureBank[2].UploadTextures(i, mipXBase[i], mipYBase[i], width, height);
+			width = (width > 1) ? width / 2 : 1;
+			height = (height > 1) ? height / 2 : 1;
+		}
+	}
+
+	m_romMap.clear();		// cached ROM models may now have to be (un)redirected
 }
 
 void CNew3D::SetStepping(Game::Stepping stepping)
@@ -367,6 +388,8 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer)
 	m_textureBank[0].Bind();
 	glActiveTexture(GL_TEXTURE1);
 	m_textureBank[1].Bind();
+	glActiveTexture(GL_TEXTURE2);
+	m_textureBank[2].Bind();
 	glActiveTexture(GL_TEXTURE0);
 
 	bool hasOverlay = false;		// (high priority polys)
@@ -679,7 +702,7 @@ bool CNew3D::DrawModel(UINT32 modelAddr)
 	m->alpha			= m_nodeAttribs.currentModelAlpha;
 
 	if (!cached) {
-		CacheModel(m, modelAddress);
+		CacheModel(m, modelAddress, modelAddr);
 	}
 
 	return true;
@@ -1467,7 +1490,7 @@ void CNew3D::SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph)
 	}
 }
 
-void CNew3D::CacheModel(Model *m, const UINT32 *data)
+void CNew3D::CacheModel(Model *m, const UINT32 *data, UINT32 modelAddr)
 {
 	if (data == nullptr) {
 		return;
@@ -1487,6 +1510,9 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 	}
 
 	int numTriangles = ph.NumTrianglesTotal();
+
+	// Models listed in the texture overlay draw their textures from the overlay page
+	const bool overlayModel = m_textureOverlay && IsVROMModel(modelAddr) && m_textureOverlay->HasModel(modelAddr);
 
 	// Cache all polygons
 	do {
@@ -1512,6 +1538,15 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 
 				//set mesh values
 				SetMeshValues(currentMesh, ph);
+
+				if (overlayModel && currentMesh->textured) {
+					unsigned overlayX, overlayY;
+					if (m_textureOverlay->Lookup(ph.X(), ph.Y() + ph.Page() * 1024, ph.TexWidth(), ph.TexHeight(), overlayX, overlayY)) {
+						currentMesh->x = overlayX;
+						currentMesh->y = overlayY;
+						currentMesh->overlay = true;
+					}
+				}
 			}
 			else
 				currentMesh = &sMap[hash];

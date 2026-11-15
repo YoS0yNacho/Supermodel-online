@@ -320,6 +320,7 @@ private:
   bool HoldForDaytonaNetwork();
   bool HoldForScudNetwork();
   bool HoldForLemans24Network();
+  bool HoldForDirtdvlsNetwork();
   C93C46      EEPROM;         // 93C46 EEPROM
   CTileGen    TileGen;        // Sega 2D tile generator
   CReal3D     GPU;            // Real3D graphics hardware
@@ -334,6 +335,7 @@ private:
   INetBoard   *NetBoard;      // Net board
   bool		    m_runNetBoard;
   bool          m_bootSceneWarned = false;  // dayto2pe boot-scene patch refused (logged once)
+  bool          m_mixReverseWarned = false; // dayto2pe MIX Reverse patch refused (logged once)
 };
 
 

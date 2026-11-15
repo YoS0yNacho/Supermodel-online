@@ -51,11 +51,15 @@ bool CModel3::HoldForGameNetwork()
               m_config["NetSpectate"].ValueAsDefault<bool>(false))
         : Lemans24::IsSupportedGame(m_game.name)
             ? Lemans24::ConfigureRelayEeprom(image, unsigned(index), m_game.name)
-            : Scud::ConfigureRelayEeprom(image, unsigned(index), m_game.name);
+            : Dirtdvls::IsSupportedGame(m_game.name)
+                ? Dirtdvls::ConfigureRelayEeprom(image, unsigned(index), m_game.name)
+                : Scud::ConfigureRelayEeprom(image, unsigned(index), m_game.name);
 
-    if (configured && NativeSessionSettings::Apply(image, m_game.name,
-          m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0),
-          m_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0)))
+    const unsigned roomOptions = m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+    const unsigned carNumber = m_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0);
+    const bool applied = configured &&
+        NativeSessionSettings::Apply(image, m_game.name, roomOptions, carNumber);
+    if (applied)
     {
       EEPROM.SetImage(image);
       m_gameNetwork.m_relayConfigured = true;
@@ -64,11 +68,23 @@ bool CModel3::HoldForGameNetwork()
       InfoLog("Relay: configured %s cabinet %u; NVRAM changes are session-only",
           index == 0 ? "MASTER" : "SLAVE", unsigned(index + 1));
     }
+    else if (configured)
+    {
+      // The EEPROM image is fine; the room settings were rejected. Waiting
+      // would not change anything, so report it now and boot with the native
+      // defaults (every cabinet SLAVE) instead of a silent 30 s black screen.
+      m_gameNetwork.m_relayBootstrapFrames = 1800;
+      ErrorLog("Relay: room options %u / car %u are not valid for %s; native roles were NOT assigned. "
+               "Update every client and the relay, then recreate the room.",
+               roomOptions, carNumber, m_game.name.c_str());
+    }
     else
     {
       m_gameNetwork.m_relayBootstrap = true;
       if (++m_gameNetwork.m_relayBootstrapFrames == 1800)
-        ErrorLog("Relay: game EEPROM did not initialize; check the test screen and restart.");
+        ErrorLog("Relay: %s EEPROM did not initialize (image not recognized after 30 s); "
+                 "native roles were NOT assigned. Delete NVRAM/%s.nv or check the test screen and restart.",
+                 m_game.name.c_str(), m_game.name.c_str());
     }
   }
 
@@ -78,5 +94,6 @@ bool CModel3::HoldForGameNetwork()
   if (Dayto2pe::IsSupportedGame(m_game.name)) return HoldForDaytonaNetwork();
   if (Scud::IsSupportedGame(m_game.name)) return HoldForScudNetwork();
   if (Lemans24::IsSupportedGame(m_game.name)) return HoldForLemans24Network();
+  if (Dirtdvls::IsSupportedGame(m_game.name)) return HoldForDirtdvlsNetwork();
   return false;
 }

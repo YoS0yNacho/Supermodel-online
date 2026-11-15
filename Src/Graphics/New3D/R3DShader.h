@@ -60,10 +60,11 @@ private:
 	GLuint m_fragmentShader;
 
 	// mesh uniform locations
-	GLint m_locTextureBank[2];		// 2 banks
+	GLint m_locTextureBank[3];		// texture RAM pages 0 and 1, texture overlay page
 	GLint m_locTexture1Enabled;		// base texture
 	GLint m_locTexture2Enabled;		// micro texture
 	GLint m_locTexturePage;
+	GLint m_locTextureBaseBank;
 	GLint m_locTextureAlpha;
 	GLint m_locAlphaTest;
 	GLint m_locMicroTexMinLOD;
@@ -91,6 +92,7 @@ private:
 	bool	m_translatorMap;
 	bool	m_polyAlpha;
 	int		m_texturePage;
+	int		m_textureBaseBank;
 
 	bool	m_layered;
 	bool	m_noLosReturn;

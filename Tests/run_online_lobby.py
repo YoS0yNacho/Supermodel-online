@@ -11,7 +11,7 @@ online = relay.lobby
 
 
 class Client:
-    async def connect(self, port, name='Player', mask=127, enabled=1):
+    async def connect(self, port, name='Player', mask=255, enabled=1):
         self.reader, self.writer = await asyncio.open_connection('127.0.0.1', port)
         self.writer.write(relay.frame(b'HEL1', b'test GUI') + relay.frame(b'OEH6', online.HELLO.pack(1, mask, enabled, online.fixed(name, 32))))
         assert (await self.next())[0] == b'HEL1'
@@ -117,7 +117,8 @@ async def main():
                 assert (await asyncio.wait_for(relay.read_frame(r), 3))[0] == b'HEL1'
                 kind, data, _ = await relay.read_frame(r)
                 assert kind == b'RLA1' and relay.READY.unpack(data) == (1, index, 2, ch)
-            payload = ((bytes(range(256)) * 13)[:3264] if game == 5 else
+            payload = ((bytes(range(256)) * 14)[:3584] if game == 7 else
+                       (bytes(range(256)) * 13)[:3264] if game == 5 else
                        bytes(range(256)) * 8 if game in (4,6) else
                        bytes(range(256)) * 4 if game >= 2 else
                        bytes([73]) * 848)
@@ -246,6 +247,17 @@ async def main():
         for c in lm: c.close()
         await hub.destroy(hub.rooms[lm_room], 'test complete')
         print('PASS lemans24 six-cabinet waiting-room limit')
+
+        # dirtdvls supports at most four linked cabinets (MACHINE ID 1..4).
+        dd = [await client(name=f'Dirt{i}') for i in range(5)]
+        dd_room = await dd[0].create(7)
+        for c in dd[1:4]:
+            await c.join(dd_room)
+        dd[4].send(b'OLJ1', struct.pack('<I', dd_room))
+        assert b'full' in await dd[4].until(b'OLE1')
+        for c in dd: c.close()
+        await hub.destroy(hub.rooms[dd_room], 'test complete')
+        print('PASS dirtdvls four-cabinet waiting-room limit')
 
         # Independent lobbies, limits, and waiting-room departures.
         a, b, c = await client(), await client(), await client()

@@ -157,6 +157,7 @@
  */
 
 #include "Legacy3D.h"
+#include "Graphics/TextureOverlay.h"
 
 #include "Supermodel.h"
 #include "Shaders3D.h"  // fragment and vertex shaders
@@ -220,9 +221,20 @@ void CLegacy3D::DecodeTexture(int format, int x, int y, int width, int height)
     //ErrorLog("Encountered a texture that is too large (%d,%d,%d,%d)", x, y, width, height);
     return;
   }
+
+  // Bit 3 of the format selects the overlay sheet, which decodes the overlay page instead of texture RAM
+  const bool overlay = (format & 8) != 0;
+  format &= 7;
+  const UINT16 *textureRAM = this->textureRAM;
+  if (overlay)
+  {
+    if (m_overlaySheet == NULL || m_textureOverlay == NULL || (y+height) > (int) TextureOverlay::kHeight)
+      return;
+    textureRAM = m_textureOverlay->ram.data();
+  }
   
   // Map Model3 format to texture sheet
-  TexSheet *texSheet = fmtToTexSheet[format];
+  TexSheet *texSheet = overlay ? m_overlaySheet : fmtToTexSheet[format];
   
   // Check to see if ALL texture tiles have been properly decoded on texture sheet
   if ((texSheet->texFormat[y/32][x/32] == format) && (texSheet->texWidth[y/32][x/32] >= width) && (texSheet->texHeight[y/32][x/32] >= height))
@@ -387,9 +399,11 @@ void CLegacy3D::UploadTextures(unsigned level, unsigned x, unsigned y, unsigned 
   }
 #endif
 
-  // Update all texture sheets
+  // Update all texture sheets (the overlay sheet does not show texture RAM)
   for (size_t texSheet = 0; texSheet < numTexSheets; texSheet++)
   {
+    if (&texSheets[texSheet] == m_overlaySheet)
+      continue;
     for (size_t xi = x/32; xi < (x+width)/32; xi++)
     {
       for (size_t yi = y/32; yi < (y+height)/32; yi++)
@@ -1179,6 +1193,22 @@ void CLegacy3D::AttachMemory(const UINT32 *cullingRAMLoPtr, const UINT32 *cullin
   DebugLog("Legacy3D attached Real3D memory regions\n");
 }
 
+void CLegacy3D::AttachTextureOverlay(const TextureOverlay *overlay)
+{
+  m_textureOverlay = overlay;
+  if (m_overlaySheet != NULL)
+  {
+    // Forget what was decoded from a previous overlay
+    memset(m_overlaySheet->texWidth, 0xFF, sizeof(m_overlaySheet->texWidth));
+    memset(m_overlaySheet->texHeight, 0xFF, sizeof(m_overlaySheet->texHeight));
+    memset(m_overlaySheet->texFormat, 0xFF, sizeof(m_overlaySheet->texFormat));
+  }
+  // Cached VROM models may now have to be (un)redirected
+  if (VROMCache.lut != NULL && VROMCache.Models != NULL)
+    ClearModelCache(&VROMCache);
+  DebugLog("Legacy3D %s a texture overlay\n", overlay ? "attached" : "detached");
+}
+
 void CLegacy3D::SetStepping(Game::Stepping stepping)
 {
   // The Pro-1000 uses the Step 1.0 formats
@@ -1229,6 +1259,8 @@ Result CLegacy3D::SetupGLObjects()
         int sheetNum = defaultFmtToTexSheetNum[fmt];
         idealTexSheets = std::max<int>(idealTexSheets, sheetNum + 1);
     }
+    const int overlaySheetNum = idealTexSheets;  // one more for the texture overlay page, if there is room
+    idealTexSheets++;
 
     // Get upper limit for number of texture maps to use from max number of texture units supported by video card
     GLint glMaxTexUnits;
@@ -1361,6 +1393,9 @@ Result CLegacy3D::SetupGLObjects()
         int sheetNum = defaultFmtToTexSheetNum[fmt] % numTexSheets;
         fmtToTexSheet[fmt] = &texSheets[sheetNum];
     }
+    m_overlaySheet = (int(numTexSheets) > overlaySheetNum) ? &texSheets[overlaySheetNum] : NULL;
+    if (m_overlaySheet == NULL)
+        InfoLog("No texture sheet available for a texture overlay page.");
 
     InfoLog("Mapped %u Model3 texture formats to %u texture sheet(s) in %u %ux%u-texel texture map(s).", 8, numTexSheets, numTexMaps, mapSize, mapSize);
 
