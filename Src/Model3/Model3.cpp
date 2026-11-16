@@ -225,6 +225,7 @@
 #include "Network/Games/Daytona2/MixReverse.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
 #include "Network/Games/Srally2/PpcEntryPackingResearch.h"
+#include "Network/Games/Scud/SixteenPlayerResearch.h"
 
 #include <chrono>
 #include <system_error>
@@ -2960,6 +2961,19 @@ Result CModel3::Init(const Game &game, const ROMSet &rom_set)
       return Result::FAIL;
     }
     InfoLog("Sega Rally 2: applied the selected 8-player ROM patch.");
+  }
+  if (ScudResearch::Selected(m_config) && game.name == "scudplus")
+  {
+    // The 16-player patch only touches the 2 MB fixed CROM (0xFFE00000-0xFFFFFFFF).
+    const auto result = Scud::SixteenPlayerPpcResearch::ApplyBigEndianCrom(
+        &crom[8*0x100000 - Scud::SixteenPlayerPpcResearch::FixedCromSize],
+        Scud::SixteenPlayerPpcResearch::FixedCromSize, game.name.c_str(), true);
+    if (result != Scud::SixteenPlayerPpcResearch::Result::Applied)
+    {
+      ErrorLog("Scud Race Plus 16-player ROM patch mismatch (%d); refusing to boot.", int(result));
+      return Result::FAIL;
+    }
+    InfoLog("Scud Race Plus: applied the selected 16-player ROM patch.");
   }
   if (crom_size < 8*0x100000)
     rom_set.get_rom("banked_crom").CopyTo(&crom[0], 8*0x100000 - crom_size);

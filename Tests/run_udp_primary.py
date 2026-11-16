@@ -27,6 +27,7 @@ from run_online_lobby import Client
 online = relay.lobby
 SCUD = [name for name, _ in online.GAMES].index("scud")
 SRALLY2 = [name for name, _ in online.GAMES].index("srally2")
+SCUD16 = [name for name, _ in online.GAMES].index("scudplus_16")
 
 
 def build(sanitize):
@@ -37,7 +38,7 @@ def build(sanitize):
                "Src/Network/Games/GameNetBoard.cpp",
                "Src/Network/Games/Scud/ScudNetBoard.cpp",
                "Src/Network/Games/Srally2/Srally2NetBoard.cpp",
-               "Src/Network/Games/Lemans24/Lemans24NetBoard.cpp",
+               "Src/Network/Games/Lemans24/Lemans24NetBoard.cpp", "Src/Network/Games/Dirtdvls/DirtdvlsNetBoard.cpp",
                "Src/Model3/NetBoardLink.cpp", "Src/Network/NetServer.cpp",
                "Src/Network/TCPConnection.cpp", "Src/Util/NewConfig.cpp",
                "Src/Util/Format.cpp", "Src/OSD/Thread.cpp"]
@@ -80,7 +81,8 @@ async def case(binary, scenario, n, tick_rate=20, latency_ms=0, profile=None, tc
     # so does `latency`: it checks the merge of late TCP control words, which
     # needs TCP to lag UDP by more than the one-way delay.
     star = not scenario.startswith("ring") and scenario != "latency" and "ring" not in scenario
-    game = "srally2" if scenario.startswith("srally2") else "scud"
+    game = "srally2" if scenario.startswith("srally2") else "scudplus_16" if scenario.startswith("scud16") else "scud"
+    scenario = scenario[len("scud16-"):] if scenario.startswith("scud16-") else scenario
     logs = []
     # Under an impairment profile the relay's fake latency carries the TCP
     # delay/jitter (order preserving, like TCP); the Filter's Impairment does
@@ -110,7 +112,7 @@ async def case(binary, scenario, n, tick_rate=20, latency_ms=0, profile=None, tc
     clients = [await Client().connect(port, name=f"P{i}", enabled=65 if star else 1) for i in range(n)]
     proc = None
     try:
-        room = await clients[0].create(SRALLY2 if game == "srally2" else SCUD)
+        room = await clients[0].create(SRALLY2 if game == "srally2" else SCUD16 if game == "scudplus_16" else SCUD)
         for c in clients[1:]:
             await c.join(room)
         clients[0].send(b"OLT1", struct.pack("<I", room))
@@ -182,6 +184,8 @@ async def main(binary, only=None, tc=False):
              ("ring", 4), ("ring-latency", 4, 20, 40), ("star", 4), ("star-latency", 4, 20, 40)]
     cases += [("netem", 3, 20, 0, profile) for profile in netem.PROFILES.values()]
     cases += [("srally2-star", 4, 60), ("srally2-ring", 4, 60), ("srally2-star-latency", 4, 60, 40), ("srally2-ring-latency", 4, 60, 40)]
+    # Scud Race Plus 16-player: the first cabinet counts beyond the stock 8 through the real HLE boards.
+    cases += [("scud16-primary", 9, 60), ("scud16-primary", 16, 60)]
     if only:
         cases = [c for c in cases if c[0] == only or (c[0] == "netem" and c[4].name == only)]
     for args in cases:

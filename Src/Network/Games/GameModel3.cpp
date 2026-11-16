@@ -53,12 +53,14 @@ bool CModel3::HoldForGameNetwork()
             ? Lemans24::ConfigureRelayEeprom(image, unsigned(index), m_game.name)
             : Dirtdvls::IsSupportedGame(m_game.name)
                 ? Dirtdvls::ConfigureRelayEeprom(image, unsigned(index), m_game.name)
-                : Scud::ConfigureRelayEeprom(image, unsigned(index), m_game.name);
+                : Scud::ConfigureRelayEeprom(image, unsigned(index), m_game.name,
+                      ScudResearch::Selected(m_config));
 
     const unsigned roomOptions = m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
     const unsigned carNumber = m_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0);
     const bool applied = configured &&
-        NativeSessionSettings::Apply(image, m_game.name, roomOptions, carNumber);
+        NativeSessionSettings::Apply(image, m_game.name, roomOptions, carNumber,
+            ScudResearch::Selected(m_config));
     if (applied)
     {
       EEPROM.SetImage(image);

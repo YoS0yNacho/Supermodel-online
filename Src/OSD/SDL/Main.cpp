@@ -2091,6 +2091,8 @@ static void Help(void)
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
   puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
   puts("  -lobby-options=<n>      Room options mask of that room (test rigs; 1024 = 60 Hz video)");
+  puts("  -lobby-car=<n>          Native CAR NUMBER the room assigned to this cabinet (test rigs)");
+  puts("  -scudplus-16            Scud Race Plus 16-player research ROM patch (test rigs; the Online tab sets it per room)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
   puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
   puts("  -no-hidden-car-textures Do not load Scud Race Plus secret-vehicle textures for other courses");
@@ -2177,6 +2179,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-lobby-ticket",          "NetRelayTicket"          },
     { "-net-smoothing",         "NetPredictionSmoothing"  },
     { "-lobby-options",         "NetNativeRoomOptions"    },
+    { "-lobby-car",             "NetNativeCarNumber"      },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };
@@ -2229,6 +2232,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-no-hidden-car-textures", { "ScudPlusHiddenCarTextures", false } },
     { "-simulate-netboard",   { "SimulateNet",      true } },
     { "-async-netboard",      { "AsyncNet",         true } },
+    { "-scudplus-16",         { "NetScudplusSixteen", true } },
     { "-sync-netboard",       { "AsyncNet",         false } },
     { "-emulate-netboard",    { "SimulateNet",      false } },
     { "-no-force-feedback",   { "ForceFeedback",    false } },
@@ -2548,6 +2552,7 @@ static int RunSession(int argc, char **argv)
     cmd_line.config.Set("NetRoomRealPlayers", false);
     cmd_line.config.Set("NetRoomNoCollisions", false);
     cmd_line.config.Set("NetSrally2Eight", false);
+    cmd_line.config.Set("NetScudplusSixteen", false);
     cmd_line.config.Set("NetNativeRoomOptions", 0u);
     cmd_line.config.Set("NetNativeCarNumber", 0u);
     auto gui = RunGUI(s_configFilePath, launcherFile, guiOptions);
@@ -2565,6 +2570,7 @@ static int RunSession(int argc, char **argv)
       cmd_line.config.Set("NetRoomRealPlayers", gui.realPlayers);
       cmd_line.config.Set("NetRoomNoCollisions", gui.noCollisions);
       cmd_line.config.Set("NetSrally2Eight", gui.rallyEight);
+      cmd_line.config.Set("NetScudplusSixteen", gui.scudSixteen);
       cmd_line.config.Set("NetNativeRoomOptions", gui.nativeRoomOptions);
       cmd_line.config.Set("NetNativeCarNumber", gui.nativeCarNumber);
       cmd_line.config.Set("NetSpectate", gui.spectate);

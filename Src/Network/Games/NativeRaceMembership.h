@@ -5,9 +5,10 @@
 #include "RaceStart.h"
 #include <array>
 namespace GameNetwork {
-inline uint32_t ScudRaceParticipants(unsigned machines,unsigned local,unsigned humans,
-                                     const std::array<uint8_t,8>& players) {
-  if(!machines || machines>8 || !humans || humans>8 || !local || local>machines) return 0;
+template<size_t N> uint32_t ScudRaceParticipants(unsigned machines,unsigned local,unsigned humans,
+                                                 const std::array<uint8_t,N>& players) {
+  // N is the compiled cabinet ceiling (8 stock, 16 with the Scud Race Plus research patch).
+  if(!machines || machines>N || !humans || humans>N || !local || local>machines) return 0;
   uint32_t mask=0;
   for(unsigned i=0;i<humans;++i) {
     if(!players[i] || players[i]>machines) return 0;

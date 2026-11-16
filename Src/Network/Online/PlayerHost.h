@@ -33,19 +33,19 @@ public:
  bool Armed()const{return armed;}
  unsigned Status()const{return failed?3u:started?2u:1u;}
  bool Configure(const Config& c){
-  if(failed || stop || !bound || c.game>=8 || c.tick<5 || c.tick>60 || c.members.size()<2 || c.members.size()>Capacity(c.game))return false;
+  if(failed || stop || !bound || c.game>=9 || c.tick<5 || c.tick>60 || c.members.size()<2 || c.members.size()>Capacity(c.game))return false;
   for(size_t i=0;i<c.members.size();++i){bool a=false,b=false;for(unsigned j=0;j<16;++j){a|=c.members[i].ticket[j]!=0;b|=c.members[i].cookie[j]!=0;}if(!a||!b)return false;
    for(size_t j=0;j<i;++j)if(c.members[i].ticket==c.members[j].ticket || c.members[i].cookie==c.members[j].cookie)return false;
   }
   std::lock_guard<std::mutex> l(mutex);if(configReady)return false;config=c;configReady=true;return true;
  }
  bool HostRoom(const PlayerRoom::Settings& value){
-  std::lock_guard<std::mutex> l(mutex);if(roomReady||configReady||!bound||failed||stop||value.game>=8||value.tick<5||value.tick>60||!value.id||value.port!=port)return false;
+  std::lock_guard<std::mutex> l(mutex);if(roomReady||configReady||!bound||failed||stop||value.game>=9||value.tick<5||value.tick>60||!value.id||value.port!=port)return false;
   roomSettings=value;roomReady=true;return true;
  }
- static unsigned Capacity(unsigned game){return game<2?16:game==4?Srally2Research::StockCapacity:game==5?6:game==7?4:8;}
- static uint64_t Guid(unsigned game){static const uint64_t g[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,Srally2Research::StockGuid,0x5bf177da3487a,Srally2Research::Guid,0x5bf177da3487c};return game<8?g[game]:0;}
- static size_t Segment(unsigned game){static const size_t s[]={848,848,1024,1024,2048,3264,2048,3584};return game<8?s[game]:0;}
+ static unsigned Capacity(unsigned game){return game<2?16:game==4?Srally2Research::StockCapacity:game==5?6:game==7?4:game==8?ScudResearch::Capacity:8;}
+ static uint64_t Guid(unsigned game){static const uint64_t g[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,Srally2Research::StockGuid,0x5bf177da3487a,Srally2Research::Guid,0x5bf177da3487c,ScudResearch::Guid};return game<9?g[game]:0;}
+ static size_t Segment(unsigned game){static const size_t s[]={848,848,1024,1024,2048,3264,2048,3584,1024};return game<9?s[game]:0;}
 private:
  using Socket=RelayUpnp::Socket;static constexpr Socket Bad=RelayUpnp::Bad;
  using Clock=std::chrono::steady_clock;

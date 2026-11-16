@@ -4,11 +4,16 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include "SixteenPlayerResearch.h"
 namespace Scud {
-constexpr unsigned PacketSize = 0x400, MaxCabinets = 8, MaxCars = 40;
+// MaxCabinets is the buffer/decoder ceiling; the selected-room capacity is 8 or 16.
+constexpr unsigned PacketSize = 0x400, MaxCabinets = ScudResearch::Capacity, MaxCars = 40;
 inline bool IsSupportedGame(const std::string& game) { return game == "scud" || game == "scudplus"; }
-inline uint64_t ProtocolGUID(const std::string& game) {
-  return game == "scud" ? 0x5bf177da34876ULL : game == "scudplus" ? 0x5bf177da34877ULL : 0;
+inline uint64_t ProtocolGUID(const std::string& game, bool sixteen=false) {
+  return game == "scud" ? 0x5bf177da34876ULL : game == "scudplus" ? ScudResearch::LinkGuid(sixteen) : 0;
+}
+inline unsigned CabinetCapacity(const std::string& game, bool sixteen=false) {
+  return game == "scudplus" ? ScudResearch::CabinetCapacity(sixteen) : ScudResearch::StockCapacity;
 }
 inline bool AtStartGate(unsigned current, unsigned next, unsigned sub) {
   // Independently disassembled: scud FFF2652C / scudplus FFF282D8.
@@ -25,12 +30,13 @@ inline uint16_t SettingsCRC(const EepromImage& image) {
   }
   return crc;
 }
-inline bool ConfigureRelayEeprom(EepromImage& image, unsigned index, const std::string& game) {
-  if (!IsSupportedGame(game) || index >= MaxCabinets || image[0]!=0x4d33 ||
+inline bool ConfigureRelayEeprom(EepromImage& image, unsigned index, const std::string& game, bool sixteen=false) {
+  if (!IsSupportedGame(game) || index >= CabinetCapacity(game, sixteen) || image[0]!=0x4d33 ||
       image[1]!=0x5345 || image[2]!=0x4741 || image[4]!=0xa218 ||
       image[5]!=(game=="scud" ? 0x0103 : 0x0105) || image[3]!=SettingsCRC(image)) return false;
   // Both native service tables map RAM 0x10011e to role (0 SINGLE,
-  // 1 MASTER, 2 SLAVE) and 0x10011f to car INDEX 0..7, displayed as 1..8.
+  // 1 MASTER, 2 SLAVE) and 0x10011f to car INDEX 0..7, displayed as 1..8
+  // (0..15 with the 16-player Scud Race Plus research patch).
   // The ROM reads each EEPROM word with sth, so role is the HIGH byte.
   // Scud descriptor FFF9A514; Plus FFFCC798. Preserve unrelated settings.
   image[15]=uint16_t(((index==0 ? 1 : 2)<<8)|index);

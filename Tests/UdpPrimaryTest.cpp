@@ -55,6 +55,7 @@ struct Cabinet
   {
     config.Set("Network", true);
     config.Set("NetSrally2Eight", false);
+    config.Set("NetScudplusSixteen", game == "scudplus_16"); // 9..16 cabinets need the Scud Race Plus research mode on the HLE board too
     config.Set("NetRelay", relay);
     config.Set("NetRelayTicket", ticket);
     config.Set("AsyncNet", true);
@@ -64,7 +65,7 @@ struct Cabinet
     server = std::make_shared<CNetServer>(1970, "UDP primary test", false);
     CHECK(server->Start());
     board = std::make_unique<CSimNetBoard>(config, server);
-    Game info; info.name = game; if (game == "scudplus") info.parent = "scud";
+    Game info; info.name = game == "scudplus_16" ? "scudplus" : game; if (info.name == "scudplus") info.parent = "scud";
     info.netboard_present = true;
     board->GetGame(info);
     CHECK(board->Init(ram.data(), buffer.data()) == Result::OKAY);

@@ -653,6 +653,7 @@ xcopy /D /Y "$(ProjectDir)..\Assets\*" "$(TargetDir)Assets"</Command>
     <ClInclude Include="..\Src\Network\Games\Scud\Collision.h" />
     <ClInclude Include="..\Src\Network\Games\Scud\Policy.h" />
     <ClInclude Include="..\Src\Network\Games\Scud\Prediction.h" />
+    <ClInclude Include="..\Src\Network\Games\Scud\SixteenPlayerResearch.h" />
     <ClInclude Include="..\Src\Network\Games\Scud\RaceOptions.h" />
     <ClInclude Include="..\Src\Network\Games\Scud\SecretCars.h" />
     <ClInclude Include="..\Src\Network\Games\Srally2\MultiStartResearch.h" />

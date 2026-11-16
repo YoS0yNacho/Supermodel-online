@@ -34,8 +34,8 @@ int main(int argc,char**argv) {
   Online::RoomChatClient badChat;badChat.Connect("invalid:::ep","abcd","P");assert(badChat.Get().closed&&!badChat.Get().error.empty());
   Online::RoomChatClient cancelChat;cancelChat.Connect("192.0.2.1:1970",std::string(32,'a'),"P");
   const auto beforeChat=std::chrono::steady_clock::now();cancelChat.Disconnect();assert(std::chrono::steady_clock::now()-beforeChat<std::chrono::milliseconds(100));
-  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c};
-  const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584};
+  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c,0x5bf177da3487d};
+  const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584,1024};
   static_assert(sizeof(guids)/sizeof(*guids)==Online::GameCount);
   static_assert(sizeof(sizes)/sizeof(*sizes)==Online::GameCount);
   for(unsigned game=0;game<Online::GameCount;++game) {
@@ -127,7 +127,7 @@ int main(int argc,char**argv) {
     // reachability test the creator is handed off to its own PlayerHost
     // (127.0.0.1), joiners are redirected to the creator and the central relay
     // only lists the room. The hosted room must accept the current GUI HELLO:
-    // all eight ROM mask bits and capability bits up to 256 (60 Hz video).
+    // all nine ROM mask bits and capability bits up to 256 (60 Hz video).
     const unsigned game=7;
     const uint16_t hostPort=uint16_t(20000+(port*7)%30000);
     Online::LobbyClient master,slave;
@@ -165,7 +165,7 @@ int main(int argc,char**argv) {
     l1.Send(payload.data(),payload.size());Wait([&]{return l0.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);
     std::cout<<"PASS self-hosted room: probe -> creator/joiner handoff -> hosted lobby/chat -> Start Link -> creator-hosted two-channel link: "<<Online::Games[game]<<std::endl;
   }
-  for (unsigned game = 0; game < 2; ++game) {
+  for (unsigned game : {0u, 1u, 8u}) { // both Daytona editions and Scud Race Plus - 16 Player
     constexpr unsigned count = 16;
     std::vector<std::unique_ptr<Online::LobbyClient>> players;
     for (unsigned i = 0; i <= count; ++i) {
@@ -208,7 +208,7 @@ int main(int argc,char**argv) {
       for(unsigned i=0;i<count;++i) if(view.standings[i].car!=count-i||view.standings[i].rank!=i+1||view.standings[i].name!="Cab "+std::to_string(count-i)) return false;
     }return true;});
     assert(rankChats.back()->Get().car==16&&rankChats.back()->Get().count==16);
-    std::vector<uint8_t> payload(848,0xA5),received;
+    std::vector<uint8_t> payload(sizes[game],0xA5),received;
     links[15]->Send(payload.data(),payload.size());
     Wait([&]{return links[0]->TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});
     assert(received==payload);
@@ -223,5 +223,5 @@ int main(int argc,char**argv) {
     std::cout<<"PASS 16 cabinets + car16 chat + 17th rejection + master teardown notifies all + fresh lobby: "<<Online::Games[game]<<std::endl;
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  std::cout<<"PASS ticket parser, nonblocking cancellation, creator order, all seven Online entries"<<std::endl;
+  std::cout<<"PASS ticket parser, nonblocking cancellation, creator order, all nine Online entries"<<std::endl;
 }

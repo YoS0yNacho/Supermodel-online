@@ -13,23 +13,25 @@ constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlay
 constexpr uint32_t AllBits=2047;
 inline bool HasVideo60(uint32_t options){return (options&Video60)!=0;}
 inline bool HasHornet(unsigned game,uint32_t options){return game==0 && (options&Hornet);}
-inline bool HasRealPlayers(unsigned game,uint32_t options){return game<4 && (options&RealPlayers);}
+// Lobby indices 6 (Sega Rally 2 - 8 Player) and 8 (Scud Race Plus - 16 Player)
+// share every native setting of their stock game (4 and 3).
+inline unsigned BaseGame(unsigned game){return game==6?4:game==8?3:game;}
+inline bool HasRealPlayers(unsigned game,uint32_t options){return BaseGame(game)<4 && (options&RealPlayers);}
 // Game 7 (dirtdvls) has no native settings: like Le Mans 24 only Video60 applies.
-inline bool HasNoCollisions(unsigned game,uint32_t options){return game<4 && (options&NoCollisions);}
-inline unsigned BaseGame(unsigned game){return game==6?4:game;}
-inline bool Supported(unsigned game){return game<5 || game==6;}
-inline unsigned CarLimit(unsigned game){return game<2?16:game<4?8:0;}
-inline unsigned DifficultyCount(unsigned game){return game<4?4:(game==4||game==6)?5:0;}
-inline unsigned ModeCount(unsigned game){return game<2?7:game<4?3:(game==4||game==6)?2:0;}
+inline bool HasNoCollisions(unsigned game,uint32_t options){return BaseGame(game)<4 && (options&NoCollisions);}
+inline bool Supported(unsigned game){return game<5 || game==6 || game==8;}
+inline unsigned CarLimit(unsigned game){return game<2?16:game==8?16:game<4?8:0;}
+inline unsigned DifficultyCount(unsigned game){return BaseGame(game)<4?4:BaseGame(game)==4?5:0;}
+inline unsigned ModeCount(unsigned game){return game<2?7:BaseGame(game)<4?3:BaseGame(game)==4?2:0;}
 inline unsigned Difficulty(uint32_t options){return (options>>2)&7;}
 inline unsigned Mode(uint32_t options){return (options>>5)&7;}
 inline bool Valid(unsigned game,uint32_t options){
- if(game>=8 || (options&~AllBits) || ((options&SecretCars)&&game!=0&&game!=3))return false;
- if((options&(RealPlayers|NoCollisions)) && game>=4)return false;
+ if(game>=9 || (options&~AllBits) || ((options&SecretCars)&&game!=0&&BaseGame(game)!=3))return false;
+ if((options&(RealPlayers|NoCollisions)) && BaseGame(game)>=4)return false;
  if(!(options&Enabled))return !(options&~(SecretCars|RealPlayers|NoCollisions|Video60));
  return Supported(game) && Difficulty(options)<DifficultyCount(game) && Mode(options)<ModeCount(game);
 }
-inline uint32_t Defaults(unsigned game){return Supported(game)?Enabled|(game<4?4u:0u):0;}
+inline uint32_t Defaults(unsigned game){return Supported(game)?Enabled|(BaseGame(game)<4?4u:0u):0;}
 inline uint32_t WithDifficulty(uint32_t options,unsigned difficulty){return (options&~28u)|Enabled|(difficulty<<2);}
 inline uint32_t WithMode(uint32_t options,unsigned mode){return (options&~224u)|Enabled|(mode<<5);}
 inline const char* DifficultyName(unsigned game,unsigned value){
@@ -42,7 +44,7 @@ inline const char* ModeName(unsigned game,unsigned value){
  static const char* daytona[]={"Normal (Sprint)","Grand Prix","100 Miles","200 Miles","300 Miles","400 Miles","500 Miles"};
  static const char* scud[]={"Normal (Sprint)","Grand Prix","Endurance"};
  static const char* rally[]={"Normal","Special"};
- return value<ModeCount(game)?(game<2?daytona[value]:game<4?scud[value]:rally[value]):"Invalid";
+ return value<ModeCount(game)?(game<2?daytona[value]:BaseGame(game)<4?scud[value]:rally[value]):"Invalid";
 }
 }
 #endif

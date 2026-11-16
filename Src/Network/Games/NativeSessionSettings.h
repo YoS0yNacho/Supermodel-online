@@ -7,10 +7,14 @@
 #include "Scud/Policy.h"
 #include "Srally2/Policy.h"
 namespace NativeSessionSettings {
-inline bool Apply(std::array<uint16_t,64>& image,const std::string& game,uint32_t options,unsigned carNumber){
- unsigned id=8;
+// `research` selects the optional research entry of a ROM (Scud Race Plus
+// 16-player, lobby game 8): its room validates car numbers 1..16, the stock
+// entry 1..8. The ROM name alone cannot tell the two apart.
+inline bool Apply(std::array<uint16_t,64>& image,const std::string& game,uint32_t options,unsigned carNumber,bool research=false){
+ unsigned id=9;
  const char* names[]={"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","srally2_8p","dirtdvls"};
  for(unsigned i=0;i<8;++i)if(game==names[i])id=i;
+ if(research && id==3)id=8; // Scud Race Plus - 16 Player
  if(!NativeRoomSettings::Valid(id,options) || (carNumber && carNumber>NativeRoomSettings::CarLimit(id)))return false;
  // Le Mans 24 and Dirt Devils have no native difficulty/mode/car settings:
  // only the emulator-side Video60 room option may be set (it never touches the

@@ -22,7 +22,7 @@ struct GuiResult {
   std::vector<std::string> rom_files;
   std::string relay, ticket, player, gameRelay, directoryRelay;
   std::shared_ptr<Online::PlayerHost> playerHost;
-  bool online = false, failed = false, secretCars = false, hornet = false, rallyEight = false, realPlayers = false, noCollisions = false, spectate = false;
+  bool online = false, failed = false, secretCars = false, hornet = false, rallyEight = false, scudSixteen = false, realPlayers = false, noCollisions = false, spectate = false;
   uint32_t nativeRoomOptions = 0, nativeCarNumber = 0;
 };
 // Runs the settings GUI. fileConfig is the complete contents of the config

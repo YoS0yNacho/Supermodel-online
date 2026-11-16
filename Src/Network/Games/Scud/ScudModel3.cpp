@@ -11,21 +11,25 @@ bool CModel3::HoldForScudNetwork()
   route.local=Read8(0x10f002); route.machines=Read8(0x10f001);
   // Capture the native human roster and one-based cabinet owner map.
   route.humans=Read8(0x10f027); route.total=Read32(0x104018);
-  for(unsigned i=0;i<8;++i) route.players[i]=Read8(0x10f028+i);
+  // The 16-player research patch keeps the wide owner map at 0x10f130.
+  const bool sixteen=m_game.name=="scudplus" && ScudResearch::Selected(m_config);
+  const unsigned capacity=Scud::CabinetCapacity(m_game.name,sixteen);
+  const uint32_t roster=ScudResearch::RosterIds(sixteen);
+  for(unsigned i=0;i<capacity;++i) route.players[i]=Read8(roster+i);
   const uint32_t header=Read32(0x10f008),base=Read32(0x1045a0);
   const bool addresses=header>=0x100000 && header<=0x7fffc0 && base>=0x100000 && base<=0x7f0000;
   if(addresses) route.authority=Read8(header+0x18);
   // Record validation failures for diagnostics.
   route.valid=true;
   if(!addresses) { route.valid=false; route.fail|=0x01; }
-  if(!(route.machines>=2 && route.machines<=8)) { route.valid=false; route.fail|=0x02; }
+  if(!(route.machines>=2 && route.machines<=capacity)) { route.valid=false; route.fail|=0x02; }
   if(!(route.local>=1 && route.local<=route.machines)) { route.valid=false; route.fail|=0x04; }
-  if(!(route.humans>=1 && route.humans<=8)) { route.valid=false; route.fail|=0x08; }
+  if(!(route.humans>=1 && route.humans<=capacity)) { route.valid=false; route.fail|=0x08; }
   if(!(route.total>=route.humans && route.total<=Scud::MaxCars)) { route.valid=false; route.fail|=0x10; }
   if(route.valid)
   {
     // Validate the owner map against the active cabinets.
-    std::array<bool,9> participants{};
+    std::array<bool,Scud::MaxCabinets+1> participants{};
     for(unsigned i=0;i<route.humans;++i) {
       const unsigned id=route.players[i];
       if(!id || id>route.machines) { route.valid=false; break; }

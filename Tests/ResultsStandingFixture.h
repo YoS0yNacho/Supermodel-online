@@ -7,7 +7,8 @@
 struct ResultsStandingFixture {
   unsigned game;
   std::vector<uint8_t> ram = std::vector<uint8_t>(0x800000);
-  explicit ResultsStandingFixture(unsigned g):game(g) { Race(); Rank(4); }
+  // Lobby game 8 (Scud Race Plus - 16 Player) samples the same scudplus RAM as game 3.
+  explicit ResultsStandingFixture(unsigned g):game(g==8?3:g) { Race(); Rank(4); }
   uint8_t Read8(uint32_t a) const { assert(a<ram.size()); return ram[a]; }
   uint16_t Read16(uint32_t a) const { return uint16_t((uint16_t(Read8(a))<<8)|Read8(a+1)); }
   uint32_t Read32(uint32_t a) const {

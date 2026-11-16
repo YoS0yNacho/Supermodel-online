@@ -1183,6 +1183,9 @@
     <ClInclude Include="..\Src\Network\Games\Scud\SecretCars.h">
       <Filter>Header Files\Network</Filter>
     </ClInclude>
+    <ClInclude Include="..\Src\Network\Games\Scud\SixteenPlayerResearch.h">
+      <Filter>Header Files\Network</Filter>
+    </ClInclude>
     <ClInclude Include="..\Src\Network\Games\Srally2\MultiStartResearch.h">
       <Filter>Header Files\Network</Filter>
     </ClInclude>

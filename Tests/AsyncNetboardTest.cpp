@@ -68,10 +68,11 @@ struct Cabinet
   std::shared_ptr<CNetServer> server;
   std::unique_ptr<CSimNetBoard> board;
 
-  Cabinet(unsigned in, unsigned out, const std::string& game, unsigned role, unsigned segment, bool legacySettings = false, bool async = true, bool deferredListen = false, const std::string& relayEndpoint = "", bool rallyEight=false)
+  Cabinet(unsigned in, unsigned out, const std::string& game, unsigned role, unsigned segment, bool legacySettings = false, bool async = true, bool deferredListen = false, const std::string& relayEndpoint = "", bool rallyEight=false, bool scudSixteen=false)
   {
     config.Set("Network", true);
     config.Set("NetSrally2Eight",rallyEight);
+    config.Set("NetScudplusSixteen",game=="scudplus"&&segment==1024&&role<0x8000&&async&&scudSixteen);
     config.Set("NetRelay", relayEndpoint);
     config.Set("AsyncNet", async);
     // Obsolete INI entries must not override the new automatic policy.
@@ -323,7 +324,7 @@ int main(int argc, char** argv)
   {
     unsigned role = i;
     if (scenario == "relay" && i == n - 1) role = 0x8000;
-    c.emplace_back(new Cabinet(std::stoul(argv[4 + i]), std::stoul(argv[4 + n + i]), (scenario == "start-mixed-daytona" && i == 1) ? "dayto2pe" : game, role, segment, scenario == "predict-legacy-settings" || scenario == "start-legacy-settings", scenario != "start-async-off", scenario == "startup-deferred", relayCase ? "127.0.0.1:" + std::string(argv[4+n+i]) : "",game=="srally2"&&n>4));
+    c.emplace_back(new Cabinet(std::stoul(argv[4 + i]), std::stoul(argv[4 + n + i]), (scenario == "start-mixed-daytona" && i == 1) ? "dayto2pe" : game, role, segment, scenario == "predict-legacy-settings" || scenario == "start-legacy-settings", scenario != "start-async-off", scenario == "startup-deferred", relayCase ? "127.0.0.1:" + std::string(argv[4+n+i]) : "",game=="srally2"&&n>4,game=="scudplus"&&n>8));
   }
   // Emulate an older peer without entry sync, not a removed user option.
   if (scenario == "start-mismatch") c[1]->board->m_gameNet.m_syncStart = false;
@@ -865,6 +866,19 @@ int main(int argc, char** argv)
         assert(!NativeSessionSettings::Apply(img, name, NativeRoomSettings::Video60 | NativeRoomSettings::Enabled, 0));
         assert(!NativeSessionSettings::Apply(img, name, NativeRoomSettings::RealPlayers, 0));
         assert(!NativeSessionSettings::Apply(img, name, 0, 1));
+      }
+      // Scud Race Plus 16-player rooms assign CAR NUMBERS 1..16; the stock entry stops at 8.
+      {
+        std::array<uint16_t, 64> img{};
+        img[0] = 0x4d33; img[1] = 0x5345; img[2] = 0x4741; img[4] = 0xa218; img[5] = 0x0105; img[3] = Scud::SettingsCRC(img);
+        assert(Scud::ConfigureRelayEeprom(img, 8, "scudplus", true) && !Scud::ConfigureRelayEeprom(img, 8, "scudplus"));
+        for (unsigned car = 1; car <= 16; ++car) {
+          auto stock = img, sixteen = img;
+          assert(NativeSessionSettings::Apply(stock, "scudplus", NativeRoomSettings::Defaults(3), car) == (car <= 8));
+          assert(NativeSessionSettings::Apply(sixteen, "scudplus", NativeRoomSettings::Defaults(8), car, true));
+          assert((sixteen[15] & 0xff) == car - 1 && sixteen[44] == sixteen[15] && sixteen[3] == Scud::SettingsCRC(sixteen));
+        }
+        assert(!NativeSessionSettings::Apply(img, "scudplus", NativeRoomSettings::Defaults(8), 17, true));
       }
       assert(Dirtdvls::AtStartGate(0x01040002u, 0) && !Dirtdvls::LeftStartGate(0x01040002u, 0));
       assert(!Dirtdvls::AtStartGate(0x01040002u, 4) && Dirtdvls::LeftStartGate(0x01040002u, 4));

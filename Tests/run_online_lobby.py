@@ -11,7 +11,7 @@ online = relay.lobby
 
 
 class Client:
-    async def connect(self, port, name='Player', mask=255, enabled=1):
+    async def connect(self, port, name='Player', mask=511, enabled=1):
         self.reader, self.writer = await asyncio.open_connection('127.0.0.1', port)
         self.writer.write(relay.frame(b'HEL1', b'test GUI') + relay.frame(b'OEH6', online.HELLO.pack(1, mask, enabled, online.fixed(name, 32))))
         assert (await self.next())[0] == b'HEL1'
@@ -120,7 +120,7 @@ async def main():
             payload = ((bytes(range(256)) * 14)[:3584] if game == 7 else
                        (bytes(range(256)) * 13)[:3264] if game == 5 else
                        bytes(range(256)) * 8 if game in (4,6) else
-                       bytes(range(256)) * 4 if game >= 2 else
+                       bytes(range(256)) * 4 if game >= 2 else  # scud editions incl. scudplus_16: 1024
                        bytes([73]) * 848)
             channels[0, 0][1].write(relay.frame(b'NBD1', payload))
             assert (await relay.read_frame(channels[1, 1][0]))[1] == payload
@@ -258,6 +258,28 @@ async def main():
         for c in dd: c.close()
         await hub.destroy(hub.rooms[dd_room], 'test complete')
         print('PASS dirtdvls four-cabinet waiting-room limit')
+
+        # scudplus_16 (Scud Race Plus 16-player research patch) admits sixteen cabinets; stock scudplus stays at eight.
+        sp = [await client(name=f'Scud{i}') for i in range(17)]
+        sp_room = await sp[0].create(8)
+        for c in sp[1:16]:
+            await c.join(sp_room)
+        sp[16].send(b'OLJ1', struct.pack('<I', sp_room))
+        assert b'full' in await sp[16].until(b'OLE1')
+        sp[0].send(b'OLT1', struct.pack('<I', sp_room))
+        launches = [online.LAUNCH.unpack(await c.until(b'OLG1')) for c in sp[:16]]
+        assert sorted(x[2] for x in launches) == list(range(16)) and all(x[1] == 8 and x[3] == 16 for x in launches)
+        for c in sp: c.close()
+        await hub.destroy(hub.rooms[sp_room], 'test complete')
+        stock = [await client(name=f'Plus{i}') for i in range(9)]
+        stock_room = await stock[0].create(3)
+        for c in stock[1:8]:
+            await c.join(stock_room)
+        stock[8].send(b'OLJ1', struct.pack('<I', stock_room))
+        assert b'full' in await stock[8].until(b'OLE1')
+        for c in stock: c.close()
+        await hub.destroy(hub.rooms[stock_room], 'test complete')
+        print('PASS scudplus_16 sixteen-cabinet waiting room and launch; stock scudplus eight-cabinet limit')
 
         # Independent lobbies, limits, and waiting-room departures.
         a, b, c = await client(), await client(), await client()

@@ -171,6 +171,8 @@ async def main(binary, only=None):
     cases = [
         ("stream-smoothness", "dayto2pe", 2, .025),
         ("stream-smoothness", "scud", 2, .025),
+        ("scud-predict", "scudplus", 3, .03),
+        ("scud-predict", "scudplus", 16, .01),  # Scud Race Plus 16-player research patch (NetScudplusSixteen)
         ("stream-smoothness", "srally2", 2, .025),
         ("stream-smoothness", "lemans24", 2, .025),
         ("lemans24-predict", "lemans24", 2, .05),

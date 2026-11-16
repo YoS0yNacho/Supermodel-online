@@ -46,12 +46,12 @@ void CSimNetBoard::InitializeGameNet()
  m_gameNet.m_syncStart=m_async && GameNetwork::IsSupportedGame(m_gameInfo.name);
  m_gameNet.m_timedSegments=m_gameNet.m_syncStart || m_gameNet.daytona.m_daytoPrediction;
  m_gameNet.m_preserveRingSelfEcho=m_async && Srally2::PreserveRingSelfEcho(m_gameInfo.name);
- m_gameNet.guid=GameNetwork::GUID(m_gameInfo.name,Srally2Research::Selected(m_config));
+ m_gameNet.guid=GameNetwork::GUID(m_gameInfo.name,GameNetwork::ResearchSelected(m_gameInfo.name,m_config));
 }
 bool CSimNetBoard::ConfigureGameNet()
 {
  m_gameNet.ResetPresentation();ResetStartSync();
- if(m_gameNet.m_syncStart && (m_segmentSize!=GameNetwork::PacketSize(m_gameInfo.name) || m_numMachines>GameNetwork::MaxCabinets(m_gameInfo.name,Srally2Research::Selected(m_config)))) {
+ if(m_gameNet.m_syncStart && (m_segmentSize!=GameNetwork::PacketSize(m_gameInfo.name) || m_numMachines>GameNetwork::MaxCabinets(m_gameInfo.name,GameNetwork::ResearchSelected(m_gameInfo.name,m_config)))) {
   AsyncError("game-specific async networking requires the exact native packet size and supported cabinet count");return false;
  }
  if(m_gameNet.m_syncStart) {

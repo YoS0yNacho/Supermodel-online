@@ -271,7 +271,7 @@ static bool IsPerGameKey(const std::string& key)
     static const std::set<std::string> globalOnly = {
         "ROMDirectory", "GameXMLFile", "OnlineRelay", "OnlineServers", "OnlinePlayer",
         "NetRoomHornet", "NetRoomRealPlayers", "NetRoomNoCollisions",
-        "NetSrally2Eight", "NetNativeRoomOptions", "NetNativeCarNumber",
+        "NetSrally2Eight", "NetScudplusSixteen", "NetNativeRoomOptions", "NetNativeCarNumber",
         "NetSpectate", "NetRoomSecretCars", "NetPredictionSmoothing"
     };
     return globalOnly.find(key) == globalOnly.end();
@@ -1604,11 +1604,12 @@ GuiResult RunGUI(const std::string& configPath, const Util::Config::Node& fileCo
         SDL_GL_SwapWindow(window);
 
         if (!exit && online.PollLaunch(romDirectory)) {
-            result.secretCars = online.launch.game == 3 && (online.launch.roomOptions & 1) != 0;
+            result.secretCars = NativeRoomSettings::BaseGame(online.launch.game) == 3 && (online.launch.roomOptions & 1) != 0;
             result.hornet = NativeRoomSettings::HasHornet(online.launch.game, online.launch.roomOptions);
             result.realPlayers = NativeRoomSettings::HasRealPlayers(online.launch.game, online.launch.roomOptions);
             result.noCollisions = NativeRoomSettings::HasNoCollisions(online.launch.game, online.launch.roomOptions);
             result.rallyEight = online.launch.game == 6;
+            result.scudSixteen = online.launch.game == 8;
             result.nativeRoomOptions = online.launch.roomOptions;
             result.nativeCarNumber = online.launch.carNumber;
             result.spectate = online.spectate;

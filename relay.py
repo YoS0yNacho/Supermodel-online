@@ -4,7 +4,7 @@
 # Run: pypy3 relay.py --bind 0.0.0.0 --port 1970 --tick-rate 20
 # Same protocol/game identities/nonverbose core as the matching client release.
 
-"""GUI-lobby exact dayto2pe / daytona2 / scud / scudplus / srally2 / lemans24 / dirtdvls async relay. Python 3.9+, standard library only.
+"""GUI-lobby exact dayto2pe / daytona2 / scud / scudplus (8 and 16 player) / srally2 / lemans24 / dirtdvls async relay. Python 3.9+, standard library only.
 
 Clients: supermodel -relay=HOST:1970 opens the Online GUI.
 The lobby master presses Start Link.
@@ -31,8 +31,8 @@ GUID = 0x5BF177DA34875  # legacy export, kept for existing Daytona launchers/tes
 GAMES = {GUID: ("dayto2pe", 848), 0x5BF177DA34876: ("scud", 1024),
          0x5BF177DA34877: ("scudplus", 1024), 0x5BF177DA34878: ("daytona2", 848),
          0x5BF177DA34879: ("srally2", 2048), 0x5BF177DA3487B: ("srally2_8p", 2048), 0x5BF177DA3487A: ("lemans24", 3264),
-         0x5BF177DA3487C: ("dirtdvls", 3584)}
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4}
+         0x5BF177DA3487C: ("dirtdvls", 3584), 0x5BF177DA3487D: ("scudplus_16", 1024)}
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16}
 MAX_PLAYERS = 8
 MAX_FRAME_SIZE = 3640  # largest native segment (dirtdvls 3584) + 8-byte header + 48-byte trailer
 MIN_TICK_RATE = 5
@@ -59,7 +59,7 @@ PON1_ID = int.from_bytes(b'PON1', 'little')
 # the ring, and sends the origin its echo at once. Sega Rally 2 is included:
 # its barriers need every segment of every slot to reach the game in order,
 # which the client's publication rule guarantees regardless of the transport.
-STAR_GAMES = frozenset(('dayto2pe', 'daytona2', 'scud', 'scudplus', 'lemans24', 'srally2', 'srally2_8p', 'dirtdvls'))
+STAR_GAMES = frozenset(('dayto2pe', 'daytona2', 'scud', 'scudplus', 'scudplus_16', 'lemans24', 'srally2', 'srally2_8p', 'dirtdvls'))
 STAR = struct.Struct('<II')  # version, flags (1 = fan-out active)
 TIMED_HEADER = struct.Struct('<IHHIIQQQQ')  # magic, version, header size, segment size, hops, source, last hop send, age, uncertainty
 TIMED_MAGIC = 0x31544d44
@@ -1478,8 +1478,8 @@ import socket
 GAMES = [("daytona2", 0x5bf177da34878), ("dayto2pe", 0x5bf177da34875),
          ("scud", 0x5bf177da34876), ("scudplus", 0x5bf177da34877),
          ("srally2", 0x5bf177da34879), ("lemans24", 0x5bf177da3487a), ("srally2_8p", 0x5bf177da3487b),
-         ("dirtdvls", 0x5bf177da3487c)]
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4}
+         ("dirtdvls", 0x5bf177da3487c), ("scudplus_16", 0x5bf177da3487d)]
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16}
 
 
 def max_players_for_game(game):
@@ -1529,14 +1529,19 @@ def chat_fixed(value, size):
     return encoded[:size - 1].ljust(size, b'\0')
 
 
+def base_game(game):
+    # Lobby indices 6 (Sega Rally 2 - 8 Player) and 8 (Scud Race Plus - 16 Player) share the native settings of 4 and 3.
+    return 4 if game == 6 else 3 if game == 8 else game
+
+
 def native_car_limit(game):
-    return 16 if game < 2 else 8 if game < 4 else 0
+    return 16 if game < 2 or game == 8 else 8 if game < 4 else 0
 
 
 def valid_room_options(game, value):
-    if not 0 <= game < 8 or value & ~2047 or (value & 1 and game not in (0, 3)):
+    if not 0 <= game < 9 or value & ~2047 or (value & 1 and base_game(game) not in (0, 3)):
         return False
-    base = 4 if game == 6 else game
+    base = base_game(game)
     if value & 768 and base >= 4:
         return False
     if not value & 2:
@@ -1559,7 +1564,7 @@ class Lobby:
         self.id, self.game, self.title = ident, game, title
         self.members = [owner]
         self.state = 0  # waiting / launching / linked / failed
-        self.options = (2 | (4 if game < 4 else 0)) if (game < 5 or game == 6) and owner.get('native_capable') else 0
+        self.options = (2 | (4 if base_game(game) < 4 else 0)) if (game < 5 or game in (6, 8)) and owner.get('native_capable') else 0
         owner['native_car'] = 1 if native_car_limit(game) else 0
         self.frozen_native_cars = {}
         self.host_mode = self.host_port = 0
@@ -1891,10 +1896,10 @@ class Hub:
             if room.game == 0 and value & 1 and not all(m.get('hornet_capable') for m in room.members):
                 self.error(c, 'Update all room members before enabling Hornet.')
                 return
-            if room.game < 4 and value & 512 and not all(m.get('race_capable') for m in room.members):
+            if base_game(room.game) < 4 and value & 512 and not all(m.get('race_capable') for m in room.members):
                 self.error(c, 'Update all room members before enabling Real players only.')
                 return
-            if room.game < 4 and value & 256 and not all(m.get('race_capable') for m in room.members):
+            if base_game(room.game) < 4 and value & 256 and not all(m.get('race_capable') for m in room.members):
                 self.error(c, 'Update all room members before disabling collisions.')
                 return
             if value & VIDEO60_OPTION and not all(m.get('video_capable') for m in room.members):
@@ -2034,10 +2039,10 @@ class Hub:
                 if room.game == 0 and room.options & 1 and not c.get('hornet_capable'):
                     self.error(c, 'Update this client: Hornet is enabled in this room.')
                     return
-                if room.game < 4 and room.options & 512 and not c.get('race_capable'):
+                if base_game(room.game) < 4 and room.options & 512 and not c.get('race_capable'):
                     self.error(c, 'Update this client: Real players only is enabled in this room.')
                     return
-                if room.game < 4 and room.options & 256 and not c.get('race_capable'):
+                if base_game(room.game) < 4 and room.options & 256 and not c.get('race_capable'):
                     self.error(c, 'Update this client: collisions are disabled in this room.')
                     return
                 if room.options & VIDEO60_OPTION and not c.get('video_capable'):

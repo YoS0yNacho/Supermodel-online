@@ -443,7 +443,7 @@ bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const
   RelayProtocol::Ready ready; memcpy(&ready,p,size);
   std::lock_guard<std::mutex> lock(m_mutex);
   const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
-  unsigned maxPlayers = m_relayGUID==Srally2Research::Guid?8u:0u;
+  unsigned maxPlayers = m_relayGUID==Srally2Research::Guid?8u:m_relayGUID==ScudResearch::Guid?ScudResearch::Capacity:0u;
   for (const char* game : {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "dirtdvls"})
     if (GameNetwork::GUID(game) == m_relayGUID) maxPlayers = GameNetwork::MaxCabinets(game);
   if (ready.version!=RelayProtocol::Version || ready.count<2 || ready.count>maxPlayers || ready.index>=ready.count ||
@@ -482,8 +482,9 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
  std::lock_guard<std::mutex> lock(m_mutex);
  if(c!=m_output || m_udp || m_relayFailed || m_relayAssigned[0] || cfg.version!=1 || !cfg.port || cfg.port>65535 || cfg.count<2 || cfg.count>16 || cfg.index>=cfg.count) return false;
  bool nonzero=false;for(auto b:cfg.token) nonzero|=b!=0;if(!nonzero) return false;
- size_t size=m_relayGUID==Srally2Research::Guid?2048u:0u;
+ size_t size=m_relayGUID==Srally2Research::Guid?2048u:m_relayGUID==ScudResearch::Guid?Scud::PacketSize:0u;
  if(m_relayGUID==Srally2Research::Guid && cfg.count>8)return false;
+ if(m_relayGUID==ScudResearch::Guid && cfg.count>ScudResearch::Capacity)return false;
  for(const char* game:{"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","dirtdvls"})
   if(GameNetwork::GUID(game)==m_relayGUID) { size=GameNetwork::PacketSize(game);if(cfg.count>GameNetwork::MaxCabinets(game)) return false; }
  if(!size) return false;

@@ -24,7 +24,7 @@ static_assert(sizeof(float)==4 && std::numeric_limits<float>::is_iec559,"Scud bi
 struct Routing {
   uint8_t local=0, machines=0, humans=0, authority=0;
   unsigned total=0;
-  std::array<uint8_t,8> players{};
+  std::array<uint8_t,MaxCabinets> players{};
   std::array<bool,MaxCars> cpu{};
   bool valid=false;
   uint8_t fail=0;  // which validation step rejected the snapshot (0 = accepted)
