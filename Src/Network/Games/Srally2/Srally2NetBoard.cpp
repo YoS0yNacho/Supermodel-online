@@ -39,7 +39,7 @@ void CSimNetBoard::ApplySrally2Prediction()
         presentation, m_segmentSize,
         CommRAM + 0x100 + m_segmentSize + offset, m_gameNet.m_predictionFrame,
         sampleAgeFrames, uncertaintyFrames, sourceTimestampUs,
-        remoteCab, unsigned(m_asyncIndex[0]), unsigned(m_numMachines));
+        remoteCab, unsigned(m_asyncIndex[0]), unsigned(m_numMachines), FrameDurationUs());
 
     if (result.human && !state.humanLogged)
     {

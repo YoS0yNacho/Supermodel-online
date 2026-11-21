@@ -24,6 +24,9 @@ struct GuiResult {
   std::shared_ptr<Online::PlayerHost> playerHost;
   bool online = false, failed = false, secretCars = false, hornet = false, rallyEight = false, scudSixteen = false, realPlayers = false, noCollisions = false, spectate = false;
   uint32_t nativeRoomOptions = 0, nativeCarNumber = 0;
+  uint32_t srallycSeat = 0, srallycCount = 0;
+  uint32_t daytonaSeat = 0, daytonaCount = 0;
+  uint32_t sgt24hSeat = 0, sgt24hCount = 0;
 };
 // Runs the settings GUI. fileConfig is the complete contents of the config
 // file; only its global section is edited, all other sections are preserved

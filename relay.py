@@ -28,13 +28,39 @@ import time
 VERSION = 1
 _WINMM_HIGH_RES = False
 GUID = 0x5BF177DA34875  # legacy export, kept for existing Daytona launchers/tests
+INDY500_GUID = 0x5BF177DA3487E
+INDY500_MAX_CABINETS = 8
+SRALLYC_GUID = 0x5BF177DA3487F
+SRALLYC_MAX_CABINETS = 4
+SRALLYC_PAYLOAD = 0x0E00 + 1  # verified Twin/DX Revision C native frame
+SRALLYC_POSE_HELLO = b'Supermodel SRALLYC SRP1'
+SRALLYC_POSE_WIRE = 240  # render-only pose with bounded native row anchors
+DAYTONA_GUID = 0x5BF177DA34880
+DAYTONA_MAX_CABINETS = 8
+DAYTONA_PAYLOAD = 0x0e00 + 1  # original Model 2 Rev A, native data/FF/FE/FC
+DAYTONA_POSE_HELLO = b'Supermodel DAYTONA DYP1'
+DAYTONA_POSE_WIRE = 224
+SGT24H_GUID = 0x5BF177DA34881
+SGT24H_POSE_HELLO = b'Supermodel SGT24H SGP1'
+SGT24H_POSE_WIRE = 960
+SGT24H_MAX_CABINETS = 4
+SGT24H_PAYLOAD = 0x0e00 + 1
+MODEL2_NATIVE_GUIDS = frozenset((INDY500_GUID, SRALLYC_GUID, DAYTONA_GUID, SGT24H_GUID))
+# Keep RLJ2 and the native data/FC ring. A new board-channel HEL1 opts in
+# to opaque, one-datagram presentation bundles on the existing UDP lane.
+INDY500_POSE_HELLO = b'Supermodel INDY500 IPU1'
+INDY500_POSE_WIRE = 116  # 20-byte race/tick header + eight 12-byte poses
+INDY500_RACE_HELLO = b'Supermodel INDY500 IRU1'
+INDY500_RACE_WIRE = 180  # 20-byte race/tick header + eight native 20-byte motion/state records
+INDY500_PAYLOAD = 0x0E00 + 1  # same size for FF, FE, FC and cabinet data
 GAMES = {GUID: ("dayto2pe", 848), 0x5BF177DA34876: ("scud", 1024),
          0x5BF177DA34877: ("scudplus", 1024), 0x5BF177DA34878: ("daytona2", 848),
          0x5BF177DA34879: ("srally2", 2048), 0x5BF177DA3487B: ("srally2_8p", 2048), 0x5BF177DA3487A: ("lemans24", 3264),
-         0x5BF177DA3487C: ("dirtdvls", 3584), 0x5BF177DA3487D: ("scudplus_16", 1024)}
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16}
+         0x5BF177DA3487C: ("dirtdvls", 3584), 0x5BF177DA3487D: ("scudplus_16", 1024),
+         INDY500_GUID: ("indy500", INDY500_PAYLOAD), SRALLYC_GUID: ("srallyc", SRALLYC_PAYLOAD), DAYTONA_GUID: ("daytona", DAYTONA_PAYLOAD), SGT24H_GUID: ("sgt24h", SGT24H_PAYLOAD)}
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16, "indy500": INDY500_MAX_CABINETS, "srallyc": SRALLYC_MAX_CABINETS, "daytona": DAYTONA_MAX_CABINETS, "sgt24h": SGT24H_MAX_CABINETS}
 MAX_PLAYERS = 8
-MAX_FRAME_SIZE = 3640  # largest native segment (dirtdvls 3584) + 8-byte header + 48-byte trailer
+MAX_FRAME_SIZE = 3640  # Model 3: dirtdvls 3584 + 8 + 48; INDY 500: 3585 + 8
 MIN_TICK_RATE = 5
 MAX_TICK_RATE = 60
 DEFAULT_TICK_RATE = 60
@@ -50,6 +76,9 @@ READY = struct.Struct('<IIII')
 TICK_RATE = struct.Struct('<II')
 
 NBD1_ID = int.from_bytes(b'NBD1', 'little')
+IRP1_ID = int.from_bytes(b'IRP1', 'little')
+INDY_PAIR_MIN = HEADER.size + INDY500_MAX_CABINETS + 1 + 2
+INDY_PAIR_MAX = HEADER.size + INDY500_MAX_CABINETS + 1 + INDY500_PAYLOAD + 1
 PIN1_ID = int.from_bytes(b'PIN1', 'little')
 PON1_ID = int.from_bytes(b'PON1', 'little')
 
@@ -95,6 +124,14 @@ def tune_socket(writer):
             with contextlib.suppress(OSError):
                 if sock.getsockopt(socket.SOL_SOCKET, opt) < WRITE_HIGH_WATER:
                     sock.setsockopt(socket.SOL_SOCKET, opt, WRITE_HIGH_WATER)
+
+
+def nbd1_wire_sizes(guid):
+    """Exact NBD1 lengths including the net protocol header, for either forwarder."""
+    native = GAMES[guid][1] + HEADER.size
+    if guid in MODEL2_NATIVE_GUIDS:
+        return frozenset((native,))
+    return frozenset((8, 9, 10, 16, 56, 64, native, native + TIMED_HEADER.size))
 
 
 def frame(kind, payload=b''):
@@ -218,6 +255,7 @@ class FastChannelProtocol(asyncio.Protocol):
                         return
                     break
                 if not ((kind_u32 == NBD1_ID and (size == fast1 or size == fast2 or size in valid_nbd1))
+                        or (kind_u32 == IRP1_ID and room.indy_race_udp and INDY_PAIR_MIN <= size <= INDY_PAIR_MAX)
                         or (kind_u32 == PIN1_ID and size == 16)
                         or (kind_u32 == PON1_ID and size == 24)):
                     self._fail(ValueError('invalid relay data message'))
@@ -258,6 +296,7 @@ class FastChannelProtocol(asyncio.Protocol):
                 self._fail(ValueError('traffic before authorized lobby start'))
                 return
             if not ((kind_u32 == NBD1_ID and (size == fast1 or size == fast2 or size in valid_nbd1))
+                        or (kind_u32 == IRP1_ID and room.indy_race_udp and INDY_PAIR_MIN <= size <= INDY_PAIR_MAX)
                     or (kind_u32 == PIN1_ID and size == 16)
                     or (kind_u32 == PON1_ID and size == 24)):
                 self._fail(ValueError('invalid relay data message'))
@@ -353,7 +392,7 @@ class FastChannelProtocol(asyncio.Protocol):
 
 
 class Channel:
-    __slots__ = ('reader', 'writer', 'hello', 'number', 'peer', 'backlog', 'proto', 'hybrid', 'cabinet')
+    __slots__ = ('reader', 'writer', 'hello', 'number', 'peer', 'backlog', 'proto', 'hybrid', 'indy_race', 'cabinet')
 
     def __init__(self, reader, writer, hello, number):
         self.reader, self.writer = reader, writer
@@ -362,7 +401,7 @@ class Channel:
         self.cabinet = -1
         self.backlog = None  # asyncio.Queue of (arrival, frame) when latency faking is on
         self.proto = None
-        self.hybrid = False
+        self.hybrid = self.indy_race = False
 
 
 
@@ -494,6 +533,7 @@ class Room:
         self.can_gc = can_gc
         self.udp = None
         self.udp_sessions = []
+        self.indy_race_udp = False
         self.star = False  # every member's GUI advertised star fan-out (set by the lobby)
         self.star_active = False
         self.star_players = []
@@ -540,16 +580,29 @@ class Room:
             self.log(f'Cannot start: need 2-{max_players} cabinets, each with both channels connected.')
             return False
         players = list(self.players.values())
-        segment_size = GAMES[self.guid][1]
-        fast2 = segment_size + 8
-        fast1 = segment_size + 56
-        valid_nbd1 = frozenset((8, 9, 10, 16, 56, 64, fast2, fast1))
+        indy = self.guid == INDY500_GUID
+        model2 = self.guid in MODEL2_NATIVE_GUIDS
+        fast2 = GAMES[self.guid][1] + HEADER.size
+        fast1 = 0 if model2 else fast2 + TIMED_HEADER.size
+        valid_nbd1 = nbd1_wire_sizes(self.guid)
+        # Preserve empty UDP state for old/opted-out INDY rooms.
+        rally_pose = self.guid == SRALLYC_GUID and all(p[0].hybrid for p in players)
+        daytona_pose = self.guid == DAYTONA_GUID and all(p[0].hybrid for p in players)
+        sgt_pose = self.guid == SGT24H_GUID and all(p[0].hybrid for p in players)
+        udp = self.udp if not model2 or rally_pose or daytona_pose or sgt_pose or (indy and any(p[0].hybrid for p in players)) else None
+        self.indy_race_udp = bool(indy and udp is not None and all(p[0].indy_race for p in players))
+        adaptive = not model2 and self.adaptive
 
         # Wire all peers and queue ALL greetings before yielding. Peer greetings,
         # Ping/Pong and board bytes retain their end-to-end meaning and ordering.
+        # Model 2's master sends FE with ID=N, then each slave decrements
+        # it. Route Model 2 as 1 -> N -> ... -> 2 -> 1 so each native ID equals
+        # its lobby slot, independently of the order the sockets arrived in.
+        # Keep RLA1/roster/chat indices and Model 3's ring unchanged.
+        step = -1 if model2 else 1
         for i, channels in enumerate(players):
-            channels[0].peer = players[(i + 1) % len(players)][1]
-            channels[1].peer = players[(i - 1) % len(players)][0]
+            channels[0].peer = players[(i + step) % len(players)][1]
+            channels[1].peer = players[(i - step) % len(players)][0]
 
         use_latency = self.latency.enabled
         if use_latency:
@@ -586,11 +639,9 @@ class Room:
             gc.collect(0)
 
         self.started = True
-        udp_sessions = self.udp.register(self, players) if self.udp is not None else [None] * len(players)
-        if self.udp is not None:
-            CONFIG = relay_udp.CONFIG
-        tick_pkt = frame(b'RLT1', TICK_RATE.pack(VERSION, self.tick_rate)) if self.tick_rate != DEFAULT_TICK_RATE else b''
-        if self.adaptive:
+        udp_sessions = udp.register(self, players) if udp is not None else [None] * len(players)
+        tick_pkt = frame(b'RLT1', TICK_RATE.pack(VERSION, self.tick_rate)) if not model2 and self.tick_rate != DEFAULT_TICK_RATE else b''
+        if adaptive:
             self.adaptive_ctl = AdaptiveTickRate(self.tick_rate)
             tick_pkt += frame(b'RLT2', ADAPTIVE_TICK.pack(VERSION, 1, self.adaptive_ctl.cap, self.adaptive_ctl.floor))
         star_pkt = frame(b'RLS1', STAR.pack(VERSION, 1)) if self.star_active else b''
@@ -598,10 +649,15 @@ class Room:
             for number, channel in channels.items():
                 udp_pkt = b''
                 if number == 0 and udp_sessions[i] is not None:
-                    udp_kind, udp_config = self.udp.config(self, udp_sessions, i)
+                    udp_kind, udp_config = udp.config(self, udp_sessions, i)
                     udp_pkt = frame(udp_kind, udp_config)
                 channel.writer.write(channel.peer.hello + tick_pkt + star_pkt + udp_pkt + frame(b'RLA1', READY.pack(VERSION, i, len(players), number)))
-            self.log(f'ASSIGN cabinet={i+1} role={"MASTER" if i==0 else "SLAVE"} car={i+1}')
+            if indy:
+                self.log(f'INDY 500: relay slot {i+1}/{len(players)}; native {"MASTER" if i==0 else "SLAVE"} / CABINET ID {i+1}.')
+            elif self.guid == SRALLYC_GUID:
+                self.log(f'Sega Rally Championship: relay slot {i+1}/{len(players)}; native CAR {i+1}.')
+            else:
+                self.log(f'ASSIGN cabinet={i+1} role={"MASTER" if i==0 else "SLAVE"} car={i+1}')
         try:
             for p in players:
                 for c in p.values():
@@ -619,9 +675,9 @@ class Room:
                     task.add_done_callback(self.pumps.discard)
                     self.pumps.add(task)
             self.log(f'FAKE LATENCY active for this session: {self.latency.describe()}')
-        if self.tick_rate != DEFAULT_TICK_RATE:
+        if not indy and self.tick_rate != DEFAULT_TICK_RATE:
             self.log(f'TICK RATE active for this session: {self.tick_rate} Hz')
-        if self.adaptive:
+        if adaptive:
             self.adaptive_started = time.monotonic()
             self.adaptive_due = self.adaptive_started + 1.0
             self.adaptive_timer = asyncio.get_running_loop().call_later(1.0, self.adaptive_tick)
@@ -629,6 +685,10 @@ class Room:
         if self.star_active:
             self.star_tick()
             self.log('STAR FAN-OUT active for this session: ring segments delivered to every cabinet directly')
+        if self.indy_race_udp:
+            self.log('INDY 500 race UDP negotiated: native movement snapshots + ordered TCP control and fallback')
+        if rally_pose and udp is not None:
+            self.log('Sega Rally Championship: optional pose UDP negotiated; full native TCP ring retained')
         self.log(f'STARTED {len(players)} cabinets; no late joins or live master migration')
         return True
 
@@ -918,19 +978,24 @@ class Room:
                 await self.reject(writer, 1)
                 return
             tune_socket(writer)
-            kind, _, hello = initial[0] if initial is not None else await asyncio.wait_for(read_frame(reader), 10)
+            kind, hello_text, hello = initial[0] if initial is not None else await asyncio.wait_for(read_frame(reader), 10)
             if kind != b'HEL1':
                 await self.reject(writer, 2)
                 return
             kind, body, _ = initial[1] if initial is not None else await asyncio.wait_for(read_frame(reader), 10)
-            hybrid = kind == b'RLJ3'
             if kind not in (b'RLJ1', b'RLJ3') or len(body) != JOIN.size:
                 await self.reject(writer, 2)
                 return
             version, number, nonce, guid = JOIN.unpack(body)
-            if version != VERSION or guid not in GAMES or (self.guid is not None and guid != self.guid) or number not in (0, 1) or nonce == bytes(16):
+            if (version != VERSION or guid not in GAMES or (self.guid is not None and guid != self.guid)
+                    or number not in (0, 1) or nonce == bytes(16) or (guid in MODEL2_NATIVE_GUIDS and kind != b'RLJ1')):
                 await self.reject(writer, 2)
                 return
+            indy_race = guid == INDY500_GUID and hello_text == INDY500_RACE_HELLO
+            hybrid = (kind == b'RLJ3' or indy_race or (guid == INDY500_GUID and hello_text == INDY500_POSE_HELLO)
+                      or (guid == SRALLYC_GUID and hello_text == SRALLYC_POSE_HELLO)
+                      or (guid == DAYTONA_GUID and hello_text == DAYTONA_POSE_HELLO)
+                      or (guid == SGT24H_GUID and hello_text == SGT24H_POSE_HELLO))
             if self.started or self.failed:
                 await self.reject(writer, 3)
                 return
@@ -945,11 +1010,12 @@ class Room:
             if number in channels:
                 await self.reject(writer, 4)
                 return
-            if any(c.hybrid != hybrid for c in channels.values()):
+            if any(c.hybrid != hybrid or c.indy_race != indy_race for c in channels.values()):
                 await self.reject(writer, 2)
                 return
             channel = Channel(reader, writer, hello, number)
             channel.hybrid = hybrid
+            channel.indy_race = indy_race
             transport = writer.transport
             if hasattr(transport, 'set_protocol') and hasattr(transport, 'get_protocol') and hasattr(reader, '_buffer'):
                 loop = asyncio.get_running_loop()
@@ -976,15 +1042,16 @@ class Room:
             if len(channels) == 2:
                 self.log(f'READY cabinet={position}; waiting for all authorized lobby channels')
                 self._notify()
+            valid_nbd1 = nbd1_wire_sizes(guid)
+            timed_segment_size = GAMES[guid][1] + TIMED_HEADER.size
             while True:
                 kind, body, raw = await read_frame(reader)
                 if not self.started or channel.peer is None or self.failed:
                     raise ValueError('traffic before authorized lobby start')
-                segment_size = GAMES[self.guid][1]
-                timed_segment_size = segment_size + 48
                 valid = ((kind == b'PIN1' and len(body) == 8) or
                          (kind == b'PON1' and len(body) == 16) or
-                         (kind == b'NBD1' and len(body) in (0, 1, 2, 8, 48, 56, segment_size, timed_segment_size)))
+                         (kind == b'NBD1' and len(raw) in valid_nbd1) or
+                         (kind == b'IRP1' and self.indy_race_udp and INDY_PAIR_MIN <= len(raw) <= INDY_PAIR_MAX))
                 if not valid:
                     raise ValueError('invalid relay data message')
                 deliveries = None
@@ -1048,11 +1115,15 @@ async def warmup_jit(force=False):
         loop = asyncio.get_running_loop()
         room = Room(log=lambda *_: None)
         room.started = True
-        largest = max(size for _, size in GAMES.values())  # dirtdvls 3584
-        fast2 = largest + 8
-        fast1 = largest + 56
-        valid = frozenset((8, 9, 10, 16, 56, fast2, fast1))
-        pkt = frame(b'NBD1', b'\x5a' * (largest + 48))
+        # Only Model 3 timed games carry this header. INDY 500's slightly
+        # larger native payload would make a synthetic timed frame too big.
+        guid = max((g for g, (game, _) in GAMES.items() if game in STAR_GAMES),
+                   key=lambda g: GAMES[g][1])
+        payload = GAMES[guid][1]
+        fast2 = payload + HEADER.size
+        fast1 = fast2 + TIMED_HEADER.size
+        valid = nbd1_wire_sizes(guid)
+        pkt = frame(b'NBD1', b'\x5a' * (payload + TIMED_HEADER.size))
         pin = frame(b'PIN1', b'\0' * 8)
         combo = pkt + pin
         iters = 1700
@@ -1146,7 +1217,7 @@ async def serve(args):
     else:
         print('UDP race lane disabled by --tcp-only: all game traffic uses the TCP ring.', flush=True)
     print('In-race snapshots use UDP only (TCP stays connected but silent); setup, race start, state changes and '
-          'fallback use TCP. Sega Rally 2 keeps the TCP ring during races.', flush=True)
+          'fallback use TCP. Sega Rally 2 uses UDP for prediction; INDY 500 keeps ordered TCP control with UDP race motion.', flush=True)
     print('Stop this relay with Ctrl+C.', flush=True)
     try:
         await asyncio.Event().wait()
@@ -1272,15 +1343,23 @@ def parse(data):
 
 
 class Session:
-    __slots__ = ('room', 'index', 'token', 'ip', 'address', 'last_hello', 'credit', 'credit_at', 'rate', 'last_seq', 'seen', 'stamp', 'total', 'parts', 'mask', 'host_ready', 'status_at', 'status_stamp',
+    __slots__ = ('room', 'index', 'token', 'ip', 'address', 'last_hello', 'credit', 'credit_at', 'rate', 'max_snapshot', 'last_seq', 'seen', 'stamp', 'total', 'parts', 'mask', 'host_ready', 'status_at', 'status_stamp',
                  'uplink_delay', 'uplink_loss', 'feedback_queue_ms', 'feedback_loss', 'feedback_at')
     def __init__(self, room, index, ip):
         self.room, self.index, self.ip = room, index, ip
         self.token = secrets.token_bytes(16)
         self.address = None
         self.last_hello = 0.0
-        self.rate = (MAX_ENCODED + 3 * HEADER.size) * room.tick_rate
-        self.credit = self.rate // 4 + MAX_ENCODED
+        indy_pose = getattr(room, 'guid', None) == INDY500_GUID
+        indy_wire = INDY500_RACE_WIRE if getattr(room, 'indy_race_udp', False) else INDY500_POSE_WIRE
+        rally_pose = getattr(room, 'guid', None) == SRALLYC_GUID
+        daytona_pose = getattr(room, 'guid', None) == DAYTONA_GUID
+        sgt_pose = getattr(room, 'guid', None) == SGT24H_GUID
+        model2_pose = SGT24H_POSE_WIRE if sgt_pose else indy_wire if indy_pose else SRALLYC_POSE_WIRE if rally_pose else DAYTONA_POSE_WIRE if daytona_pose else 0
+        self.max_snapshot = model2_pose + 40 + 1 if model2_pose else MAX_ENCODED  # trailer + encoding byte
+        self.rate = ((self.max_snapshot + HEADER.size) * 60 if model2_pose else
+                     (MAX_ENCODED + 3 * HEADER.size) * room.tick_rate)
+        self.credit = self.rate // 4 + self.max_snapshot
         self.credit_at = time.monotonic()
         self.last_seq = self.mask = self.stamp = self.total = self.parts = 0
         self.seen = False
@@ -1326,6 +1405,8 @@ class UdpRelay(asyncio.DatagramProtocol):
     def config(self, room, sessions, index):
         s = sessions[index]
         base = CONFIG.pack(1, self.port, index, len(sessions), s.token)
+        if getattr(room, 'indy_race_udp', False):
+            return b'RLUI', base
         port = getattr(room, 'host_udp_port', 0)
         if not port or any(peer is None for peer in sessions):
             return b'RLU1', base
@@ -1405,10 +1486,10 @@ class UdpRelay(asyncio.DatagramProtocol):
             s.host_ready = now if seq else 0.0
             self.routes(s.room, now, s)
             return
-        if kind != SNAPSHOT or address != s.address or now - s.last_hello > 3.0:
+        if kind != SNAPSHOT or total > s.max_snapshot or address != s.address or now - s.last_hello > 3.0:
             self.dropped += 1
             return
-        s.credit = min(s.rate // 4 + MAX_ENCODED, s.credit + max(0.0, now - s.credit_at) * s.rate)
+        s.credit = min(s.rate // 4 + s.max_snapshot, s.credit + max(0.0, now - s.credit_at) * s.rate)
         s.credit_at = now
         if s.credit < len(data):
             self.dropped += 1
@@ -1457,7 +1538,7 @@ class UdpRelay(asyncio.DatagramProtocol):
         if self.transport is not None:
             self.transport.close()
 
-''',{name:globals()[name] for name in ('DelayMeter','LossMeter')})
+''',{name:globals()[name] for name in ('DelayMeter','LossMeter','INDY500_GUID','INDY500_POSE_WIRE','INDY500_RACE_WIRE','SRALLYC_GUID','SRALLYC_POSE_WIRE','DAYTONA_GUID','DAYTONA_POSE_WIRE','SGT24H_GUID','SGT24H_POSE_WIRE')})
 
 online_lobby=_bundled_module('online_lobby',r'''
 #!/usr/bin/env python3
@@ -1475,11 +1556,41 @@ import time
 import socket
 
 # Stable GUI IDs, NOT alphabetic order or packet GUID arithmetic.
+INDY500_GAME = 9
+INDY500_BIT = 1 << INDY500_GAME
+SRALLYC_GAME = 10
+SRALLYC_BIT = 1 << SRALLYC_GAME
+SGT24H_GAME = 12
+SGT24H_BIT = 1 << SGT24H_GAME
+SGT24H_HELLO = b'Supermodel Online SGT24H1'
+SGT24H_RELAY_HELLO = b'Supermodel Online lobby v1 SGT24H1'
+DAYTONA_GAME = 11
+DAYTONA_BIT = 1 << DAYTONA_GAME
+DAYTONA_HELLO = b'Supermodel Online DAYTONA1 '
+DAYTONA_RELAY_HELLO = b'Supermodel Online lobby v1 DAYTONA1 '
+MODEL2_VIDEO_HELLO = b'Supermodel Online M2VIDEO1 '
+MODEL2_VIDEO_RELAY_HELLO = b'Supermodel Online lobby v1 M2VIDEO1 '
+DAYTONA_SETTINGS_BITS = 2 | 28 | 224
+DAYTONA_DEFAULT_OPTIONS = 2 | (1 << 2)  # Normal / Normal
+MODEL2_GAMES = frozenset((INDY500_GAME, SRALLYC_GAME, DAYTONA_GAME, SGT24H_GAME))
+SRALLYC_HELLO = b'Supermodel Online (srallyc)'
+SRALLYC_RELAY_HELLO = b'Supermodel Online lobby v1 (srallyc)'
+BOTH_MODEL2_HELLO = b'Supermodel Online (indy500 room options, srallyc)'
+BOTH_MODEL2_RELAY_HELLO = b'Supermodel Online lobby v1 (indy500 room options, srallyc)'
+SRALLYC_SETTINGS_BITS = 2 | 28 | 224
+SRALLYC_DEFAULT_OPTIONS = 2 | (1 << 2)  # Normal / Normal
+MODEL3_MASK = INDY500_BIT - 1
+INDY500_HELLO = b'Supermodel Online (indy500)'
+RELAY_HELLO = b'Supermodel Online lobby v1 (indy500)'
+INDY500_ROOM_HELLO = b'Supermodel Online (indy500 room options)'
+INDY500_ROOM_RELAY_HELLO = b'Supermodel Online lobby v1 (indy500 room options)'
+INDY500_SETTINGS_BITS = 2 | 28 | 224 | (1 << 11)
+INDY500_DEFAULT_OPTIONS = 2 | (2 << 2) | (1 << 11)  # Normal, Normal, Handicap On
 GAMES = [("daytona2", 0x5bf177da34878), ("dayto2pe", 0x5bf177da34875),
          ("scud", 0x5bf177da34876), ("scudplus", 0x5bf177da34877),
          ("srally2", 0x5bf177da34879), ("lemans24", 0x5bf177da3487a), ("srally2_8p", 0x5bf177da3487b),
-         ("dirtdvls", 0x5bf177da3487c), ("scudplus_16", 0x5bf177da3487d)]
-GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16}
+         ("dirtdvls", 0x5bf177da3487c), ("scudplus_16", 0x5bf177da3487d), ("indy500", INDY500_GUID), ("srallyc", SRALLYC_GUID), ("daytona", DAYTONA_GUID), ("sgt24h", SGT24H_GUID)]
+GAME_MAX_PLAYERS = {"daytona2": 16, "dayto2pe": 16, "srally2": 4, "srally2_8p": 8, "lemans24": 6, "dirtdvls": 4, "scudplus_16": 16, "indy500": INDY500_MAX_CABINETS, "srallyc": SRALLYC_MAX_CABINETS, "daytona": DAYTONA_MAX_CABINETS, "sgt24h": SGT24H_MAX_CABINETS}
 
 
 def max_players_for_game(game):
@@ -1539,7 +1650,20 @@ def native_car_limit(game):
 
 
 def valid_room_options(game, value):
-    if not 0 <= game < 9 or value & ~2047 or (value & 1 and base_game(game) not in (0, 3)):
+    if game == SGT24H_GAME:
+        return value == 0  # Native defaults only until operator fields are verified.
+    if game in MODEL2_GAMES:
+        value &= ~VIDEO60_OPTION  # Independent of the native operator settings.
+    if game == INDY500_GAME:
+        return value == 0 or bool(value & 2 and not value & ~INDY500_SETTINGS_BITS
+                                  and ((value >> 2) & 7) < 5 and ((value >> 5) & 7) < 2)
+    if game == SRALLYC_GAME:
+        return bool(value & 2 and not value & ~SRALLYC_SETTINGS_BITS
+                    and ((value >> 2) & 7) < 4 and ((value >> 5) & 7) < 3)
+    if game == DAYTONA_GAME:
+        return bool(value & 2 and not value & ~DAYTONA_SETTINGS_BITS
+                    and ((value >> 2) & 7) < 4 and ((value >> 5) & 7) < 3)
+    if not 0 <= game < INDY500_GAME or value & ~2047 or (value & 1 and base_game(game) not in (0, 3)):
         return False
     base = base_game(game)
     if value & 768 and base >= 4:
@@ -1550,8 +1674,27 @@ def valid_room_options(game, value):
     return game < 5 and ((value >> 2) & 7) < (5 if game == 4 else 4) and ((value >> 5) & 7) < (7 if game < 2 else 3 if game < 4 else 2)
 
 
+def supports_room_video(game, client):
+    # Old Model 2 clients can advertise the Model 3 video bit too. They
+    # cannot follow a Model 2 rate override without the new HEL1 handshake.
+    return client.get('model2_video_capable' if game in MODEL2_GAMES else 'video_capable', False)
+
+
+def room_capability(game, normal):
+    if game == SGT24H_GAME:
+        return 'sgt24h_capable'
+    if game == INDY500_GAME:
+        return 'indy_room_capable'
+    if game == SRALLYC_GAME:
+        return 'srallyc_capable'
+    if game == DAYTONA_GAME:
+        return 'daytona_capable'
+    return normal
+
+
 def all_native(room):
-    return all(m.get('native_capable') for m in room.members)
+    capability = room_capability(room.game, 'native_capable')
+    return all(m.get(capability) for m in room.members)
 
 
 def first_free_car(room):
@@ -1565,6 +1708,13 @@ class Lobby:
         self.members = [owner]
         self.state = 0  # waiting / launching / linked / failed
         self.options = (2 | (4 if base_game(game) < 4 else 0)) if (game < 5 or game in (6, 8)) and owner.get('native_capable') else 0
+        if game == SRALLYC_GAME:
+            self.options = SRALLYC_DEFAULT_OPTIONS
+        if game == DAYTONA_GAME:
+            self.options = DAYTONA_DEFAULT_OPTIONS
+        # An untouched Indy room can still admit an old client. Stock rules
+        # are selected automatically only while the entire roster supports them.
+        self.indy_automatic_defaults = game == INDY500_GAME
         owner['native_car'] = 1 if native_car_limit(game) else 0
         self.frozen_native_cars = {}
         self.host_mode = self.host_port = 0
@@ -1586,6 +1736,11 @@ class Lobby:
         self.board = Room(log=lambda line: log(f'LOBBY {ident}: {line}'),
                           latency_ms=latency_ms, jitter_ms=jitter_ms, tick_rate=tick_rate,
                           on_change=on_change, can_gc=can_gc)
+
+    def effective_options(self):
+        if self.indy_automatic_defaults:
+            return INDY500_DEFAULT_OPTIONS if all_native(self) else 0
+        return self.options
 
 
 class Hub:
@@ -1665,7 +1820,9 @@ class Hub:
         self.send(c, b'OLE1', fixed(message, 160))
 
     def snapshot(self, c):
-        rooms = [r for r in self.rooms.values() if r.host_mode != 3 or c.get('room_host_capable')]
+        rooms = [r for r in self.rooms.values()
+                 if (r.host_mode != 3 or c.get('room_host_capable'))
+                 and (r.game not in MODEL2_GAMES or c['mask'] & (1 << r.game))]
         self.send(c, b'OLB1', struct.pack('<III', len(rooms), c['id'], c['room']))
         for room in rooms:
             # Discovery metadata only, not the hosted room's membership/names.
@@ -1681,16 +1838,17 @@ class Hub:
                 self.send(c, b'OLU2', struct.pack('<IIII', room.id, port, mode, int(room.host_checking)))
             elif c.get('host_capable'):
                 self.send(c, b'OLU1', struct.pack('<III', room.id, getattr(room.board, 'host_udp_port', 0), 1 if getattr(room.board, 'host_udp_port', 0) else 0))
-            if c.get('options_capable'):
+            if c.get(room_capability(room.game, 'options_capable')):
                 # Pre-Video60 clients never see bit 1024 (they cannot join such a room anyway).
-                shown = room.options if c.get('video_capable') else room.options & ~VIDEO60_OPTION
+                options = room.effective_options()
+                shown = options if supports_room_video(room.game, c) else options & ~VIDEO60_OPTION
                 self.send(c, b'ORO1', struct.pack('<II', room.id, shown))
             if c.get('ping_capable'):
                 # Each member's RTT to this host (what it reported in its last OLQ2); 0 = not measured yet.
                 body = struct.pack('<II', room.id, len(members))
                 body += b''.join(PING_ROW.pack(m['id'], m.get('ping_ms', 0) if room.state == 0 or m['id'] in self.clients else 0) for m in members)
                 self.send(c, b'ORP1', body)
-            if c.get('native_capable') and not (room.host_mode == 3 and room.directory_ready):
+            if c.get(room_capability(room.game, 'native_capable')) and not (room.host_mode == 3 and room.directory_ready):
                 enabled = all_native(room)
                 body = struct.pack('<III', room.id, int(enabled), len(members))
                 body += b''.join(struct.pack('<II', m['id'], (room.frozen_native_cars.get(m['id'], 0) if room.state else m.get('native_car', 0)) if enabled else 0) for m in members)
@@ -1749,10 +1907,10 @@ class Hub:
         if endpoint is not None:
             payload += socket.inet_aton(endpoint[0]) + struct.pack('<I', endpoint[1])
             kind = b'OLG2'
-        if member.get('options_capable'):
+        if member.get(room_capability(room.game, 'options_capable')):
             payload += struct.pack('<I', room.options)
             kind = b'OLG4' if endpoint is not None else b'OLG3'
-        if member.get('native_capable'):
+        if member.get(room_capability(room.game, 'native_capable')):
             payload += struct.pack('<I', room.frozen_native_cars.get(member['id'], 0))
             kind = b'OLG6' if endpoint is not None else b'OLG5'
         self.send(member, kind, payload)
@@ -1761,15 +1919,31 @@ class Hub:
         """Reserve cabinet order and hand every member its one-session ticket."""
         if room.host_mode == 3 or room.host_checking or room.state != 0 or not 2 <= len(room.members) <= max_players_for_game(room.game):
             return False
+        if room.game in MODEL2_GAMES and room.options & VIDEO60_OPTION and not all(supports_room_video(room.game, m) for m in room.members):
+            self.error(room.members[0], 'Update all room members before starting a 60 Hz Model 2 room.')
+            return False
+        if room.game == INDY500_GAME and room.options and not all_native(room):
+            self.error(room.members[0], 'Update all cabinet clients before starting with INDY 500 room settings.')
+            return False
+        if room.game == SGT24H_GAME and (not all_native(room) or not valid_room_options(room.game, room.options)):
+            self.error(room.members[0], 'Super GT 24h requires compatible clients and native default settings.')
+            return False
+        if room.game == DAYTONA_GAME and (not all_native(room) or not valid_room_options(room.game, room.options)):
+            self.error(room.members[0], 'Daytona USA requires Rev A Online support on every cabinet.')
+            return False
+        if room.game == SRALLYC_GAME and (not all_native(room) or not valid_room_options(room.game, room.options)):
+            self.error(room.members[0], 'Sega Rally Championship requires current clients and shared room settings.')
+            return False
         if all_native(room) and native_car_limit(room.game) and any(not m.get('native_car') for m in room.members):
             self.error(room.members[0], 'Every player must select a unique CAR NUMBER before Start Link.')
             return False
         room.frozen_native_cars = {m['id']: m.get('native_car', 0) if all_native(room) else 0 for m in room.members}
+        room.options, room.indy_automatic_defaults = room.effective_options(), False
         room.state = 1
         room.deadline = time.monotonic() + self.launch_timeout
         room.board.guid = GAMES[room.game][1]
-        room.board.star = all(m.get('star_capable') for m in room.members)
-        room.board.adaptive = self.adaptive_tick and all(m.get('adaptive_capable') for m in room.members)
+        room.board.star = room.game not in MODEL2_GAMES and all(m.get('star_capable') for m in room.members)
+        room.board.adaptive = room.game not in MODEL2_GAMES and self.adaptive_tick and all(m.get('adaptive_capable') for m in room.members)
         room.board.adaptive_simulate = self.adaptive_simulate
         # Reserve native cabinet order BEFORE any emulator sockets arrive.
         # Fast slaves cannot become MASTER by completing their ROM load first.
@@ -1885,9 +2059,11 @@ class Hub:
         if kind == b'ORO1' and len(body) == 8:
             ident, value = struct.unpack('<II', body)
             room = self.rooms.get(ident)
+            indy = room is not None and room.game == INDY500_GAME
             if (room is None or c['room'] != ident or room.members[0] is not c or room.state != 0
-                    or room.host_checking or not c.get('options_capable') or not valid_room_options(room.game, value)
-                    or (value & 2 and (not c.get('native_capable') or not all_native(room)))):
+                    or room.host_checking or not c.get(room_capability(room.game, 'options_capable'))
+                    or not valid_room_options(room.game, value)
+                    or (value & 2 and not all_native(room))):
                 self.error(c, 'Only the master can change valid room options before launch; update all clients for native settings.')
                 return
             if value and not all(m.get('options_capable') for m in room.members):
@@ -1902,10 +2078,11 @@ class Hub:
             if base_game(room.game) < 4 and value & 256 and not all(m.get('race_capable') for m in room.members):
                 self.error(c, 'Update all room members before disabling collisions.')
                 return
-            if value & VIDEO60_OPTION and not all(m.get('video_capable') for m in room.members):
+            if value & VIDEO60_OPTION and not all(supports_room_video(room.game, m) for m in room.members):
                 self.error(c, 'Update all room members before selecting 60 Hz video.')
                 return
-            room.options = value
+            room.indy_automatic_defaults = indy and value == INDY500_DEFAULT_OPTIONS
+            room.options = 0 if room.indy_automatic_defaults else value
             self.broadcast()
             return
         if kind == b'OCN1' and len(body) == 8:
@@ -1998,6 +2175,18 @@ class Hub:
                 if game >= len(GAMES) or not c['mask'] & (1 << game):
                     self.error(c, 'This exact ROM (and required parent) is not available locally.')
                     return
+                if game == INDY500_GAME and mode:
+                    self.error(c, 'INDY 500 requires the central TCP ring (UDP motion is optional and relay-only).')
+                    return
+                if game == SGT24H_GAME and mode:
+                    self.error(c, 'Super GT 24h requires the central TCP relay.')
+                    return
+                if game == DAYTONA_GAME and mode:
+                    self.error(c, 'Daytona USA requires the central TCP relay.')
+                    return
+                if game == SRALLYC_GAME and mode:
+                    self.error(c, 'Sega Rally Championship requires the central TCP relay.')
+                    return
                 if len(self.rooms) >= 16:
                     self.error(c, 'Relay lobby limit reached (16).')
                     return
@@ -2033,6 +2222,9 @@ class Hub:
                         return
                     self.handoff(c, room)
                     return
+                if room.game == INDY500_GAME and room.options and not c.get('indy_room_capable'):
+                    self.error(c, 'Update this client: INDY 500 room settings are enabled.')
+                    return
                 if room.options & 2 and not c.get('native_capable'):
                     self.error(c, 'Update this client: native room settings are enabled.')
                     return
@@ -2045,7 +2237,7 @@ class Hub:
                 if base_game(room.game) < 4 and room.options & 256 and not c.get('race_capable'):
                     self.error(c, 'Update this client: collisions are disabled in this room.')
                     return
-                if room.options & VIDEO60_OPTION and not c.get('video_capable'):
+                if room.options & VIDEO60_OPTION and not supports_room_video(room.game, c):
                     self.error(c, 'Update this client: 60 Hz video is enabled in this room.')
                     return
                 if room.options and not c.get('options_capable'):
@@ -2079,23 +2271,50 @@ class Hub:
             return
         raise ValueError('unknown/malformed lobby command')
 
-    async def control(self, reader, writer, body, host_capable=False, full_host_capable=False, room_host_capable=False):
+    async def control(self, reader, writer, body, host_capable=False, full_host_capable=False,
+                      room_host_capable=False, indy_available=False, indy_room=False, srallyc_available=False,
+                      daytona_flags=None, model2_video_flags=None, sgt24h_available=False, sgt24h_flags=None):
         if len(body) != HELLO.size:
             raise ValueError('lobby hello size')
         version, mask, enabled, name = HELLO.unpack(body)
         # Capability bits: 1 AsyncNet, 2 room options, 4 native settings, 8 adaptive tick rate, 16 Hornet,
         # 32 race options, 64 star fan-out, 128 ping (OLQ2 poll / OLP2 echo / ORP1 rows), 256 Video60 room option.
-        if version != VERSION or enabled & ~511 or mask & ~((1 << len(GAMES)) - 1) or len(self.clients) >= 64:
+        if version != VERSION or enabled & ~511 or mask & ~MODEL3_MASK or len(self.clients) >= 64:
             raise ValueError('lobby version/limit/flags')
+        model2_video = model2_video_flags is not None and (enabled & (6 | VIDEO_CAPABILITY)) == (6 | VIDEO_CAPABILITY)
+        if model2_video:
+            # Native-title availability is still in the HEL1 text, not the
+            # Model 3 OEH6 ROM mask: Indy=1, Rev C=2, Daytona Rev A=4.
+            indy_available = indy_room = bool(model2_video_flags & 1)
+            srallyc_available = bool(model2_video_flags & 2)
+            daytona_flags = model2_video_flags & 3 if model2_video_flags & 4 else None
+        # The hello text opts into game ID 9; the OEH6 body remains compatible
+        # with v1 relays and creator-hosted rooms that only know Model 3.
+        if indy_available:
+            mask |= INDY500_BIT
+        srallyc_capable = srallyc_available and (enabled & 6) == 6
+        if srallyc_capable:
+            mask |= SRALLYC_BIT
+        daytona_capable = daytona_flags is not None and (enabled & 6) == 6
+        if daytona_capable:
+            mask |= DAYTONA_BIT
+        sgt24h_capable = sgt24h_available and (enabled & 6) == 6
+        if sgt24h_capable:
+            mask |= SGT24H_BIT
         c = dict(id=self.next_client, writer=writer, name=text(name, 'Player'), mask=mask, async_=bool(enabled & 1), room=0)
         c['options_capable'] = bool(enabled & 2)
         c['native_capable'] = bool(enabled & 4)
+        c['srallyc_capable'] = srallyc_capable
+        c['daytona_capable'] = daytona_capable
+        c['sgt24h_capable'] = sgt24h_capable
+        c['indy_room_capable'] = indy_available and indy_room and (enabled & 6) == 6
         c['hornet_capable'] = bool(enabled & 16)  # course-selection semantics; old car shortcut is not compatible
         c['race_capable'] = bool(enabled & 32)
         c['star_capable'] = bool(enabled & 64)  # accepts RLS1: the relay fans ring segments out, the client does not forward
         c['adaptive_capable'] = bool(enabled & ADAPTIVE_CAPABILITY)  # accepts RLT2 and mid-session RLT1, reports UDP feedback
         c['ping_capable'] = bool(enabled & 128)  # polls with OLQ2 and shows ORP1 pings in the room
         c['video_capable'] = bool(enabled & VIDEO_CAPABILITY)
+        c['model2_video_capable'] = model2_video
         c['ping_ms'] = 0
         c['async'] = c.pop('async_')
         c['host_capable'] = host_capable
@@ -2104,7 +2323,17 @@ class Hub:
         c['ip'] = writer.get_extra_info('peername')[0]
         self.next_client += 1
         self.clients[c['id']] = c
-        writer.write(frame(b'HEL1', b'Supermodel Online lobby v1'))
+        if sgt24h_capable:
+            greeting = (b'Supermodel Online lobby v1 SGT24H2 ' + bytes((ord('0')+sgt24h_flags,))) if sgt24h_flags is not None else SGT24H_RELAY_HELLO
+        elif model2_video:
+            greeting = MODEL2_VIDEO_RELAY_HELLO + bytes((ord('0') + model2_video_flags,))
+        elif daytona_capable:
+            greeting = DAYTONA_RELAY_HELLO + bytes((ord('0') + daytona_flags,))
+        elif srallyc_capable:
+            greeting = BOTH_MODEL2_RELAY_HELLO if c['indy_room_capable'] else SRALLYC_RELAY_HELLO
+        else:
+            greeting = INDY500_ROOM_RELAY_HELLO if c['indy_room_capable'] else RELAY_HELLO if indy_available else b'Supermodel Online lobby v1'
+        writer.write(frame(b'HEL1', greeting))
         self.snapshot(c)
         self.replay_lounge_chat(c)
         try:
@@ -2218,13 +2447,25 @@ class Hub:
                 self.directory_advertisement(writer, second[1])
                 await writer.drain()
             elif second[0] == b'OEH6':
-                await self.control(reader, writer, second[1], second[0] != b'OLH1', second[0] in (b'OLH3', b'OEH6'), second[0] == b'OEH6')
+                sgt_flags = next((i for i in range(8) if first[1] == b'Supermodel Online SGT24H2 ' + bytes((ord('0')+i,))), None)
+                flags = next((i for i in range(4) if first[1] == DAYTONA_HELLO + bytes((ord('0') + i,))), None)
+                video_flags = next((i for i in range(1, 8) if first[1] == MODEL2_VIDEO_HELLO + bytes((ord('0') + i,))), None)
+                indy = bool(flags is not None and flags & 1)
+                rally = bool(flags is not None and flags & 2)
+                await self.control(reader, writer, second[1], True, True, True,
+                                   indy_available=indy or first[1] in (INDY500_HELLO, INDY500_ROOM_HELLO, BOTH_MODEL2_HELLO),
+                                   indy_room=indy or first[1] in (INDY500_ROOM_HELLO, BOTH_MODEL2_HELLO),
+                                   srallyc_available=rally or first[1] in (SRALLYC_HELLO, BOTH_MODEL2_HELLO),
+                                   daytona_flags=flags, model2_video_flags=sgt_flags if sgt_flags is not None else video_flags,
+                                   sgt24h_available=first[1] == SGT24H_HELLO or sgt_flags is not None, sgt24h_flags=sgt_flags)
             elif second[0] == b'RLC1':
                 await self.chat_session(reader, writer, second[1])
             elif second[0] in (b'RLJ2', b'RLJ3') and len(second[1]) == JOIN2.size:
                 version, channel, nonce, guid, ticket = JOIN2.unpack(second[1])
                 room = self.tickets.get(ticket)
-                if room is None or room.host_mode in (2, 3) or room.state != 1 or version != VERSION or channel not in (0, 1) or guid != GAMES[room.game][1] or nonce == bytes(16):
+                if (room is None or room.host_mode in (2, 3) or room.state != 1 or version != VERSION or channel not in (0, 1)
+                        or guid != GAMES[room.game][1] or nonce == bytes(16)
+                        or (room.game in MODEL2_GAMES and second[0] != b'RLJ2')):
                     await self.legacy.reject(writer, 2)
                     return
                 # Room nonce is the reserved ticket, never user-selected join order.
@@ -2307,7 +2548,7 @@ class Hub:
         for room in tuple(self.rooms.values()):
             await self.destroy(room, 'Relay stopped.')
 
-''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE','ADAPTIVE_CAPABILITY','VIDEO_CAPABILITY','VIDEO60_OPTION')})
+''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE','ADAPTIVE_CAPABILITY','VIDEO_CAPABILITY','VIDEO60_OPTION','INDY500_GUID','INDY500_MAX_CABINETS','SRALLYC_GUID','SRALLYC_MAX_CABINETS','DAYTONA_GUID','DAYTONA_MAX_CABINETS','SGT24H_GUID','SGT24H_MAX_CABINETS')})
 
 # Public namespaces for source tests/tools; compatibility names are in memory
 # only. None of these modules is a separate file or relay launcher.

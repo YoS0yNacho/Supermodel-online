@@ -20,12 +20,15 @@ GUI_FLAGS = 1 | 510  # exactly what LobbyClient::Worker sends: AsyncNet opt-in +
 
 
 class Client:
-    async def connect(self, host, port, name, mask, flags=GUI_FLAGS):
+    async def connect(self, host, port, name, mask, flags=GUI_FLAGS, indy_available=False, indy_options=False):
         self.reader, self.writer = await asyncio.open_connection(host, port)
-        self.writer.write(relay.frame(b'HEL1', b'Supermodel Online') +
+        hello = online.INDY500_ROOM_HELLO if indy_options else online.INDY500_HELLO if indy_available else b'Supermodel Online'
+        self.writer.write(relay.frame(b'HEL1', hello) +
                           relay.frame(b'OEH6', online.HELLO.pack(1, mask, flags, online.fixed(name, 32))))
-        kind, _, _ = await self.next()
+        kind, reply, _ = await self.next()
         assert kind == b'HEL1', kind
+        if indy_options and reply != online.INDY500_ROOM_RELAY_HELLO:
+            raise SystemExit('This relay does not support INDY 500 room options')
         await self.snapshot()
         return self
 
@@ -73,9 +76,15 @@ async def main():
     args = ap.parse_args()
     host, port = args.relay.rsplit(':', 1)
     game = [g for g, _ in online.GAMES].index(args.game)
-    mask = (1 << len(online.GAMES)) - 1
+    mask = online.MODEL3_MASK
+    indy = game == online.INDY500_GAME
+    if indy and not 2 <= args.players <= online.max_players_for_game(game):
+        ap.error(f'INDY 500 requires 2-{online.max_players_for_game(game)} cabinets')
+    if args.options is not None and not online.valid_room_options(game, args.options):
+        ap.error('Invalid options for this game')
     flags = GUI_FLAGS & ~64 if args.no_star else GUI_FLAGS
-    players = [await Client().connect(host, int(port), f'Cab{i+1}', mask, flags) for i in range(args.players)]
+    players = [await Client().connect(host, int(port), f'Cab{i+1}', mask, flags,
+                                      indy_available=indy, indy_options=indy and args.options is not None) for i in range(args.players)]
     room = await players[0].create(game, args.title)
     for p in players[1:]:
         await p.join(room)
@@ -85,7 +94,11 @@ async def main():
             while struct.unpack('<II', await p.until(b'ORO1'))[1] != args.options:
                 pass
     players[0].send(b'OLT1', struct.pack('<I', room))
-    launches = [online.LAUNCH.unpack_from(await p.until(b'OLG1')) for p in players]  # OLG1/3/5 share the LAUNCH prefix
+    raw = [await p.until(b'OLG1') for p in players]  # OLG1/3/5 share the LAUNCH prefix
+    if indy and args.options is not None:
+        assert all(len(body) == online.LAUNCH.size + 8 and struct.unpack_from('<II', body, online.LAUNCH.size) == (args.options, 0)
+                   for body in raw), 'Launch did not carry the frozen Indy settings'
+    launches = [online.LAUNCH.unpack_from(body) for body in raw]
     for p in players:
         p.writer.close()
     for room_id, game_id, index, count, ticket in sorted(launches, key=lambda l: l[2]):

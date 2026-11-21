@@ -11,7 +11,7 @@ namespace NativeSessionSettings {
 // 16-player, lobby game 8): its room validates car numbers 1..16, the stock
 // entry 1..8. The ROM name alone cannot tell the two apart.
 inline bool Apply(std::array<uint16_t,64>& image,const std::string& game,uint32_t options,unsigned carNumber,bool research=false){
- unsigned id=9;
+ unsigned id=Indy500Online::Game+1; // Unknown Model 3 ROM is not Indy.
  const char* names[]={"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","srally2_8p","dirtdvls"};
  for(unsigned i=0;i<8;++i)if(game==names[i])id=i;
  if(research && id==3)id=8; // Scud Race Plus - 16 Player

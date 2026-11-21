@@ -11,10 +11,11 @@ online = relay.lobby
 
 
 class Client:
-    async def connect(self, port, name='Player', mask=511, enabled=1):
+    async def connect(self, port, name='Player', mask=511, enabled=1, hello=b'test GUI'):
         self.reader, self.writer = await asyncio.open_connection('127.0.0.1', port)
-        self.writer.write(relay.frame(b'HEL1', b'test GUI') + relay.frame(b'OEH6', online.HELLO.pack(1, mask, enabled, online.fixed(name, 32))))
-        assert (await self.next())[0] == b'HEL1'
+        self.writer.write(relay.frame(b'HEL1', hello) + relay.frame(b'OEH6', online.HELLO.pack(1, mask, enabled, online.fixed(name, 32))))
+        kind, self.hello, _ = await self.next()
+        assert kind == b'HEL1'
         await self.snapshot()
         return self
 
@@ -55,10 +56,10 @@ class Client:
         self.writer.close()
 
 
-async def board(port, game, ticket, channel, bad_guid=None):
+async def board(port, game, ticket, channel, bad_guid=None, registration=b'RLJ2', hello=b'native-test'):
     r, w = await asyncio.open_connection('127.0.0.1', port)
     guid = online.GAMES[game][1] if bad_guid is None else bad_guid
-    w.write(relay.frame(b'HEL1', b'native-test') + relay.frame(b'RLJ2', online.JOIN2.pack(1, channel, bytes([channel+1])*16, guid, ticket)))
+    w.write(relay.frame(b'HEL1', hello) + relay.frame(registration, online.JOIN2.pack(1, channel, bytes([channel+1])*16, guid, ticket)))
     return r, w
 
 
@@ -88,7 +89,7 @@ async def main():
         print('PASS AsyncNet=false rejected; unavailable game rejected')
         off.close(); missing.close()
 
-        for game in range(len(online.GAMES)):
+        for game in range(online.INDY500_GAME):  # native Model 2 path in run_indy500_online.py
             master = await client(name='Master')
             room_id = await master.create(game)
             master.send(b'OLT1', struct.pack('<I', room_id))

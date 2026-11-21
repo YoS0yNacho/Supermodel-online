@@ -120,8 +120,7 @@ uint64_t StartSyncNow()
 }
 bool FreshStartClock(const CTCPConnection::ClockSample& clock, uint64_t now)
 {
-	return clock.rtt >= 0 && clock.rtt <= 2000000 && clock.received <= now &&
-		clock.received != 0 && now - clock.received <= 3000000;
+	return RaceStart::FreshClock(clock.rtt,clock.received,now);
 }
 }
 
@@ -374,7 +373,7 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
       SendStartToken(2,token.maxRTT);
     } else {
       if(token.ready!=token.participants || token.clocks!=all ||
-         std::abs(token.deadline-m_gameNet.m_startDeadline)>50000) {
+         !RaceStart::ClocksClose(token.deadline,m_gameNet.m_startDeadline)) {
         if(token.kind==2) { retryPrepare("acknowledgement incomplete"); return; }
         AsyncError("native-cohort acknowledgement or clock closure failed"); return;
       }
@@ -382,8 +381,7 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
         // Commit only while the commit round still fits before the deadline
         // with margin for the last cabinet's acceptance check.
         m_gameNet.m_startRoundMaxUs=std::max(m_gameNet.m_startRoundMaxUs,round);
-        if(!m_gameNet.m_startPrepared || m_gameNet.m_startDeadline<=int64_t(now) ||
-           uint64_t(m_gameNet.m_startDeadline-int64_t(now))<round+RaceStart::CommitMarginUs) {
+        if(!m_gameNet.m_startPrepared || !RaceStart::CommitFits(m_gameNet.m_startDeadline,now,round)) {
           retryPrepare("prepare round too slow for the deadline"); return;
         }
         SendStartToken(3,token.maxRTT);
@@ -404,7 +402,7 @@ void CSimNetBoard::ReceiveStartToken(const std::vector<uint8_t>& data)
       m_gameNet.m_startPeerOffset=clock.offset;
     }
   } else if(token.kind==3) {
-    if(std::abs(token.deadline-transit.deadline)>50000) {
+    if(!RaceStart::ClocksClose(token.deadline,transit.deadline)) {
       AsyncError("inconsistent native-cohort commit"); return;
     }
     transit.committed=true;

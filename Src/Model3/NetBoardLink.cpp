@@ -35,6 +35,10 @@
 #include "Network/RelayProtocol.h"
 #include "Network/RelayUdpClient.h"
 #include "Network/Games/Policy.h"
+#include "Network/Online/Indy500.h"
+#include "Network/Online/Srallyc.h"
+#include "Network/Online/Daytona.h"
+#include "Network/Online/Sgt24h.h"
 
 namespace NetBoardProtocol
 {
@@ -77,6 +81,17 @@ using namespace NetBoardProtocol;
 
 void CNetBoardLink::Send(const void *data, size_t length)
 {
+  SendFrame(DataMessage::ID,data,length);
+}
+
+void CNetBoardLink::SendIndyRacePair(const void* data,size_t size)
+{
+  if (IndyRaceUdp() && size>=Indy500Online::RacePairMinBytes && size<=Indy500Online::RacePairMaxBytes)
+    SendFrame(RelayProtocol::IndyRacePairID,data,size);
+}
+
+void CNetBoardLink::SendFrame(uint32_t id,const void* data,size_t length)
+{
   std::shared_ptr<CTCPConnection> output;
   {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -84,7 +99,7 @@ void CNetBoardLink::Send(const void *data, size_t length)
   }
   if (!output)
     return;
-  DataMessage header(length);
+  NetProtocol::MessageHeader header(id,sizeof(DataMessage)+length);
   std::vector<uint8_t> message(header.size);
   memcpy(message.data(), &header, sizeof(header));
   if (length > 0)
@@ -133,6 +148,12 @@ CNetBoardLink::ReceiveResult CNetBoardLink::TryReceive(std::vector<uint8_t> &dat
   info = m_queue.front().info;
   m_queue.pop_front();
   return data.empty() ? ReceiveResult::Closed : ReceiveResult::Data;
+}
+
+bool CNetBoardLink::WaitForDataUntil(std::chrono::steady_clock::time_point deadline)
+{
+  std::unique_lock<std::mutex> lock(m_mutex);
+  return m_condition.wait_until(lock, deadline, [this] { return !m_queue.empty() || m_relayFailed || LinkBroken(); });
 }
 
 void CNetBoardLink::EnableEarlyForward(size_t segmentSize, unsigned machines, bool forward)
@@ -229,7 +250,7 @@ bool CNetBoardLink::OnJoin(const std::shared_ptr<CTCPConnection> &connection)
   return true;
 }
 
-bool CNetBoardLink::OnData(const std::shared_ptr<CTCPConnection> &connection, const uint8_t *message, size_t size)
+bool CNetBoardLink::OnData(const std::shared_ptr<CTCPConnection> &connection, const uint8_t *message, size_t size, bool indyPair)
 {
   std::lock_guard<std::mutex> lock(m_mutex);
   if (connection != m_input)
@@ -237,7 +258,40 @@ bool CNetBoardLink::OnData(const std::shared_ptr<CTCPConnection> &connection, co
     ErrorLog("Net board: %s sent data before it linked.", connection->GetPeerName().c_str());
     return false;
   }
+  const bool indy = m_relay && m_relayGUID == Indy500Online::Guid;
+  const auto payloadSize=size>=sizeof(DataMessage)?size-sizeof(DataMessage):0;
+  const bool valid=indyPair ? IndyRaceUdp() && payloadSize>=Indy500Online::RacePairMinBytes && payloadSize<=Indy500Online::RacePairMaxBytes :
+                             payloadSize==Indy500Online::PayloadSize;
+  if (indy && (!m_relayAssigned[1] || !valid || m_queue.size() >= 2048))
+  {
+    // Don't drop individual board frames to catch up; that would change the
+    // ring protocol. End a session that can't drain its ordered queue.
+    ErrorLog("INDY 500 Online: invalid board frame or receive queue full.");
+    return false;
+  }
+  if (m_relay && m_relayGUID == Sgt24hOnline::Guid &&
+      (!m_relayAssigned[1] || indyPair || payloadSize != Sgt24hOnline::PayloadSize || m_queue.size() >= 256))
+  {
+    ErrorLog("Super GT 24h Online: invalid board frame or receive queue full.");
+    return false;
+  }
+  if (m_relay && m_relayGUID == DaytonaOnline::Guid &&
+      (!m_relayAssigned[1] || indyPair || payloadSize != DaytonaOnline::PayloadSize || m_queue.size() >= 256))
+  {
+    ErrorLog("Daytona USA Online: invalid board frame or receive queue full.");
+    return false;
+  }
+  if (m_relay && m_relayGUID == SrallycOnline::Guid &&
+      (!m_relayAssigned[1] || indyPair || payloadSize != SrallycOnline::PayloadSize || m_queue.size() >= 256))
+  {
+    ErrorLog("Sega Rally Championship Online: invalid board frame or receive queue full.");
+    return false;
+  }
   Packet packet;
+  packet.info.indyPair=indyPair;
+  if (indy)
+    packet.info.receivedUs = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
   packet.data.assign(message + sizeof(DataMessage), message + size);
   // Early forwarding (receive thread): advance the timing header and send the
   // segment on now. Anything that is not a well-formed timed segment of the
@@ -294,20 +348,37 @@ void CNetBoardLink::OnDisconnect(const std::shared_ptr<CTCPConnection> &connecti
   m_condition.notify_all();   // also for the output connection
 }
 
-CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay, uint64_t relayGUID, const std::string& lobbyTicket)
+CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay, uint64_t relayGUID, const std::string& lobbyTicket, bool model2PoseUdp)
   : m_server(std::move(server)),
     m_address(address),
-    m_port(port), m_relay(relay), m_relayGUID(relayGUID), m_lobbyTicket(lobbyTicket)
+    m_port(port), m_relay(relay), m_relayGUID(relayGUID), m_lobbyTicket(lobbyTicket),
+    m_indyPoseUdp(model2PoseUdp && relay && relayGUID == Indy500Online::Guid),
+    m_srallycPoseUdp(model2PoseUdp && relay && relayGUID == SrallycOnline::Guid),
+    m_daytonaPoseUdp(model2PoseUdp && relay && relayGUID == DaytonaOnline::Guid),
+    m_sgt24hPoseUdp(model2PoseUdp && relay && relayGUID == Sgt24hOnline::Guid)
 {
   if (m_relay)
   {
     std::random_device random;
     for (auto& nonce : m_relayNonce) nonce = (uint64_t(random()) << 32) | random();
-    m_udpHandler = m_server->RegisterHandler(RelayProtocol::UdpConfig::ID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
-    m_udpHostHandler = m_server->RegisterHandler(RelayProtocol::UdpHostConfigID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
-    m_relayTickRateHandler = m_server->RegisterHandler(RelayProtocol::TickRate::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayTickRate(c,p,n); });
-    m_relayAdaptiveHandler = m_server->RegisterHandler(RelayProtocol::AdaptiveTick::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayAdaptiveTick(c,p,n); });
-    m_relayStarHandler = m_server->RegisterHandler(RelayProtocol::Star::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayStar(c,p,n); });
+    const bool nativeModel2 = m_relayGUID == Indy500Online::Guid || m_relayGUID == SrallycOnline::Guid || m_relayGUID == DaytonaOnline::Guid || m_relayGUID == Sgt24hOnline::Guid;
+    if (!nativeModel2 || m_indyPoseUdp || m_srallycPoseUdp || m_daytonaPoseUdp || m_sgt24hPoseUdp)
+      m_udpHandler = m_server->RegisterHandler(RelayProtocol::UdpConfig::ID,
+        [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n) || m_indyPoseUdp || m_daytonaPoseUdp || m_sgt24hPoseUdp; });
+    if (m_indyPoseUdp)
+    {
+      m_indyUdpHandler = m_server->RegisterHandler(RelayProtocol::IndyRaceUdpConfigID,
+        [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
+      m_indyPairHandler = m_server->RegisterHandler(RelayProtocol::IndyRacePairID,
+        [this](const auto& c,const uint8_t* p,size_t n) { return OnData(c,p,n,true); });
+    }
+    if (!nativeModel2)
+    {
+      m_udpHostHandler = m_server->RegisterHandler(RelayProtocol::UdpHostConfigID, [this](const auto& c,const uint8_t* p,size_t n) { return OnUdpConfig(c,p,n); });
+      m_relayTickRateHandler = m_server->RegisterHandler(RelayProtocol::TickRate::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayTickRate(c,p,n); });
+      m_relayAdaptiveHandler = m_server->RegisterHandler(RelayProtocol::AdaptiveTick::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayAdaptiveTick(c,p,n); });
+      m_relayStarHandler = m_server->RegisterHandler(RelayProtocol::Star::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayStar(c,p,n); });
+    }
     m_relayReadyHandler = m_server->RegisterHandler(RelayProtocol::Ready::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayReady(c,p,n); });
     m_relayErrorHandler = m_server->RegisterHandler(RelayProtocol::Error::ID, [this](const auto& c, const uint8_t* p, size_t n) { return OnRelayError(c,p,n); });
   }
@@ -327,6 +398,8 @@ CNetBoardLink::CNetBoardLink(std::shared_ptr<CNetServer> server, const std::stri
 
 CNetBoardLink::~CNetBoardLink(void)
 {
+  m_indyPairHandler.Reset();
+  m_indyUdpHandler.Reset();
   m_udpHandler.Reset();
   m_udpHostHandler.Reset();
   m_relayTickRateHandler.Reset();
@@ -347,6 +420,7 @@ CNetBoardLink::~CNetBoardLink(void)
 // local channel 0 <-> next cabinet channel 1, with opaque framed forwarding.
 bool CNetBoardLink::ConnectRelay()
 {
+  const bool nativeModel2 = m_relayGUID == Indy500Online::Guid || m_relayGUID == SrallycOnline::Guid || m_relayGUID == DaytonaOnline::Guid || m_relayGUID == Sgt24hOnline::Guid;
   for (unsigned channel=0; channel<2; ++channel)
   {
     {
@@ -355,7 +429,7 @@ bool CNetBoardLink::ConnectRelay()
       const auto& c = channel ? m_input : m_output;
       if (c && c->IsOpen()) continue;
     }
-    auto c = m_server->Connect(m_address,m_port);
+    auto c = m_server->Connect(m_address,m_port,m_indyPoseUdp ? Indy500Online::RaceHello : m_srallycPoseUdp ? SrallycOnline::PoseHello : m_daytonaPoseUdp ? DaytonaOnline::PoseHello : m_sgt24hPoseUdp ? Sgt24hOnline::PoseHello : nullptr);
     if (!c) return false;
     {
       std::lock_guard<std::mutex> lock(m_mutex);
@@ -365,9 +439,10 @@ bool CNetBoardLink::ConnectRelay()
     join.channel=channel;
     join.guid=m_relayGUID;
     memcpy(join.nonce,m_relayNonce,sizeof(join.nonce));
-    if (m_lobbyTicket.empty()) { if (!c->Send(join)) return false; }
+    if (m_lobbyTicket.empty() && !nativeModel2) { if (!c->Send(join)) return false; }
     else {
-      RelayProtocol::HybridJoin online;
+      RelayProtocol::LobbyJoin online;
+      if (!nativeModel2) online.id=RelayProtocol::HybridJoin::ID;
       online.channel=join.channel;online.guid=join.guid;
       memcpy(online.nonce,join.nonce,sizeof(join.nonce));
       if (!RelayProtocol::ParseTicket(m_lobbyTicket,online.ticket) || !c->Send(online)) return false;
@@ -443,18 +518,36 @@ bool CNetBoardLink::OnRelayReady(const std::shared_ptr<CTCPConnection>& c, const
   RelayProtocol::Ready ready; memcpy(&ready,p,size);
   std::lock_guard<std::mutex> lock(m_mutex);
   const unsigned channel = c==m_output ? 0 : c==m_input ? 1 : 2;
-  unsigned maxPlayers = m_relayGUID==Srally2Research::Guid?8u:m_relayGUID==ScudResearch::Guid?ScudResearch::Capacity:0u;
+  const bool indy = m_relayGUID == Indy500Online::Guid;
+  const bool rally = m_relayGUID == SrallycOnline::Guid;
+  const bool daytona = m_relayGUID == DaytonaOnline::Guid;
+  unsigned maxPlayers = m_relayGUID==Sgt24hOnline::Guid ? Sgt24hOnline::Cabinets : indy ? Indy500Online::Cabinets : rally ? SrallycOnline::Cabinets : daytona ? DaytonaOnline::Cabinets : m_relayGUID==Srally2Research::Guid?8u:m_relayGUID==ScudResearch::Guid?ScudResearch::Capacity:0u;
   for (const char* game : {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "dirtdvls"})
     if (GameNetwork::GUID(game) == m_relayGUID) maxPlayers = GameNetwork::MaxCabinets(game);
   if (ready.version!=RelayProtocol::Version || ready.count<2 || ready.count>maxPlayers || ready.index>=ready.count ||
       channel>1 || ready.channel!=channel || m_relayAssigned[channel] || m_relayFailed ||
-      (m_udp && (m_udp->Index()!=ready.index || m_udp->Count()!=ready.count)) ||
       (m_relayCount && (m_relayCount!=ready.count || m_relayIndex!=ready.index))) return false;
+  if (m_udp && (m_udp->Index()!=ready.index || m_udp->Count()!=ready.count))
+  {
+    if (!indy && !daytona && m_relayGUID!=Sgt24hOnline::Guid) return false;
+    m_udp.reset(); // optional presentation config cannot veto native Ready
+    m_daytonaUdpReady.store(false,std::memory_order_release);
+    m_sgt24hUdpReady.store(false,std::memory_order_release);
+  }
   m_relayIndex=ready.index; m_relayCount=ready.count; m_relayAssigned[channel]=true;
   if (m_relayAssigned[0] && m_relayAssigned[1])
-    InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz, ring segments %s",
-      ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed),
-      m_relayStar.load(std::memory_order_relaxed)?"fanned out by the relay":"forwarded hop by hop");
+  {
+    if (indy)
+      InfoLog("Relay: INDY 500 slot %u/%u, native TCP ring.", ready.index+1, ready.count);
+    else if (daytona)
+      InfoLog("Relay: Daytona USA slot %u/%u, native TCP ring.",ready.index+1,ready.count);
+    else if (rally)
+      InfoLog("Relay: Sega Rally Championship slot %u/%u, native TCP ring.", ready.index+1, ready.count);
+    else
+      InfoLog("Relay: room started, cabinet %u/%u, native %s / car %u, tick rate %u Hz, ring segments %s",
+        ready.index+1,ready.count,ready.index==0?"MASTER":"SLAVE",ready.index+1,m_relayTickRate.load(std::memory_order_relaxed),
+        m_relayStar.load(std::memory_order_relaxed)?"fanned out by the relay":"forwarded hop by hop");
+  }
   if (m_relayAssigned[0] && m_relayAssigned[1] && m_relayAdaptive.load(std::memory_order_relaxed))
     InfoLog("Relay: adaptive tick rate, ceiling %u Hz; the host lowers it under congestion", m_relayTickCap.load(std::memory_order_relaxed));
   m_condition.notify_all(); return true;
@@ -478,11 +571,21 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
  if(n<sizeof(RelayProtocol::UdpConfig)) return false;
  RelayProtocol::UdpConfig cfg;std::memcpy(&cfg,p,sizeof(cfg));
  const bool hosted=cfg.id==RelayProtocol::UdpHostConfigID;
+ const bool indyRace=cfg.id==RelayProtocol::IndyRaceUdpConfigID;
  if(!hosted && n!=sizeof(cfg)) return false;
  std::lock_guard<std::mutex> lock(m_mutex);
  if(c!=m_output || m_udp || m_relayFailed || m_relayAssigned[0] || cfg.version!=1 || !cfg.port || cfg.port>65535 || cfg.count<2 || cfg.count>16 || cfg.index>=cfg.count) return false;
  bool nonzero=false;for(auto b:cfg.token) nonzero|=b!=0;if(!nonzero) return false;
- size_t size=m_relayGUID==Srally2Research::Guid?2048u:m_relayGUID==ScudResearch::Guid?Scud::PacketSize:0u;
+ const bool indy=m_relayGUID==Indy500Online::Guid;
+ if(indy && (!m_indyPoseUdp || hosted || cfg.count>Indy500Online::Cabinets)) return false;
+ const bool rally=m_relayGUID==SrallycOnline::Guid;
+ if(rally && (!m_srallycPoseUdp || hosted || indyRace || cfg.count>SrallycOnline::Cabinets)) return false;
+ const bool daytona=m_relayGUID==DaytonaOnline::Guid;
+ if(daytona && (!m_daytonaPoseUdp || hosted || indyRace || cfg.count>DaytonaOnline::Cabinets)) return false;
+ const bool sgt=m_relayGUID==Sgt24hOnline::Guid;
+ if(sgt && (!m_sgt24hPoseUdp || hosted || indyRace || cfg.count>Sgt24hOnline::Cabinets)) return false;
+ if(indyRace && !indy) return false;
+ size_t size=sgt?Sgt24hOnline::PoseWireBytes:daytona?DaytonaOnline::PoseWireBytes:rally?SrallycOnline::PoseWireBytes:indy?(indyRace?Indy500Online::RaceWireBytes:Indy500Online::PoseWireBytes):m_relayGUID==Srally2Research::Guid?2048u:m_relayGUID==ScudResearch::Guid?Scud::PacketSize:0u;
  if(m_relayGUID==Srally2Research::Guid && cfg.count>8)return false;
  if(m_relayGUID==ScudResearch::Guid && cfg.count>ScudResearch::Capacity)return false;
  for(const char* game:{"daytona2","dayto2pe","scud","scudplus","srally2","lemans24","dirtdvls"})
@@ -500,8 +603,38 @@ bool CNetBoardLink::OnUdpConfig(const std::shared_ptr<CTCPConnection>& c,const u
   if(count && std::memcmp(hc.peers[0].token.data(),cfg.token,16)) return false;
  }
  m_udp=std::make_unique<CRelayUdpClient>(host,uint16_t(cfg.port),cfg.token,cfg.index,cfg.count,size,hosted?&hc:nullptr);
- if(m_relayAdaptive.load(std::memory_order_relaxed)) m_udp->EnableFeedback(true);
- InfoLog("Relay UDP: snapshot lane configured (UDP port %u); in-race snapshots use UDP, setup/start control and fallback use TCP",cfg.port);
+ if(indy)
+ {
+  // The framing is negotiated even if this cabinet has no UDP socket.
+  // Without its UDP acknowledgements no other cabinet may switch to primary.
+  m_indyRaceUdp.store(indyRace,std::memory_order_release);
+  if(!m_udp->Available()) m_udp.reset();
+  if(indyRace) InfoLog("INDY 500 race UDP: %s; TCP owns native order and control.",m_udp ? "motion lane configured" : "unavailable, using full TCP");
+  else InfoLog("INDY 500 pose UDP: %s; native TCP ring unchanged.",m_udp ? "optional snapshot lane configured" : "unavailable, using TCP poses");
+ }
+ else if(sgt)
+ {
+  if(!m_udp->Available()) m_udp.reset();
+  m_sgt24hUdpReady.store(bool(m_udp),std::memory_order_release);
+  InfoLog("Super GT 24h pose UDP: %s; native TCP ring unchanged.",m_udp ? "experimental lane configured" : "unavailable, using TCP");
+ }
+ else if(daytona)
+ {
+  if(!m_udp->Available()) m_udp.reset();
+  m_daytonaUdpReady.store(bool(m_udp),std::memory_order_release);
+  InfoLog("Daytona USA pose UDP: %s; native TCP ring unchanged.",m_udp ? "optional snapshot lane configured" : "unavailable, using TCP poses");
+ }
+ else if(rally)
+ {
+  if(!m_udp->Available()) m_udp.reset();
+  m_srallycUdpReady.store(bool(m_udp),std::memory_order_release);
+  InfoLog("Sega Rally Championship pose UDP: %s; native TCP ring unchanged.",m_udp ? "optional snapshot lane configured" : "unavailable, using TCP poses");
+ }
+ else
+ {
+  if(m_relayAdaptive.load(std::memory_order_relaxed)) m_udp->EnableFeedback(true);
+  InfoLog("Relay UDP: snapshot lane configured (UDP port %u); in-race snapshots use UDP, setup/start control and fallback use TCP",cfg.port);
+ }
  return true;
 }
 void CNetBoardLink::SendPresentation(const void* p,size_t n,uint64_t sourceUs,uint64_t freshUs,uint64_t controlUs,const std::vector<uint8_t>* streamedMask,

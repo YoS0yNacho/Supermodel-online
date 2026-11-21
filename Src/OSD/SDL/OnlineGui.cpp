@@ -3,6 +3,7 @@
 #include "Network/RelayProtocol.h"
 #include "Pkgs/imgui/imgui.h"
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <cstdio>
 #include <filesystem>
@@ -148,7 +149,10 @@ void OnlineGui::Draw(const std::string& dir) {
     if(current) {
       ImGui::Text("%s  |  %s  |  %u/%u players",current->name.c_str(),Online::Titles[current->game],unsigned(current->members.size()), Online::MaxPlayers(current->game));
       if(s.pingMs){ImGui::SameLine();ImGui::TextUnformatted("|");ImGui::SameLine();ImGui::TextColored(PingColor(s.pingMs),"your ping %u ms",unsigned(s.pingMs));}
-      ImGui::TextWrapped("Hosting: %s",current->hostChecking?"Testing TCP/UDP host reachability...":current->udpMode==3?"Creator-hosted room/chat + TCP/UDP":current->udpMode==2?"Creator-hosted TCP + UDP":current->udpMode==1?"Legacy UDP-only host":"Central relay");
+      const bool indy = current->game == Indy500Online::Game;
+      const bool rally = current->game == SrallycOnline::Game;
+      const bool daytona = current->game == DaytonaOnline::Game;
+      ImGui::TextWrapped("Hosting: %s",indy?"Central relay (TCP control, optional UDP motion)":(rally || daytona || current->game==Sgt24hOnline::Game)?"Central relay (native TCP ring)":current->hostChecking?"Testing TCP/UDP host reachability...":current->udpMode==3?"Creator-hosted room/chat + TCP/UDP":current->udpMode==2?"Creator-hosted TCP + UDP":current->udpMode==1?"Legacy UDP-only host":"Central relay");
       for(size_t i=0;i<current->members.size();++i) {
         const auto& m=current->members[i];
         ImGui::TextColored(CarBadgeColor(uint32_t(i+1)),"[Link %u]",unsigned(i+1));
@@ -176,6 +180,8 @@ void OnlineGui::Draw(const std::string& dir) {
       ImGui::SameLine();
       if(ImGui::Button("Options")) openRoomOptions=true;
       ImGui::EndDisabled();
+      if(indy || rally || daytona) ImGui::TextWrapped("Cabinet IDs are assigned automatically. Let Checking Network finish before using the normal game controls to start.");
+      if(rally || daytona) ImGui::TextWrapped("Use Coin and Start on each cabinet to enter the race.");
       if(current->master!=s.self) ImGui::TextWrapped("Waiting for the master to start. Your game will load automatically.");
       else ImGui::TextWrapped("Start Link loads the selected game on every cabinet, then links once all are connected. Press Enter in-game to keep chatting.");
     } else {
@@ -284,8 +290,17 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
       const uint32_t available=Available(dir);
       ImGui::SetNextItemWidth(300.0f*scale);
       if(ImGui::BeginCombo("Selected ROM",Online::Titles[game])) {
-        for(unsigned i=0;i<Online::GameCount;++i) {
-          ImGui::BeginDisabled(!(available&(1u<<i)));
+        // Sort the display only; the game IDs are shared with the lobby protocol.
+        static const auto displayOrder = [] {
+          std::array<unsigned, Online::GameCount> ids{};
+          for (unsigned i = 0; i < Online::GameCount; ++i) ids[i] = i;
+          std::sort(ids.begin(), ids.end(), [](unsigned a, unsigned b) {
+            return std::strcmp(Online::Titles[a], Online::Titles[b]) < 0;
+          });
+          return ids;
+        }();
+        for(unsigned i:displayOrder) {
+          ImGui::BeginDisabled(!(available&(1u<<i)) || (i==Indy500Online::Game && !s.indy500Relay) || (i==SrallycOnline::Game && !s.srallycRelay) || (i==DaytonaOnline::Game && !s.daytonaRelay) || (i==Sgt24hOnline::Game && !s.sgt24hRelay));
           if(ImGui::Selectable(Online::Titles[i],unsigned(game)==i)) game=int(i);
           ImGui::EndDisabled();
         }
@@ -296,9 +311,20 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
       if(ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
       ImGui::InputText("Lobby name",title,sizeof(title));
       ImGui::Separator();
-      ImGui::SetNextItemWidth(300.0f*scale);
-      ImGui::Combo("Hosting",&udpHosting,"Central relay\0Self-host room + TCP/UDP (try UPnP)\0");
-      if(udpHosting) {
+      const bool indy = unsigned(game) == Indy500Online::Game;
+      const bool rally = unsigned(game) == SrallycOnline::Game;
+      const bool daytona = unsigned(game) == DaytonaOnline::Game;
+      const bool sgt = unsigned(game) == Sgt24hOnline::Game;
+      const bool model2 = Online::Model2RelayGame(unsigned(game));
+      if(model2) {
+        ImGui::Text("Hosting: Central relay (TCP ring, 2-%u seats)", Online::MaxPlayers(unsigned(game)));
+        if((indy && !s.indy500Relay) || (rally && !s.srallycRelay) || (daytona && !s.daytonaRelay) || (sgt && !s.sgt24hRelay)) ImGui::TextDisabled("This relay needs an update for %s.", Online::Titles[game]);
+      } else {
+        ImGui::SetNextItemWidth(300.0f*scale);
+        ImGui::Combo("Hosting",&udpHosting,"Central relay\0Self-host room + TCP/UDP (try UPnP)\0");
+      }
+      const bool selfHost = !model2 && udpHosting != 0;
+      if(selfHost) {
         ImGui::SetNextItemWidth(110.0f*scale);
         ImGui::InputInt("Host TCP/UDP port",&udpPort,0,0);
         ImGui::SetNextItemWidth(110.0f*scale);
@@ -308,14 +334,14 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
         if(ImGui::IsItemHovered()) ImGui::SetTooltip("Network update rate ceiling for this room. Your host lowers it automatically (down to 10 Hz)\nwhile a player's connection or your upload is congested and restores it when the link is clean again.\nDefault 20 Hz; 60 Hz = one update per frame. Players keep moving smoothly at any rate.");
         ImGui::TextWrapped("The creator hosts the room, chat, standings and all TCP/UDP gameplay. Central only lists the room. TCP and UDP are tested at creation; failure switches the room to central relay hosting and announces it in chat. Your IP is shared with players.");
         if(udpPort<1024 || udpPort>65535) ImGui::TextDisabled("Enter a host port from 1024 to 65535.");
-      } else {
+      } else if(!model2) {
         ImGui::TextWrapped("The central relay hosts the room, chat and gameplay.");
       }
       ImGui::Spacing();
-      const bool canCreate=game>=0 && unsigned(game)<Online::GameCount && (Available(dir)&(1u<<game)) && HasPrintableText(title) && (!udpHosting || (udpPort>=1024 && udpPort<=65535));
+      const bool canCreate=game>=0 && unsigned(game)<Online::GameCount && (Available(dir)&(1u<<game)) && HasPrintableText(title) && (!indy || s.indy500Relay) && (!rally || s.srallycRelay) && (!daytona || s.daytonaRelay) && (!sgt || s.sgt24hRelay) && (!selfHost || (udpPort>=1024 && udpPort<=65535));
       ImGui::BeginDisabled(!canCreate);
       if(ImGui::Button("Create",ImVec2(110.0f*scale,0))) {
-        client.Create(uint32_t(game),title,udpHosting!=0,uint16_t(udpPort),unsigned(hostTickRate));
+        client.Create(uint32_t(game),title,selfHost,uint16_t(udpPort),unsigned(hostTickRate));
         ImGui::CloseCurrentPopup();
       }
       ImGui::EndDisabled();
@@ -342,11 +368,12 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
       const auto room=std::find_if(s.rooms.begin(),s.rooms.end(),[&](const Online::Room& r){return r.id==s.room;});
       if(room!=s.rooms.end()) {
         const bool frozen=room->state!=0 || room->hostChecking;
+        const bool indy=room->game==Indy500Online::Game;
+        const bool model2=Online::Model2RelayGame(room->game);
         {
-          // Every game: the master picks the emulated video rate for the whole room.
           ImGui::TextUnformatted("Emulated video (all cabinets)");
           const bool video60=NativeRoomSettings::HasVideo60(room->options);
-          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
+          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported || (model2 && !s.model2VideoRelay) || room->game==Sgt24hOnline::Game);
           ImGui::SetNextItemWidth(240.0f*scale);
           if(ImGui::BeginCombo("Refresh rate",video60?"60 Hz":"57.524 Hz (original hardware)")){
             if(ImGui::Selectable("57.524 Hz (original hardware)",!video60)&&video60)client.SetRoomOptions(room->id,room->options&~NativeRoomSettings::Video60);
@@ -356,29 +383,43 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
           ImGui::EndDisabled();
           ImGui::TextDisabled("Every cabinet emulates the same rate; software frame limiting stays on,");
           ImGui::TextDisabled("your own VSync setting is kept. Master only; all clients must be updated.");
+          if(model2) {
+            if(s.model2VideoRelay) ImGui::TextDisabled("60 Hz also runs the Model 2 game's frame clock faster.");
+            else ImGui::TextDisabled("This relay supports only the native Model 2 rate. Update it for 60 Hz.");
+          }
           ImGui::Spacing();
         }
+        if(room->game==Sgt24hOnline::Game)ImGui::TextDisabled("SGT 24h: experimental native TCP; default settings only. UDP motion not yet implemented.");
         if(NativeRoomSettings::Supported(room->game)){
           ImGui::Separator();
-          ImGui::TextUnformatted("Shared native game settings");
-          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->nativeSettingsSupported);
-          int difficulty=int(NativeRoomSettings::Difficulty(room->options)),mode=int(NativeRoomSettings::Mode(room->options));
+          ImGui::TextUnformatted(indy?"Indy 500 game settings":"Shared native game settings");
+          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->nativeSettingsSupported || (model2 && !room->optionsSupported));
+          const bool shared=(room->options&NativeRoomSettings::Enabled)!=0;
+          const uint32_t settings=indy && !shared ? NativeRoomSettings::Defaults(room->game) | room->options : room->options;
+          int difficulty=int(NativeRoomSettings::Difficulty(settings)),mode=int(NativeRoomSettings::Mode(settings));
           ImGui::SetNextItemWidth(240.0f*scale);
           if(ImGui::BeginCombo("Difficulty",NativeRoomSettings::DifficultyName(room->game,unsigned(difficulty)))){
             for(unsigned v=0;v<NativeRoomSettings::DifficultyCount(room->game);++v)
-              if(ImGui::Selectable(NativeRoomSettings::DifficultyName(room->game,v),unsigned(difficulty)==v))client.SetRoomOptions(room->id,NativeRoomSettings::WithDifficulty(room->options,v));
+              if(ImGui::Selectable(NativeRoomSettings::DifficultyName(room->game,v),unsigned(difficulty)==v))client.SetRoomOptions(room->id,NativeRoomSettings::WithDifficulty(settings,v));
             ImGui::EndCombo();
           }
           ImGui::SetNextItemWidth(240.0f*scale);
-          if(ImGui::BeginCombo("Game mode",NativeRoomSettings::ModeName(room->game,unsigned(mode)))){
+          if(ImGui::BeginCombo(indy?"Race mode":"Game mode",NativeRoomSettings::ModeName(room->game,unsigned(mode)))){
             for(unsigned v=0;v<NativeRoomSettings::ModeCount(room->game);++v)
-              if(ImGui::Selectable(NativeRoomSettings::ModeName(room->game,v),unsigned(mode)==v))client.SetRoomOptions(room->id,NativeRoomSettings::WithMode(room->options,v));
+              if(ImGui::Selectable(NativeRoomSettings::ModeName(room->game,v),unsigned(mode)==v))client.SetRoomOptions(room->id,NativeRoomSettings::WithMode(settings,v));
             ImGui::EndCombo();
+          }
+          if(indy){
+            bool handicap=NativeRoomSettings::HasIndyHandicap(settings);
+            if(ImGui::Checkbox("Handicap",&handicap))
+              client.SetRoomOptions(room->id,(settings&~NativeRoomSettings::IndyHandicap)|(handicap?NativeRoomSettings::IndyHandicap:0u));
           }
           ImGui::EndDisabled();
           if(room->master!=s.self)ImGui::TextDisabled("Only the room master can change these settings.");
-          if(!room->nativeSettingsSupported)ImGui::TextDisabled("Update the relay and every client for native settings.");
-          if(!(room->options&NativeRoomSettings::Enabled))ImGui::TextDisabled("Shared native settings have not been enabled in this room.");
+          if(model2 && !room->optionsSupported)ImGui::TextDisabled("This relay needs an update for these room options.");
+          else if(!room->nativeSettingsSupported)ImGui::TextDisabled("Update all room members for shared native settings.");
+          if(indy && !shared)ImGui::TextDisabled("No room override; the game uses its cabinet settings.");
+          if(!model2 && !shared)ImGui::TextDisabled("Shared native settings have not been enabled in this room.");
           ImGui::Spacing();
         }
         if(NativeRoomSettings::CarLimit(room->game)){
@@ -414,19 +455,19 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
           ImGui::TextDisabled("Hold the brake pedal while confirming a course for native Hornet selection/tuning.");
           ImGui::TextDisabled("Master only; update every client and relay for this option.");
         }
-        if(room->game==3){
-          bool secretCars=(room->options&1)!=0;
+        if(NativeRoomSettings::SupportsSecretCars(room->game)){
+          bool secretCars=NativeRoomSettings::HasSecretCars(room->game,room->options);
           ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
-          if(ImGui::Checkbox("Enable secret cars",&secretCars))client.SetRoomOptions(room->id,(room->options&~1u)|(secretCars?1u:0u));
+          if(ImGui::Checkbox("Enable secret cars",&secretCars))client.SetRoomOptions(room->id,(room->options&~NativeRoomSettings::SecretCars)|(secretCars?NativeRoomSettings::SecretCars:0u));
           ImGui::EndDisabled();
         }
-        if(room->game<4){
-          bool realPlayers=(room->options&NativeRoomSettings::RealPlayers)!=0;
+        if(NativeRoomSettings::SupportsRaceModifiers(room->game)){
+          bool realPlayers=NativeRoomSettings::HasRealPlayers(room->game,room->options);
           ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
           if(ImGui::Checkbox("Real players only (no CPU cars)",&realPlayers))client.SetRoomOptions(room->id,(room->options&~NativeRoomSettings::RealPlayers)|(realPlayers?NativeRoomSettings::RealPlayers:0u));
           ImGui::EndDisabled();
           ImGui::TextDisabled("Grid contains only the cabinets in this room; playing solo starts time attack.");
-          bool noCollisions=(room->options&NativeRoomSettings::NoCollisions)!=0;
+          bool noCollisions=NativeRoomSettings::HasNoCollisions(room->game,room->options);
           ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
           if(ImGui::Checkbox("Disable car collisions (no crashes)",&noCollisions))client.SetRoomOptions(room->id,(room->options&~NativeRoomSettings::NoCollisions)|(noCollisions?NativeRoomSettings::NoCollisions:0u));
           ImGui::EndDisabled();
@@ -435,6 +476,11 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
         }
         if(NativeRoomSettings::Supported(room->game))ImGui::TextDisabled("Applied at launch for this online session only. Offline NVRAM is unchanged.");
       } else ImGui::Dummy(ImVec2(320.0f*scale,70.0f*scale));
+      if(!s.error.empty()){
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX()+430.0f*scale);
+        ImGui::TextUnformatted(s.error.c_str());
+        ImGui::PopTextWrapPos();
+      }
       if(ImGui::Button("Close",ImVec2(110.0f*scale,0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();

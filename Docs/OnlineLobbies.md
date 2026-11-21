@@ -49,9 +49,229 @@ lobbies: update `relay.py` and every cabinet's executable together.
 Allow inbound TCP 1970 on the relay computer; clients need only outbound
 connections. No additional control port or web browser is used.
 
+## Daytona USA (original Model 2 Revision A)
+
+This room requires **`daytona.zip`**, the original Rev A Model 2 program.
+It is not Daytona USA 2, Daytona USA 2 Power Edition, or an alternate Model 2
+revision. Use a client and central `relay.py` that both advertise Daytona
+support. Older relays remain usable for their existing titles; they cannot
+create a Rev A Online room.
+
+1. In **Online → Create Lobby**, choose **Daytona USA (Rev A)**. This is a
+   central relay room for **2–8 cabinets**. Each cabinet needs the exact ROM.
+2. The creator can set **Difficulty** (Easy, Normal, Hard, Hardest) and
+   **Game mode** (Normal, Grand Prix, Endurance) under **Options**. Defaults
+   are Normal / Normal. Seats are assigned from the booked roster when the
+   creator presses **Start Link**: cabinet 1 is MASTER, the rest are SLAVE.
+3. Wait for native Communication Board Checking to finish. Use the game's
+   normal Coin and Start controls on each cabinet, and the wheel and pedal
+   for selection. Online settings affect only this session; the client does
+   not write the assigned roles/options to a cabinet's offline NVRAM.
+4. If a cabinet disconnects, the room ends; return to Online and create a
+   new one. Late joins, live master migration, manual car-number overrides,
+   hosted-game routes and Model 3 gameplay modifiers do not apply to
+   original Daytona. See [Room video rate](#room-video-rate-57524--60-hz-throttle-and-returning-to-online)
+   for the shared refresh-rate setting.
+
+**Native TCP remains authoritative.** The ordered ring still forwards the
+full 3,585-byte Model 2 payloads and uses the game's own FF/FE link setup and
+numbered data/FC frames. UDP, when all cabinets advertise it, carries a
+separate `DYP1` remote-body presentation sample. It cannot replace the TCP
+ring or change cars' input, collision, timing, rankings or cameras. Stale,
+unmatched or unavailable samples fall back to the TCP draw predictor. Close
+linked cars, transitions and unverified draw paths use native coordinates.
+TCP and UDP use the same relay port number; TCP alone is sufficient to race.
+
+- `-no-daytona-udp` on any cabinet, or relay `--tcp-only`: no Daytona pose
+  UDP in that room; the TCP ring is unchanged.
+- `-no-daytona-prediction`: draw native remote cars locally and opt that
+  cabinet out of pose negotiation. The other cabinets can still use the
+  TCP draw predictor.
+- These switches are only for original Daytona Rev A Online. They do not
+  affect offline/stock-direct-link Daytona or Model 3 Daytona USA 2.
+
+## Sega Rally Championship Twin/DX (Model 2A Revision C)
+
+Use the exact **`srallyc.zip`** (Twin/DX, Revision C) on all cabinets, and a
+client and central `relay.py` that advertise `srallyc` support. This is the
+original Sega Rally Championship, **not** Sega Rally 2 or a renamed Rev B,
+Rev C conversion, or DX-only clone. The ROM loader checks the archive and
+Online checks the assembled Rev C program before opening the board channels.
+Older relays/clients continue to work with their existing games; they cannot
+create or join this new room.
+
+1. Go to **Online**, connect to the updated relay, and create a **Sega Rally
+   Championship (Rev C)** room. Other cabinets select the room and **Join
+   Lobby**. There are **2–4 driving seats**; join in the desired Link order.
+2. The creator can set **Difficulty** (Easy, Normal, Hard, Hardest) and **Game
+   mode** (Normal, Short, Long) in **Options**. Defaults are Normal / Normal;
+   the selected values are fixed for all seats at Start Link. Other cabinet
+   preferences such as country and controls stay local.
+3. The creator clicks **Start Link**. Link 1 is native **CAR 1**, and Link 2–4
+   are native **CAR 2–4**. Start with any offline link setting or no save at all;
+   do not edit the Test menu. Roles and room settings apply to the in-memory
+   EEPROM only. Relay play never writes the offline NVRAM file.
+4. Let **COMMUNICATION BOARD CHECKING** finish on all cabinets, then use the
+   native **Coin**, **Start**, car and course controls. **Start Link** launches
+   the cabinets; it does not start the native race. If a cabinet drops, all
+   survivors return to Online; use a new room to race again.
+
+The Rev C board always uses the complete ordered TCP ring: both RLJ2 channels
+agree on the reserved roster before the game boots its role, then FF/FE must
+agree with it. The relay forwards native 3,585-byte payloads on
+`1 → N → … → 2 → 1` without rearranging them. No creator hosting, adaptive tick
+rate, Model 3 race overrides, or Indy compact board frames are used.
+`NOTLINK` and the hardware `RELAY` role are not driving seats. The room's
+emulated video rate defaults to 57.524 Hz.
+
+**Remote car motion.** The exact Rev C drawing code can smooth the horizontal
+position and yaw of a verified remote car. It keeps the native position when
+cars are close or when the scene, row identity or continuity is uncertain.
+It does not change the local car, vertical position, collision, race progress,
+setup, clocks, or saved data. `-no-srallyc-prediction` (or
+`SrallycPrediction = false`) makes this cabinet draw native positions.
+
+With the updated relay and every seat opted in, a separate **SRP1** UDP lane
+can supply a newer position. The receiver requires a live, recent pose for
+that seat/scene and an exact match to the current TCP row in the sender's
+bounded history. Late, unrelated, or lost UDP data fades back to TCP-based
+presentation; the full native board traffic continues on TCP the entire time.
+A previous Rev C build, `-no-srallyc-udp` (`SrallycPoseUdp = false`) on any
+seat, an older Rev C relay, or relay `--tcp-only` leaves the whole room on TCP.
+This is comparable presentation behavior to Indy, not protocol interchange,
+TCP bandwidth reduction, or a guarantee of equal WAN latency.
+
+ROM-free checks: `python3 Tests/run_srallyc_online.py`,
+`python3 Tests/run_srallyc_pose.py`,
+`g++ -std=c++17 -ISrc Tests/SrallycMotionTest.cpp -o /tmp/srallyc-motion-test && /tmp/srallyc-motion-test`,
+`python3 Tests/run_online_client.py --pre-srallyc-relay /path/to/previous/relay.py`,
+and `g++ -std=c++17 -ISrc Tests/SrallycRelayEepromTest.cpp -o /tmp/srallyc-eeprom-test && /tmp/srallyc-eeprom-test`.
+
+## INDY 500 Twin (Model 2 native link)
+
+Use the exact **INDY 500 Twin (Revision A, Newer)** `indy500.zip` on every
+cabinet. This lab accepts **2–8 linked driving seats** (up to four Twin sets).
+Use matching **pre-entry sync** clients on all Indy seats and the eight-seat
+`relay.py`. Do not mix them with the older native-only or GO-sync Indy clients.
+The native Indy frame size and cabinet timing are unchanged.
+
+1. In **Online**, connect to a private central relay and create an **INDY 500
+   Twin** lobby. Join in cabinet-ID order. The creator is Link 1. A ninth seat
+   cannot join, and no one can join after **Start Link**.
+2. Before **Start Link**, open **Options** to set **Difficulty** (Very Easy
+   through Hardest), **Race mode** (Normal or Long), and **Handicap** (On/Off).
+   There is no enable switch. The host edits; guests can see the choices.
+   Updated rooms start with Normal / Normal / On. If an unmodified room
+   includes a client without Indy room-options support, the game uses each
+   cabinet's settings. Nondefault choices require every client to support
+   Indy room options.
+3. The creator clicks **Start Link**. Current clients automatically apply
+   native cabinet IDs from the relay: Link 1 is **MASTER** and Link 2 through N
+   are **SLAVE**. Standalone saves and fresh installs work without editing the
+   Test menu. This changes only the session's in-memory settings; Online does
+   not write NVRAM. Keep other native race settings matched. Older clients
+   without automatic assignment still require matching IDs and link modes in
+   **Test > Game Assignments**, even if the relay reports both slots ready.
+4. Wait for the ROM to finish **Checking Network**, then use the normal coin,
+   Start, course and transmission controls. Select the same course. Start Link
+   opens and links the cabinets; it does not start the race by itself.
+
+Indy's **native link is central TCP**. It does not use Model 3 AsyncNet,
+fan-out of the native ring, adaptive tick rate, self-hosting, Model 3 race
+modifiers. The relay needs inbound TCP and, optionally, UDP on that same port
+for the race-motion lane below. Keep it on a private network or VPN.
+The room's emulated video rate defaults to 57.524 Hz.
+
+The relay routes the native `FF`/`FE` handshake and each ordered data + `FC`
+pair over TCP. The native payloads are 3,585 bytes after decoding. In a room of N seats the wire goes `1 → N → … → 2 → 1`: `FE`
+assigns the highest ID to the first Slave, so this yields the visible lobby
+IDs. For 3–8 seats the master seeds at least one complete data/FC pair per
+seat. If the native `FF` handshake takes longer to make its round trip, the
+master can seed additional pairs while awaiting the first complete return.
+It sends at most one per guest vblank and stops at the first usable return
+or at the measured limit (no more than 32 pairs). Then each cabinet consumes
+one ordered predecessor pair per guest vblank before sending the next. The
+250 ms wait for a missing pair and the local receive-dwell limit still apply;
+no pairs are skipped or replayed. Long or stalled rings can still time out.
+This is not a claim of low end-to-end latency.
+
+**Race-entry sync is automatic for linked native racers.** The stock course
+and transmission selections end normally. Indy waits on its native flag /
+**“Ladies and gentlemen, start your engines”** screen, just before the track
+intro. The CPUs, vblanks, and native board traffic continue while the screen
+holds. The flag overlay cannot expire during that hold; its countdown resumes
+at release. This does **not** hold the rolling-start **GO**, set player inputs,
+or change the race timer. The original GO lab switch
+is obsolete. Offline and direct-link play do not use this gate.
+
+The barrier takes the actual race participants from the ROM. Cabinets outside
+that race still forward the control token but are not required to coin in or
+start; no synchronized deadline is needed for a native solo race. Like the
+Model 3 games, the start leader takes a complete ring-time measurement and
+uses `RaceStart::ReleaseLead` (at least 500 ms; three measured rounds plus
+300 ms, with bounded retries). Each cabinet converts the deadline with its
+incoming peer's monotonic clock offset. Prepare and commit must close in time;
+a lost link or failed deadline does not fall back to an unsynchronized release.
+Release is consumed at the next eligible guest frame, not a scanout lock.
+
+Two-seat Online uses the earlier lab's two-pair priming and 160 ms local receive
+age bound by default. The two-seat lab playout overrides remain available; the
+3–8-seat flow-controlled window and 250 ms bounds are separate.
+
+**Remote motion (INDY 500 Twin Rev A, Newer).** During normal driving in an
+Online race, the client uses the native car-to-cabinet mapping and the position
+and update counter already in the link stream. It predicts the view of the
+other players and the AI cars their cabinets own, not the local car or its AI.
+The client filters velocity, extrapolates horizontal position and wrapped yaw,
+and blends small corrections more gently than large ones. Its lead is a
+bounded hint from receive dwell, hop RTT and native forwarding, not an exact
+measure of total latency. It advances no more than eight native frames into a
+short gap, with separate translation/heading caps. Old samples or unusual
+motion fall back to the native pose. Close to your car, the display blends
+back to the native pose used for collisions.
+
+Only operands of the verified car drawing path are changed. This optional drawing step does not alter native state, link timing,
+or race control. No prediction runs at the flag/intro, in attract, or offline/direct.
+`-no-indy-prediction` (or `IndyPrediction = false`) disables it per cabinet;
+`-net-smoothing=0|1|2` selects fixed, adaptive (default), or extra blend. The
+setting affects what that cabinet draws, so matching *pre-entry protocol*
+clients may use different levels or leave prediction disabled. No new server
+or lobby setting is required for TCP prediction.
+
+**UDP race motion (Rev A Online).** In a fully updated room, once all
+linked cabinets are racing and mutually receiving fresh samples, positions
+and angles travel by latest-wins UDP fan-out (at most 261 bytes per datagram
+before IP/UDP headers). Validated samples are used in the native receive rows,
+even with `-no-indy-prediction`. Every native data + `FC` tick still completes
+in TCP order. Compact control pairs keep the other bytes reliable, including
+car state, phase, laps and finish, with full movement anchors on state
+changes and at regular intervals. The ring forwards these anchors intact;
+they do not rewind a remote car that already has a newer, verified position.
+Fresh motion can advance across a short gap between ordered pairs. Genuine
+state changes and resets still take effect in order. Startup, entry and
+special car states use full native motion on TCP.
+
+A lost UDP sample does not block playout. Stale or unusable samples cause
+automatic full TCP fallback; the race can return to UDP after the lane is
+healthy again. The ring must still be connected. Compatible older clients
+keep full TCP movement in mixed rooms and may use the older pose feed.
+`-no-indy-udp` (or the existing `IndyPoseUdp = false` setting) opts a client
+out; `--tcp-only` on the relay disables UDP for every room.
+
+This is not WAN-validated. For a first race, leave `--latency-ms` and
+`--jitter-ms` off: these are artificial test impairments, not speed settings.
+If the ROM stays on **Checking Network**, check that every cabinet uses the
+same supported ROM and a current client. The client log should report an
+assigned native ID and then `link established`; the relay slot message alone
+only confirms TCP admission. A disconnected cabinet ends the room for
+everyone; create a new room instead of reusing the launch tickets.
+
+Protocol regressions: `python3 Tests/run_indy500_online.py`,
+`python3 Tests/run_indy_room_options.py`, and `python3 Tests/run_indy_race_udp.py`.
+
 ## Configurable tick rate (`--tick-rate`)
 
-The default requested network tick rate is `60` Hz; relay sessions run at
+For Model 3, the default requested tick rate is `60` Hz; relay sessions run at
 `57.524` (or `60` with the room's 60 Hz option) emulated frames/s, so transmission is capped at one originating
 snapshot per emulated frame. On weak relay
 devices, metered connections, or larger multi-cabinet lobbies, the relay can
@@ -193,7 +413,12 @@ TCP and UDP on that port.
   game's, so its predictor compensates latency the same way. Its ring segments
   are forwarded by the receive thread and fanned out by the relay like the
   other games' (the client guarantees the game still sees every segment of
-  every slot, one per frame).
+  every slot, one per frame). Late TCP poses from the same race cannot rewind
+  a newer accepted UDP pose during a short gap; near-simultaneous copies of
+  the same native pose do not create a second motion sample. Live driving
+  flags follow TCP without being treated as a different car. Only the remote
+  receive-copy pose predictor is affected. The ordered ring, returning self
+  echo, and genuine phase changes remain native.
 - **`--tcp-only`** disables the UDP lane; all game traffic uses the TCP ring.
 - **Star fan-out of the TCP ring.** For the timed-segment games the relay
   does not pass each segment from cabinet to cabinet:
@@ -309,8 +534,8 @@ link; that is the intent of the setting.
    `onlinetest.viewdns.net:1970`; port `1970` is assumed if omitted) plus your
    **Player name**. Both values are saved to `Supermodel.ini` (`OnlineRelay` and
    `OnlinePlayer`) when you connect, launch a game, or save settings on exit.
-3. Click **Connect**. Online play always runs with AsyncNet; there is no
-   per-session opt-in checkbox. This does not rewrite your offline or per-game
+3. Click **Connect**. Model 3 gameplay uses AsyncNet; the Model 2 games use
+   their native ring instead. Neither rewrites your offline or per-game
    AsyncNet setting in the INI file.
 4. One player selects a supported ROM, enters a lobby name and clicks
    **Create Lobby**. The creator is the master, car 1.
@@ -340,6 +565,8 @@ The supported selection is exactly:
 | Le Mans 24 | `lemans24.zip` (up to 6 cabinets) |
 | Dirt Devils | `dirtdvls.zip` (up to 4 cabinets) |
 | Scud Race Plus - 16 Player | `scudplus.zip` plus `scud.zip` (up to 16 cabinets; experimental ROM patch, see below) |
+| INDY 500 Twin | `indy500.zip` (2–8 cabinets; Model 2 native TCP) |
+| Sega Rally Championship (Rev C) | `srallyc.zip` (2–4 cabinets; Model 2A native TCP) |
 
 ### Scud Race Plus - 16 Player (experimental)
 
@@ -412,7 +639,7 @@ Disconnect Online before using the ordinary **Load game** button.
 - **Leave lobby** keeps your relay connection; **Disconnect** leaves the server.
 - If the creator leaves a waiting lobby, that lobby closes; there is no master
   migration. Other players may create/join another lobby.
-- One relay supports up to **16 separate GUI lobbies**, with game-specific capacity (Daytona editions: 16, Scud editions: 8 (Scud Race Plus 16-player mode: 16), Sega Rally 2: 4 (8-player mode: 8), Le Mans 24: 6, Dirt Devils: 4).
+- One relay supports up to **16 separate GUI lobbies**, with game-specific capacity (Daytona editions: 16, Scud editions: 8 (Scud Race Plus 16-player mode: 16), Sega Rally 2: 4 (8-player mode: 8), Le Mans 24: 6, Dirt Devils: 4, INDY 500: 8).
   A client can join only one room at a time. Each room selects one exact game.
 - Once Start Link is pressed, the roster is locked: no late joins or live
   reconnect. If any game fails to load/connect within **90 seconds**, the room
@@ -440,9 +667,9 @@ lobby master presses Start Link.
 An already-enabled effective AsyncNet setting in the INI also permits automatic
 connection. If the effective AsyncNet setting is false (including
 `-sync-netboard`), the GUI still opens the Online tab with the endpoint filled
-in, and you connect by pressing **Connect**. Online sessions always run with
-AsyncNet; the emulator never needs a per-session checkbox and never rewrites
-your INI setting. A failed/cancelled automatic attempt is not retried in a
+in, and you connect by pressing **Connect**. Model 3 Online sessions use
+AsyncNet; Model 2 Online uses native timing. There is no per-session checkbox
+and the emulator never rewrites your INI setting. A failed/cancelled automatic attempt is not retried in a
 loop.
 
 A configured NetRelay endpoint likewise opens Online. CLI overrides still win
@@ -490,6 +717,7 @@ python3 Tests/run_async_netboard.py
 python3 Tests/run_online_lobby.py
 python3 Tests/run_online_client.py
 python3 Tests/run_online_session_policy.py
+python3 Tests/run_model2_room_video.py
 ```
 
 The runners exercise the HLE board, online C++ client, lobby protocol and session
@@ -502,18 +730,30 @@ GUI smoke test.
 
 ## Room video rate (57.524 / 60 Hz), throttle and returning to Online
 
-Every relay session runs all cabinets at the **same emulated video rate**,
-chosen by the room master for the whole room in **Options -> Emulated video
-(all cabinets)**, for every game:
+The room master sets the **emulated video rate** in **Options → Emulated video
+(all cabinets) → Refresh rate** before starting the link. This applies to
+Model 3 rooms and the three central-relay Model 2 games (Indy 500, Sega Rally
+Championship Rev C, and Daytona USA Rev A).
 
-- **57.524 Hz (original hardware)** - the default.
-- **60 Hz** - room option bit 1024 (`NativeRoomSettings::Video60`). Lobby
-  clients advertise capability bit 256; the relay (or a self-hosting
-  creator's `PlayerRoom`) only accepts the option when every member has it,
-  rejects joins from older clients while it is set, and masks the bit out of
-  room listings sent to clients that predate it. The launch message carries
-  the option to every cabinet, which applies it after global/game INI and CLI
-  settings have been resolved.
+- **57.524 Hz (original hardware)** — the default.
+- **60 Hz** — runs the emulated frame clock about 4.3% faster. Not just a
+  monitor setting, and not the **Tick rate (Hz)** network-update slider.
+
+The relay checks that every member supports 60 Hz before accepting it, rejects
+joins by incompatible clients while it is set, and hides the option bit from
+those clients' room listings. Old clients and old relays can still use the
+native rate for titles they already support. On an old relay the updated
+client shows the Model 2 selector disabled. The room can be set back to the
+native rate before launch to let older clients join.
+
+Launch freezes the rate and sends the same full options mask (with bit 1024,
+`NativeRoomSettings::Video60`, for 60 Hz) to each cabinet. Model 3 retains its
+existing capability bit 256 and creator-hosted `PlayerRoom` support. Model 2
+uses a separate `HEL1` exchange (`Supermodel Online M2VIDEO1 N` / `Supermodel
+Online lobby v1 M2VIDEO1 N`); `N` is the existing-title availability mask in
+one ASCII digit (Indy=1, Rev C=2, Daytona=4, additive). The OEH6 flags/body and
+gameplay protocol are unchanged. This prevents an older client that advertises
+60 Hz for Model 3 from joining a 60 Hz Model 2 session.
 
 Software frame limiting at that rate is mandatory and its in-game toggle is
 disabled online. **Display VSync is no longer forced off**: your own `VSync`
@@ -521,13 +761,16 @@ setting is kept. With VSync on, the throttle still paces emulation at
 57.524/60 Hz and the buffer swap merely waits for the next display refresh;
 choose 60 Hz in the room if everyone has a 60 Hz display and wants the swap
 and emulation aligned. This is an emulation rate, not a guarantee the monitor
-supports a matching video mode. Offline settings are unchanged and these
-overrides are not saved. Relay tick rates remain real-time Hz (capped by one
-send per emulated frame); transport timing/age metadata uses the room's frame
-duration (`Online::FrameMilliHz(relay, video60)`).
+supports a matching video mode. A cabinet still needs enough rendering and
+emulation headroom to sustain the selected rate. Offline settings are
+unchanged and these overrides are not saved. Model 3 relay tick rates remain real-time Hz (capped
+by one send per emulated frame). Model 2 still runs its native ordered TCP
+ring, with one board tick per emulated frame. Model 2 pose cadence and
+frame-based age conversions follow the selected rate. Match the cabinet
+hardware by leaving the room on the default if you want original game speed.
 
-Headless rigs: `Tests/lobby_tickets.py --options 1024` sets the option before
-Start Link and each cabinet is launched with `-lobby-options=1024` next to its
+Model 3 headless rigs: `Tests/lobby_tickets.py --options 1024` sets the option
+before Start Link. Each cabinet is launched with `-lobby-options=1024` next to its
 `-lobby-ticket=`. Verified on the 2-cabinet Scud Race rig with `-vsync`:
 `RefreshRate=60`, `Throttle=1`, `VSync=1` in both logs, race started and ran
 on the UDP lane.

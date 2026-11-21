@@ -69,12 +69,13 @@ public:
   if(size!=m_size || !sourceUs || !Active()) return;
   const auto* p=static_cast<const uint8_t*>(bytes);
   std::vector<uint8_t> pending(p,p+size);
-  const auto now=Now();
   RelayUdp::Trailer t;t.controlUs=controlUs;
   t.sampleAgeUs=uint32_t(std::min<uint64_t>(sampleAgeUs,1000000));t.sampleUncertaintyUs=uint32_t(std::min<uint64_t>(sampleUncertaintyUs,1000000));
   const bool useHost=m_usingHost.load();
   {
    std::lock_guard<std::mutex> l(m_mutex);
+   // The worker can publish an arrival while we wait for this lock.
+   const auto now=Now();
    m_freshUs=freshUs;
    if(mask && mask->size()==RelayUdp::MaskSize(m_size)) {
     if(*mask!=m_mask) { m_mask=*mask;m_maskRepeat=3; }
@@ -136,9 +137,11 @@ public:
   if(!history.empty() && sourceUs<=history.back().sourceUs) return; // the ring never moves a slot backwards
   history.push_back({std::vector<uint8_t>(p,p+size),sourceUs});
   while(history.size()>PeerBaseHistory) history.pop_front();
-  // A delta that arrived before its keyframe can be undone now.
+  // Star fan-out can return the origin's echo before this peer gets
+  // its keyframe. An older, ordered TCP frame may still arrive first;
+  // leave the delta parked until its own base arrives or is superseded.
   auto& h=m_held[origin];
-  if(!h.raw.empty()) {
+  if(!h.raw.empty() && h.baseUs<=sourceUs) {
    if(h.baseUs==sourceUs) { Resolve(h,history.back());Store(origin,h);++m_stats.heldResolved; }
    else if(h.baseUs<sourceUs) ++m_stats.deltaStale; // superseded by a newer keyframe
    h=HeldSample{};
@@ -174,8 +177,10 @@ public:
  uint64_t LeaveUs() const { return std::max<uint64_t>(MinLeaveUs,2*m_freshUs); }
  bool PrimaryReady(bool holding=false) {
   if(!Active()) return false;
-  const auto now=Now();
   std::lock_guard<std::mutex> l(m_mutex);
+  // Compare peer timestamps with a clock read from the same snapshot.
+  // Reading before locking can make a just-received sample look future-dated.
+  const auto now=Now();
   const uint64_t window=holding ? LeaveUs() : m_freshUs;
   for(unsigned i=0;i<m_count;++i) {
    if(i==m_index) continue;

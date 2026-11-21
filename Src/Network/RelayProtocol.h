@@ -67,6 +67,9 @@ struct UdpConfig : NetProtocol::MessageHeader {
 // RLU2 extends UdpConfig with host IPv4 bytes, port, tick rate, roster count,
 // and (only for cabinet zero) 4-byte IPv4 + 16-byte token per peer.
 static constexpr uint32_t UdpHostConfigID=NetProtocol::ID("RLU2");
+// Optional Indy in-race motion lane and ordered TCP control pair, negotiated per room.
+static constexpr uint32_t IndyRaceUdpConfigID=NetProtocol::ID("RLUI");
+static constexpr uint32_t IndyRacePairID=NetProtocol::ID("IRP1");
 #pragma pack(pop)
 static_assert(sizeof(HybridJoin)==56 && sizeof(UdpConfig)==40,"Hybrid wire sizes");
 static_assert(sizeof(Join)==40 && sizeof(Ready)==24 && sizeof(TickRate)==16 && sizeof(Error)==16 && sizeof(Star)==16 && sizeof(AdaptiveTick)==24,"Relay wire sizes");

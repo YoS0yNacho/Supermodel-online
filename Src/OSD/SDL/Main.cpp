@@ -1126,7 +1126,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Input
     {
       auto* model = dynamic_cast<CModel3*>(Emu);
       auto* board = model ? model->GetNetBoard() : nullptr;
-      if ((board && board->OnlineSessionFailed()) || s_inGameChat.ReturnToLobbyRequested())
+      const auto* model2 = dynamic_cast<const CModel2*>(Emu);
+      if ((board && board->OnlineSessionFailed()) || (model2 && model2->OnlineSessionFailed()) ||
+          s_inGameChat.ReturnToLobbyRequested())
       {
         s_returnToLobby = true;
         s_returnRelay = Online::ReturnRelay(s_sessionDirectoryRelay,
@@ -1750,6 +1752,12 @@ Util::Config::Node DefaultConfig()
   config.Set("SimulateNet", true, "Network");
   config.Set("AsyncNet", false, "Network");
   config.Set("NetPredictionSmoothing", unsigned(1), "Network");
+  config.Set("IndyPrediction", true, "Network");
+  config.Set("IndyPoseUdp", true, "Network");
+  config.Set("SrallycPrediction", true, "Network");
+  config.Set("SrallycPoseUdp", true, "Network");
+  config.Set("DaytonaPrediction", true, "Network");
+  config.Set("DaytonaPoseUdp", true, "Network");
   config.Set("NetBootScenePatch", true, "Network");
   config.Set("ScudPlusHiddenCarTextures", true, "Network");
   config.Set<std::string>("NetRelay", "", "Network", "", "");
@@ -2089,11 +2097,16 @@ static void Help(void)
   puts("  -emulate-netboard       Emulate the net board (requires -no-threads)");
   puts("  -async-netboard         Use asynchronous net-board exchange");
   puts("  -relay=<host:port>      Open Online lobbies and connect to a relay");
-  puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs)");
+  puts("  -lobby-ticket=<hex>     Join a started lobby room directly (test rigs; INDY 500 uses native TCP)");
   puts("  -lobby-options=<n>      Room options mask of that room (test rigs; 1024 = 60 Hz video)");
   puts("  -lobby-car=<n>          Native CAR NUMBER the room assigned to this cabinet (test rigs)");
   puts("  -scudplus-16            Scud Race Plus 16-player research ROM patch (test rigs; the Online tab sets it per room)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
+  puts("  -no-indy-prediction     Draw unpredicted remote cars in INDY 500 Online");
+  puts("  -no-srallyc-prediction  Draw native remote cars in Sega Rally Championship Rev C Online");
+  puts("  -no-srallyc-udp         Keep Rev C motion prediction on TCP only");
+  puts("  -no-daytona-prediction Draw native remote cars in original Daytona Rev A Online");
+  puts("  -no-daytona-udp        Keep original Daytona Rev A motion on TCP only");
   puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
   puts("  -no-hidden-car-textures Do not load Scud Race Plus secret-vehicle textures for other courses");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
@@ -2185,6 +2198,18 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
   };
   static const std::map<std::string, std::pair<std::string, bool>> bool_options
   { // -option
+    { "-indy-prediction",     { "IndyPrediction",    true  } },
+    { "-no-indy-prediction",  { "IndyPrediction",    false } },
+    { "-indy-udp",           { "IndyPoseUdp",       true  } },
+    { "-no-indy-udp",        { "IndyPoseUdp",       false } },
+    { "-srallyc-prediction",    { "SrallycPrediction", true  } },
+    { "-no-srallyc-prediction", { "SrallycPrediction", false } },
+    { "-srallyc-udp",          { "SrallycPoseUdp",    true  } },
+    { "-no-srallyc-udp",       { "SrallycPoseUdp",    false } },
+    { "-daytona-prediction",    { "DaytonaPrediction", true  } },
+    { "-no-daytona-prediction", { "DaytonaPrediction", false } },
+    { "-daytona-udp",          { "DaytonaPoseUdp",    true  } },
+    { "-no-daytona-udp",       { "DaytonaPoseUdp",    false } },
     { "-threads",             { "MultiThreaded",    true } },
     { "-no-threads",          { "MultiThreaded",    false } },
     { "-gpu-multi-threaded",  { "GPUMultiThreaded", true } },
@@ -2518,9 +2543,12 @@ static int RunSession(int argc, char **argv)
     // exactly as the Online tab would after its launch message, without the GUI.
     uint8_t ticketBytes[16];
     const std::string cliTicket = launcherConfig["NetRelayTicket"].ValueAsDefault<std::string>("");
-    if (!cliTicket.empty() && !requestedRom.empty() && RelayProtocol::ParseTicket(cliTicket, ticketBytes))
+    // A session return must reopen Online, even if the original command line
+    // contained a now-consumed ticket. GUI launches deliver a fresh ticket.
+    if (guiOptions.returnNotice.empty() && !cliTicket.empty() && !requestedRom.empty() &&
+        RelayProtocol::ParseTicket(cliTicket, ticketBytes))
     {
-      cmd_line.config.Set("AsyncNet", true);
+      cmd_line.config.Set("AsyncNet", requestedGame != Indy500Online::Rom && requestedGame != SrallycOnline::Rom && requestedGame != DaytonaOnline::Rom && requestedGame != Sgt24hOnline::Rom);
       cmd_line.config.Set("Network", true);
       cmd_line.config.Set("SimulateNet", true);
       if (launcherConfig["NetGameRelay"].ValueAsDefault<std::string>("").empty())
@@ -2534,7 +2562,7 @@ static int RunSession(int argc, char **argv)
         const unsigned index = unsigned(game - Online::Games);
         if (mask && index < Online::GameCount)
         {
-          cmd_line.config.Set("NetRoomSecretCars", index == 3 && (mask & NativeRoomSettings::SecretCars) != 0);
+          cmd_line.config.Set("NetRoomSecretCars", NativeRoomSettings::HasSecretCars(index, mask));
           cmd_line.config.Set("NetRoomHornet", NativeRoomSettings::HasHornet(index, mask));
           cmd_line.config.Set("NetRoomRealPlayers", NativeRoomSettings::HasRealPlayers(index, mask));
           cmd_line.config.Set("NetRoomNoCollisions", NativeRoomSettings::HasNoCollisions(index, mask));
@@ -2555,6 +2583,12 @@ static int RunSession(int argc, char **argv)
     cmd_line.config.Set("NetScudplusSixteen", false);
     cmd_line.config.Set("NetNativeRoomOptions", 0u);
     cmd_line.config.Set("NetNativeCarNumber", 0u);
+    cmd_line.config.Set("NetSrallycSeat", 0u);
+    cmd_line.config.Set("NetSrallycCount", 0u);
+    cmd_line.config.Set("NetSgt24hSeat", 0u);
+    cmd_line.config.Set("NetSgt24hCount", 0u);
+    cmd_line.config.Set("NetDaytonaSeat", 0u);
+    cmd_line.config.Set("NetDaytonaCount", 0u);
     auto gui = RunGUI(s_configFilePath, launcherFile, guiOptions);
     if (gui.failed) return 1;
     cmd_line.rom_files = std::move(gui.rom_files);
@@ -2573,6 +2607,12 @@ static int RunSession(int argc, char **argv)
       cmd_line.config.Set("NetScudplusSixteen", gui.scudSixteen);
       cmd_line.config.Set("NetNativeRoomOptions", gui.nativeRoomOptions);
       cmd_line.config.Set("NetNativeCarNumber", gui.nativeCarNumber);
+      cmd_line.config.Set("NetSrallycSeat", gui.srallycSeat);
+      cmd_line.config.Set("NetSrallycCount", gui.srallycCount);
+      cmd_line.config.Set("NetSgt24hSeat", gui.sgt24hSeat);
+      cmd_line.config.Set("NetSgt24hCount", gui.sgt24hCount);
+      cmd_line.config.Set("NetDaytonaSeat", gui.daytonaSeat);
+      cmd_line.config.Set("NetDaytonaCount", gui.daytonaCount);
       cmd_line.config.Set("NetSpectate", gui.spectate);
       cmd_line.config.Set("AsyncNet", true);
       s_playerHost = gui.playerHost;
@@ -2596,7 +2636,8 @@ static int RunSession(int argc, char **argv)
   InfoLog("Supermodel Version %s", SupermodelVersion().c_str());
   InfoLog("Started as:");
   for (int i = 0; i < argc; i++)
-    InfoLog("  argv[%d] = %s", i, argv[i]);
+    InfoLog("  argv[%d] = %s", i, i > 0 && std::strncmp(argv[i], "-lobby-ticket=", 14) == 0
+                                ? "-lobby-ticket=<session-only>" : argv[i]);
 
   // Finish processing command line
   if (cmd_line.print_help)
@@ -2656,21 +2697,56 @@ static int RunSession(int argc, char **argv)
   }
   if (!s_runtime_config["NetRelay"].ValueAsDefault<std::string>("").empty())
   {
-    if (!s_runtime_config["AsyncNet"].ValueAsDefault<bool>(false))
+    const auto relay = s_runtime_config["NetRelay"].ValueAs<std::string>();
+    if (game.platform == Game::PLATFORM_MODEL2)
     {
-      ErrorLog("-relay requires AsyncNet=true; use -async-netboard or launch from Online.");
-      return 1;
+      const bool sgt = game.name == Sgt24hOnline::Rom;
+      const bool rally = game.name == SrallycOnline::Rom;
+      const bool daytona = game.name == DaytonaOnline::Rom;
+      if ((!sgt && !rally && !daytona && game.name != Indy500Online::Rom) || !game.netboard_present)
+      {
+        ErrorLog("Model 2 Relay supports indy500, srallyc (Rev C), daytona (Rev A), and experimental sgt24h.");
+        return 1;
+      }
+      const unsigned onlineGame = sgt ? Sgt24hOnline::Game : rally ? SrallycOnline::Game : daytona ? DaytonaOnline::Game : Indy500Online::Game;
+      if ((rally || daytona) && s_runtime_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0) == 0)
+        s_runtime_config.Set("NetNativeRoomOptions", NativeRoomSettings::Defaults(onlineGame));
+      std::string host; uint16_t port;
+      uint8_t ticket[16];
+      const auto gameRelay = s_runtime_config["NetGameRelay"].ValueAsDefault<std::string>("");
+      if (!RelayProtocol::ParseEndpoint(relay, host, port) || (!gameRelay.empty() && gameRelay != relay) ||
+          !RelayProtocol::ParseTicket(s_runtime_config["NetRelayTicket"].ValueAsDefault<std::string>(""), ticket) ||
+          !NativeRoomSettings::Valid(onlineGame,s_runtime_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0)) ||
+          s_runtime_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0))
+      {
+        ErrorLog("%s needs a central-relay Online ticket and valid room settings; no car-number override.", Online::Titles[onlineGame]);
+        return 1;
+      }
+      s_runtime_config.Set("AddressOut", host);
+      s_runtime_config.Set("PortOut", unsigned(port));
+      s_runtime_config.Set("Network", true);
+      s_runtime_config.Set("AsyncNet", false);
+      s_runtime_config.Set("Model2CommFrameSync", false);
+      Online::EnforceRelayTiming(s_runtime_config,
+                                sgt ? Sgt24hOnline::RefreshRate : rally ? SrallycOnline::RefreshRate : daytona ? DaytonaOnline::RefreshRate : Indy500Online::RefreshRate);
     }
-    std::string host; uint16_t port;
-    if (!GameNetwork::IsSupportedGame(game.name) ||
-        !RelayProtocol::ParseEndpoint(s_runtime_config["NetRelay"].ValueAs<std::string>(), host, port))
+    else
     {
-      ErrorLog("-relay requires a supported Model 3 online game and a valid host:port endpoint.");
-      return 1;
+      if (!s_runtime_config["AsyncNet"].ValueAsDefault<bool>(false))
+      {
+        ErrorLog("-relay requires AsyncNet=true for Model 3; use -async-netboard or launch from Online.");
+        return 1;
+      }
+      std::string host; uint16_t port;
+      if (!GameNetwork::IsSupportedGame(game.name) || !RelayProtocol::ParseEndpoint(relay, host, port))
+      {
+        ErrorLog("-relay requires a supported Online game and a valid host:port endpoint.");
+        return 1;
+      }
+      s_runtime_config.Set("Network", true);
+      s_runtime_config.Set("SimulateNet", true);
+      Online::EnforceRelayTiming(s_runtime_config);
     }
-    s_runtime_config.Set("Network", true);
-    s_runtime_config.Set("SimulateNet", true);
-    Online::EnforceRelayTiming(s_runtime_config);
   }
   LogConfig(s_runtime_config);
 

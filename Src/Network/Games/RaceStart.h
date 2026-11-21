@@ -10,6 +10,15 @@ inline bool ValidRoster(uint32_t mask, unsigned machines, unsigned local) {
   return machines>=1 && machines<=16 && local<machines && mask &&
     !(mask & ~((1u<<machines)-1)) && (mask & (1u<<local));
 }
+inline constexpr int64_t MaxClockRttUs = 2000000;
+inline bool FreshClock(int64_t rtt, uint64_t received, uint64_t now) {
+  return rtt >= 0 && rtt <= MaxClockRttUs && received && received <= now && now - received <= 3000000;
+}
+inline bool ClocksClose(int64_t a, int64_t b) {
+  // A full turn must close in the origin's time domain within this tolerance.
+  const long double delta = static_cast<long double>(a) - b;
+  return delta >= -50000 && delta <= 50000;
+}
 struct Transit {
   uint32_t epoch=0, serial=0, participants=0;
   int64_t offset=0, deadline=0;
@@ -37,6 +46,11 @@ static_assert(sizeof(StartToken) == 56, "start token wire size");
 constexpr uint64_t MinLeadUs = 500000, MaxLeadUs = 20000000, LeadMarginUs = 300000;
 constexpr uint64_t CommitMarginUs = 150000;
 constexpr unsigned MaxLeadRetries = 3;
+inline bool CommitFits(int64_t deadline, uint64_t now, uint64_t roundUs) {
+  if (deadline < 0 || uint64_t(deadline) <= now) return false;
+  const uint64_t ahead = uint64_t(deadline) - now;
+  return ahead >= CommitMarginUs && ahead - CommitMarginUs >= roundUs;
+}
 inline uint64_t ReleaseLead(uint64_t roundUs, unsigned retries) {
   const uint64_t rounds = 3 + 2ull * retries;
   if (roundUs > MaxLeadUs / rounds) return MaxLeadUs + 1;

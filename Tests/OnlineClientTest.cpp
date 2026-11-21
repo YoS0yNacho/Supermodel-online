@@ -1,6 +1,7 @@
 #include "ResultsStandingFixture.h"
 // Actual C++ launcher client + actual CNetBoardLink, no ROMs. GPL-3.0-or-later.
 #include "Network/Online/LobbyClient.h"
+#include "Network/Online/RoomSettings.h"
 #include "Network/RelayProtocol.h"
 #include "Model3/NetBoardLink.h"
 #include "OSD/Logger.h"
@@ -16,8 +17,88 @@ template<class F> void Wait(F f) {
   const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(12);
   while(!f()) {assert(std::chrono::steady_clock::now()<end);std::this_thread::sleep_for(std::chrono::milliseconds(10));}
 }
+enum class Model2Rate { Native, Hz60, LegacyRelay };
+void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,bool probeBoth=false,
+                bool daytona=false,bool tryDaytona=false,Model2Rate rate=Model2Rate::Native,bool sgt=false,bool trySgt=false) {
+  const unsigned game=sgt?Sgt24hOnline::Game:daytona?DaytonaOnline::Game:rally?SrallycOnline::Game:Indy500Online::Game;
+  const uint64_t guid=sgt?Sgt24hOnline::Guid:daytona?DaytonaOnline::Guid:rally?SrallycOnline::Guid:Indy500Online::Guid;
+  const size_t payloadSize=sgt?Sgt24hOnline::PayloadSize:daytona?DaytonaOnline::PayloadSize:rally?SrallycOnline::PayloadSize:Indy500Online::PayloadSize;
+  const uint32_t mask=Online::Indy500Bit | ((daytona || rally || probeBoth || !roomOptions)?Online::SrallycBit:0) |
+                      ((daytona || tryDaytona)?Online::DaytonaBit:0) | ((sgt || trySgt)?Online::Sgt24hBit:0);
+  const std::string endpoint="127.0.0.1:"+std::to_string(port);
+  // Actual C++ discovery and launch parsing using the same client and RLA1
+  // handler as the GUI. AsyncNet is not involved in Indy gameplay.
+  std::vector<std::unique_ptr<Online::LobbyClient>> seats;
+  for(unsigned i=0;i<count;++i) {
+    seats.push_back(std::make_unique<Online::LobbyClient>());
+    seats.back()->Connect(endpoint,"Model 2 cabinet "+std::to_string(i+1),mask,true);
+    Wait([&]{return seats.back()->Get().connected;});
+    const auto view=seats.back()->Get();
+    assert(view.indy500Relay && view.srallycRelay==(rally||daytona) && view.daytonaRelay==daytona);
+    assert(view.sgt24hRelay==sgt);
+    assert(view.model2VideoRelay==(rate!=Model2Rate::LegacyRelay));
+  }
+  auto& master=*seats[0];
+  master.Create(game,"Native Model 2 cabinets");
+  Wait([&]{return master.Get().room!=0;});const auto room=master.Get().room;
+  for(unsigned i=1;i<count;++i) {
+    seats[i]->Join(room);
+    Wait([&]{return seats[i]->Get().room==room;});
+  }
+  uint32_t options=roomOptions && !sgt ? NativeRoomSettings::WithMode(NativeRoomSettings::WithDifficulty(NativeRoomSettings::Defaults(game),(rally||daytona)?3:4),rally?2:1) : 0;
+  if(rate==Model2Rate::Hz60) options|=NativeRoomSettings::Video60;
+  if(roomOptions) master.SetRoomOptions(room,options);
+  for (auto& seat : seats) Wait([&]{
+    const auto view=seat->Get();
+    for (auto& r : view.rooms) if (r.id==room && r.members.size()==count)
+      return r.optionsSupported==roomOptions && r.nativeSettingsSupported==roomOptions && r.options==options;
+    return false;
+  });
+  master.Start(room);
+  std::vector<std::shared_ptr<CNetServer>> servers(count);
+  std::vector<std::unique_ptr<CNetBoardLink>> links(count);
+  for(unsigned i=count;i-- > 0;) {
+    auto& seat=*seats[i];Wait([&]{return seat.Get().launch;});const auto a=seat.Get();
+    assert(a.game==game&&a.index==i&&a.count==count);
+    assert(a.gameEndpoint==endpoint&&a.roomOptions==options&&!a.carNumber);
+    seat.Disconnect();
+    servers[i]=std::make_shared<CNetServer>(0,"Model 2 test cabinet",false);
+    assert(servers[i]->Start());
+    links[i]=std::make_unique<CNetBoardLink>(servers[i],"127.0.0.1",port,true,guid,a.ticket);
+    assert(links[i]->Connect());
+  }
+  for(unsigned i=0;i<count;++i) {
+    Wait([&]{return links[i]->Connected();});
+    assert(links[i]->RelayIndex()==int(i)&&links[i]->RelayCount()==count);
+    assert(!links[i]->UdpActive()&&!links[i]->RelayStar()&&!links[i]->RelayAdaptiveTick());
+  }
+  for(unsigned i=0;i<count;++i) {
+    std::vector<uint8_t> payload(payloadSize,uint8_t(i+1)),received;
+    const unsigned next=(i+count-1)%count;
+    assert(!links[next]->WaitForDataUntil(std::chrono::steady_clock::now()+std::chrono::milliseconds(5)));
+    links[i]->Send(payload.data(),payload.size());
+    assert(links[next]->WaitForDataUntil(std::chrono::steady_clock::now()+std::chrono::seconds(3)));
+    assert(links[next]->TryReceive(received)==CNetBoardLink::ReceiveResult::Data);
+    assert(received==payload);
+  }
+  links.back().reset();
+  for(unsigned i=0;i+1<count;++i) Wait([&]{return links[i]->RelayIndex()==-2;});
+  std::cout<<"PASS "<<Online::Games[game]<<" C++ discovery -> "<<count<<" native TCP tickets -> ordered board ring -> disconnect, room options "<<(roomOptions?"applied":"legacy fallback")
+           <<", rate="<<(rate==Model2Rate::Hz60?"60 Hz":rate==Model2Rate::LegacyRelay?"native (old relay)":"native")<<std::endl;
+}
 int main(int argc,char**argv) {
-  assert(argc==2);uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
+  const std::string mode=argc>2?argv[2]:"";
+  assert(argc==2 || (argc==3 && (mode=="pre-sgt24h" || mode=="legacy-indy" || mode=="pre-srallyc" || mode=="pre-daytona" || mode=="pre-model2-video")));
+  uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
+  if(argc==3) {
+    constexpr auto legacy=Model2Rate::LegacyRelay;
+    if(mode=="pre-sgt24h") TestModel2(port,2,true,false,true,true,false,Model2Rate::Native,false,true);
+    else if(mode=="pre-model2-video") TestModel2(port,2,true,false,true,true,false,legacy);
+    else if(mode=="pre-daytona") TestModel2(port,2,true,true,true,false,true,legacy);
+    else TestModel2(port,2,mode=="pre-srallyc",false,true,false,true,legacy);
+    return 0;
+  }
+  for(unsigned n:{2u,3u,4u}) TestModel2(port,n,true,false,true,true,false,Model2Rate::Native,true);
   {
     std::string defHost; uint16_t defPort=0;
     // Defaults moved to ServerDefaults.h: check consistency, not a hard-coded host.
@@ -36,9 +117,9 @@ int main(int argc,char**argv) {
   const auto beforeChat=std::chrono::steady_clock::now();cancelChat.Disconnect();assert(std::chrono::steady_clock::now()-beforeChat<std::chrono::milliseconds(100));
   const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c,0x5bf177da3487d};
   const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584,1024};
-  static_assert(sizeof(guids)/sizeof(*guids)==Online::GameCount);
-  static_assert(sizeof(sizes)/sizeof(*sizes)==Online::GameCount);
-  for(unsigned game=0;game<Online::GameCount;++game) {
+  static_assert(sizeof(guids)/sizeof(*guids)==Indy500Online::Game);
+  static_assert(sizeof(sizes)/sizeof(*sizes)==Indy500Online::Game);
+  for(unsigned game=0;game<Indy500Online::Game;++game) {
     Online::LobbyClient master,slave;
     master.Connect(endpoint,"C++ Master",Online::GameMaskAll,true);slave.Connect(endpoint,"C++ Slave",Online::GameMaskAll,true);
     Wait([&]{return master.Get().connected&&slave.Get().connected;});
@@ -122,6 +203,14 @@ int main(int argc,char**argv) {
     chat0.Disconnect();chat1.Disconnect();
     std::cout<<"PASS C++ GUI client + lobby/in-game chat -> ticket -> production two-channel link: "<<Online::Games[game]<<std::endl;
   }
+  TestModel2(port,2,true);
+  TestModel2(port,8,true);
+  TestModel2(port,4,true,true);
+  TestModel2(port,2,true,false,false,true);
+  TestModel2(port,8,true,false,false,true);
+  TestModel2(port,2,true,false,false,false,false,Model2Rate::Hz60);
+  TestModel2(port,4,true,true,false,false,false,Model2Rate::Hz60);
+  TestModel2(port,8,true,false,false,true,false,Model2Rate::Hz60);
   {
     // Self-hosted room (Hosting = "Self-host room + TCP/UDP"): after the relay's
     // reachability test the creator is handed off to its own PlayerHost
@@ -223,5 +312,5 @@ int main(int argc,char**argv) {
     std::cout<<"PASS 16 cabinets + car16 chat + 17th rejection + master teardown notifies all + fresh lobby: "<<Online::Games[game]<<std::endl;
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(200));
-  std::cout<<"PASS ticket parser, nonblocking cancellation, creator order, all nine Online entries"<<std::endl;
+  std::cout<<"PASS ticket parser, nonblocking cancellation, creator order, all eleven Online entries"<<std::endl;
 }

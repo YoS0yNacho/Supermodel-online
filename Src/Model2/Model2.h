@@ -63,6 +63,8 @@
 #include "Model3/IEmulator.h"
 #include "Model3/93C46.h"
 #include "CPU/I960/I960.h"
+#include "Network/Games/Indy500/Motion.h"
+#include <cstdio>
 #include "CPU/MB86233/MB86233.h"
 #include "CPU/SHARC/SHARC.h"
 #include "CPU/MB86235/MB86235.h"
@@ -102,6 +104,7 @@ public:
   void RenderFrame(void) override;
   void Reset(void) override;
   const Game &GetGame(void) const override { return m_game; }
+  bool OnlineSessionFailed() const { return m_comm.OnlineSessionFailed(); }
   void AttachRenderers(IRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA) override;
   Result Init(const Game &game, const ROMSet &rom_set) override;
   bool PauseThreads(void) override { return true; }
@@ -234,6 +237,118 @@ private:
   void UpdateInputs(void);
   void UpdateIOBoard(const uint8_t (&an)[8], uint8_t in0, uint8_t in1, uint8_t in2);
   void BuildVideoFrame(void);
+  bool PrepareIndyRelayRole();
+  bool PrepareSrallycRelayRole();
+  bool PrepareDaytonaRelayRole();
+  bool PrepareSgt24hRelayRole();
+  void ClearDaytonaMotion();
+  void UpdateDaytonaMotion();
+  void ObserveDaytonaCopy(unsigned offset);
+  uint32_t DaytonaDrawRead(uint32_t addr,uint32_t mask,uint32_t native);
+  DaytonaMotion::Scene DaytonaScene() const;
+  unsigned DaytonaActorSeat(uint32_t actor) const;
+  DaytonaMotion::Pose DaytonaActorPose(uint32_t actor) const;
+  void TraceDaytona(const char* kind,unsigned self,const DaytonaMotion::Row&,DaytonaMotion::Pose,const DaytonaMotion::Draw&,double nearest,uint32_t pc);
+  void ClearSrallycMotion();
+  void UpdateSrallycMotion();
+  uint32_t SrallycDrawRead(unsigned offset,uint32_t native);
+  SrallycMotion::Row SrallycMotionRowLocal(const SrallycMotion::Row& live);
+  void TraceSrallyc(const char* kind,unsigned self,const SrallycMotion::Row&,const SrallycMotion::Draw&,uint32_t site);
+  bool IndyEntryInstruction();
+  uint32_t IndyNativeRoster() const;
+  void AuditIndyEntryFrame();
+  bool IndyMotionRaceActive() const;
+  void UpdateIndyMotionFrame();
+  void ClearIndyMotion();
+  uint32_t IndyMotionRead(uint32_t pc,uint32_t addr,uint32_t native);
+  void CaptureIndyMotion(uint32_t actor,uint32_t source);
+  struct IndyActorMotion
+  {
+    IndyMotion::Predictor predictor, udpPredictor;
+    IndyPoseUdp::Blend udpBlend;
+    IndyMotion::Sample sample{};
+    uint64_t frame=0;
+    double lead=0;
+  };
+  struct IndyDrawMotion
+  {
+    uint32_t actor=0, fp=0;
+    uint64_t frame=0;
+    IndyMotion::Sample sample{};
+    IndyMotion::Pose pose{};
+    double lead=0;
+    unsigned udp=0, udpGap=0;
+    uint64_t udpAgeUs=0;
+  };
+  std::array<IndyActorMotion,IndyMotion::MaxActors> m_indyActors{};
+  IndyDrawMotion m_indyDraw;
+  bool m_indyMotionEnabled=false, m_indyMotionActive=false;
+  std::array<IndyPoseUdp::Received,IndyMotion::MaxSeats> m_indyUdpPeers{};
+  uint64_t m_indyUdpFrameUs=0;
+  uint32_t m_indyUdpSentTick=0;
+  bool m_indyUdpEnabled=false, m_indyUdpSent=false, m_indyUdpLogged=false;
+  unsigned m_indySmoothing=1;
+  uint32_t m_indyMotionRoster=0;
+  uint64_t m_indyMotionTraceRows=0;
+  std::FILE* m_indyMotionTrace=nullptr;
+  bool m_indyRoleConfigured = false;
+  unsigned m_indyBootstrapFrames = 0;
+  bool m_srallycRoleConfigured = false, m_daytonaRoleConfigured = false;
+  unsigned m_daytonaBootstrapFrames = 0;
+  bool m_sgt24hRoleConfigured = false;
+  unsigned m_sgt24hBootstrapFrames = 0;
+  struct Sgt24hDecodedBinding {
+    uint32_t actor=0, authority=0, slot=0, phase=0, group=0;
+    uint64_t decodedFrame=0;
+    Sgt24h::FrameToken applied{};
+  };
+  std::array<Sgt24hDecodedBinding,Sgt24h::Cabinets> m_sgt24hDecoded{};
+  void ObserveSgt24hDecode(uint32_t address);
+  void ObserveSgt24hDraw(uint32_t address);
+  struct Sgt24hDrawObservation {
+    uint32_t actor=0;
+    uint64_t frame=0;
+    Sgt24h::FrameToken applied{};
+    std::array<uint32_t,3> nativePosition{};
+    unsigned axes=0;
+  };
+  std::array<Sgt24hDrawObservation,Sgt24h::Cabinets> m_sgt24hDraws{};
+  bool m_daytonaPrediction=false;
+  FILE* m_daytonaTrace=nullptr;
+  unsigned m_daytonaTraceRows=0;
+  uint32_t m_daytonaEpoch=0;
+  uint64_t m_daytonaTracedRoster=0;
+  DaytonaMotion::Scene m_daytonaScene;
+  struct DaytonaActor
+  {
+    DaytonaMotion::Row row;
+    DaytonaMotion::Draw draw;
+    DaytonaMotion::Received udp;
+    uint64_t copied=0,drawn=~uint64_t(0);
+    uint32_t address=0;
+    int yaw=0;
+  };
+  std::array<DaytonaActor,DaytonaOnline::Cabinets> m_daytonaActors{};
+  std::array<DaytonaMotion::Predictor,DaytonaOnline::Cabinets> m_daytonaPredictors{};
+  bool m_srallycPrediction=false;
+  FILE* m_srallycTrace=nullptr;
+  // Draw the local car from live local data instead of the ring echo.
+  bool m_srallycLocalDraw=false;
+  // Set once a race is actually running, so the local-row mirror never
+  // interferes with the comm board handshake.
+  bool m_srallycRaceLive=false;
+  uint64_t m_srallycServed=0, m_srallycMissed=0;
+  unsigned m_srallycTraceRows=0;
+  SrallycMotion::Scene m_srallycScene{};
+  std::array<SrallycMotion::Predictor,SrallycOnline::Cabinets> m_srallycPredictors{};
+  std::array<SrallycMotion::Received,SrallycOnline::Cabinets> m_srallycMotionRx{};
+  std::array<uint64_t,SrallycOnline::Cabinets> m_srallycTracedFrame{};
+  unsigned m_srallycBootstrapFrames = 0;
+  bool m_indyEntryWaiting = false, m_indyEntryAbort = false, m_indyEntryDump = false;
+  bool m_indyFlagExtended = false;
+  bool m_indyAuditIntro = false, m_indyAuditTrack = false, m_indyAuditGo = false, m_indyAuditReturn = false;
+  unsigned m_indyRace = 0;
+  uint64_t m_indyHeldFrame = 0, m_indyIntroShot = 0, m_indyRaceShot = 0;
   void DrawFrameBuffer(uint32_t *dest);
   bool LoadROMs(const ROMSet &rom_set);
 

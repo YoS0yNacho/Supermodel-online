@@ -96,6 +96,14 @@ public:
   // interrupt mode: the vectors come from the interrupt control register)
   void SetIRQLine(int line, bool asserted);
 
+  // Optional board checkpoint, before the original instruction is fetched.
+  // Returning false ends this slice without executing the instruction.
+  void SetInstructionGate(UINT32 address, std::function<bool()> gate)
+  {
+    m_gateAddress = address;
+    m_gate = std::move(gate);
+  }
+
   void SetTraceCallback(std::function<void(UINT32 ip)> cb) { m_trace = std::move(cb); }
 
   // Calls fn once this many cycles have run after the current instruction (a
@@ -256,6 +264,8 @@ private:
   bool m_fetching = false;          // an opcode fetch through the bus (no wait states charged)
   int  m_cyclesRequested = 0;
   std::function<void(UINT32)> m_trace;
+  UINT32 m_gateAddress = ~0u;
+  std::function<bool()> m_gate;
   std::function<void()> m_delayFn;
   int  m_delayRemaining = 0;
   bool m_delayArmed = false;      // armed by the instruction now running: counting starts after it

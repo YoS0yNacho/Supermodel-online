@@ -31,6 +31,13 @@
  */
 
 #include "Model2.h"
+#include "Network/Online/Indy500.h"
+#include "Network/Games/Indy500/RelayEeprom.h"
+#include "Network/Games/Srallyc/RelayEeprom.h"
+#include "Network/Games/Daytona/RelayBackup.h"
+#include "Network/Online/Sgt24h.h"
+#include "Network/Games/Sgt24h/RelayEeprom.h"
+#include <zlib.h>
 #include "Model3/SoundBoard.h"
 #include "Model3/DSB.h"
 #include "Model1/Model1SoundBoard.h"
@@ -42,6 +49,8 @@
 #include "Graphics/SuperAA.h"
 #include "Util/Format.h"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cmath>
 #include <functional>
 #include <cstring>
@@ -85,6 +94,68 @@ namespace
 
   constexpr int SCREEN_WIDTH = 496;
   constexpr int SCREEN_HEIGHT = 384;
+
+  // INDY 500 Twin Rev A (newer), the actual flag/"start your engines"
+  // screen after transmission choice and before the rolling intro.
+  constexpr uint32_t INDY_ENTRY_PC = 0x2e968;
+  constexpr uint32_t INDY_FLAG_TIMER = 0x53c2c4, INDY_FLAG_TIMER_READ_PC = 0xbec14;
+  constexpr uint32_t INDY_MODE = 0x3c288, INDY_SUBMODE = 0x3c284, INDY_FLAG_PHASE = 0xebf68;
+  constexpr uint32_t INDY_PHASE = 0x440a8, INDY_CAR_PHASE = 0x3c730, INDY_PLAYING = 0x441d4;
+  constexpr uint32_t INDY_GO_HUD = 0xee584, INDY_COURSE = 0x441d8;
+  constexpr uint32_t INDY_RACE_COUNT = 0x44168, INDY_RACE_ROWS = 0x44170;
+  constexpr uint32_t INDY_RX_ROW = 0x21c0;
+  constexpr uint32_t INDY_ACTOR_BASE = 0x53c7a0, INDY_ACTOR_STRIDE = 0x1e4;
+  constexpr uint32_t INDY_POSE_RX_PC = 0xab36c;
+  constexpr uint32_t INDY_DRAW_X_PC = 0xec70, INDY_DRAW_Z_PC = 0xec78, INDY_DRAW_YAW_PC = 0xedec;
+  constexpr uint32_t INDY_LOCAL_ACTOR = 0x3c79c;
+  constexpr uint32_t INDY_MAX_TRACE_ROWS = 80000;
+
+  int IndyActorIndex(uint32_t address)
+  {
+    if (address<INDY_ACTOR_BASE || address>=INDY_ACTOR_BASE+INDY_ACTOR_STRIDE*IndyMotion::MaxActors ||
+        (address-INDY_ACTOR_BASE)%INDY_ACTOR_STRIDE != 0) return -1;
+    return (address-INDY_ACTOR_BASE)/INDY_ACTOR_STRIDE;
+  }
+
+  float IndyFloat(uint32_t u)
+  {
+    float f;
+    std::memcpy(&f,&u,4);
+    return f;
+  }
+
+  uint32_t IndyFloatBits(float f)
+  {
+    uint32_t u;
+    std::memcpy(&u,&f,4);
+    return u;
+  }
+
+  uint32_t IndySharedWord(const CModel2Comm& comm,unsigned offset)
+  {
+    uint32_t v=0;
+    for (unsigned j=0;j<4;++j) v |= uint32_t(comm.ReadShared(offset+j))<<(8*j);
+    return v;
+  }
+
+  uint64_t IndyAuditUs()
+  {
+    return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+  }
+
+  // Exact Twin/DX Rev C live program overlay: body transform, its second
+  // draw path and the shadow translate. All these operands go to the drawing
+  // matrix. Other CommRAM reads feed native physics, culling, HUD and sound.
+  struct RallyDrawSite { uint32_t pc, ret, instruction; unsigned field; };
+  constexpr RallyDrawSite RallyDrawSites[]={
+    {0x5c2d20,0x5c38fc,0x90a45000,0x28}, {0x5c2d28,0x5c38fc,0x90b46008,0x30},
+    {0x5c2d54,0x5c38fc,0x90ac601c,0x44},
+    {0x5d09b0,0x5c30ac,0x90a41000,0x28}, {0x5d09b8,0x5c30ac,0x90b42008,0x30},
+    {0x5d09e4,0x5c30ac,0x90a4201c,0x44},
+    {0x5c2b7c,0x5c38fc,0x90ac5000,0x28}, {0x5c2b80,0x5c38fc,0x90b46008,0x30},
+    {0x5c2bb4,0x5c38fc,0x90a4601c,0x44}
+  };
 
   constexpr uint32_t PROGRAM_SIZE = 0x200000;
   constexpr uint32_t MAIN_DATA_SIZE = 0x2000000;
@@ -1119,7 +1190,39 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
     return Get32(m_ram, addr - 0x00200000);
   }
   if (addr >= 0x00500000 && addr < 0x00600000)
-    return Get32(m_workRAM, addr - 0x00500000);
+  {
+    const uint32_t native=Get32(m_workRAM, addr - 0x00500000);
+    if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 && mask==0xffffffff)
+    {
+      const uint32_t pc=m_i960.GetPIP();
+      if (pc==0x21a550 || pc==0x21a554 || pc==0x21a558) ObserveSgt24hDraw(addr);
+    }
+    if (addr == INDY_FLAG_TIMER && m_indyEntryWaiting && native == 0x41000000u &&
+        m_running == CPU_I960 && mask == 0xffffffff && m_i960.GetPIP() == INDY_FLAG_TIMER_READ_PC)
+    {
+      // Only the flag overlay's last countdown step: its native callback
+      // subtracts 8.0 and leaves flag phase 2 at zero. Keep one step left
+      // until the verified pre-intro barrier releases. Other timer reads,
+      // CPU work, vblanks and the native TCP ring all continue normally.
+      if (!m_indyFlagExtended)
+      {
+        InfoLog("INDY 500 ENTRY: flag animation held for the synchronized release.");
+        m_indyFlagExtended = true;
+      }
+      return 0x41800000u; // 16.0f -> 8.0f after the original decrement
+    }
+    if (m_indyMotionActive && m_running==CPU_I960 && mask==0xffffffff &&
+        addr>=INDY_ACTOR_BASE && addr<INDY_ACTOR_BASE+INDY_ACTOR_STRIDE*IndyMotion::MaxActors)
+    {
+      const uint32_t pc=m_i960.GetPIP();
+      if (pc==INDY_POSE_RX_PC || pc==INDY_DRAW_X_PC || pc==INDY_DRAW_Z_PC || pc==INDY_DRAW_YAW_PC)
+        return IndyMotionRead(pc,addr,native);
+    }
+    if ((m_daytonaPrediction || m_daytonaTrace) && m_running==CPU_I960 &&
+        addr>=DaytonaMotion::ActorBase && addr<DaytonaMotion::ActorBase+DaytonaMotion::ActorStride*DaytonaOnline::Cabinets)
+      return DaytonaDrawRead(addr,mask,native);
+    return native;
+  }
   if (addr >= 0x00900000 && addr < 0x00980000)
     return m_bufferRAM[(addr & 0x1ffff) >> 2];
   if (addr >= 0x02000000 && addr < 0x04000000)
@@ -1229,7 +1332,44 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
     if (a < 0x01a04000)
     {
       unsigned o = a - 0x01a00000;
-      return m_comm.ReadShared(o) | (uint32_t(m_comm.ReadShared(o + 1)) << 8) | (uint32_t(m_comm.ReadShared(o + 2)) << 16) | (uint32_t(m_comm.ReadShared(o + 3)) << 24);
+      const uint32_t native=m_comm.ReadShared(o) | (uint32_t(m_comm.ReadShared(o + 1)) << 8) |
+        (uint32_t(m_comm.ReadShared(o + 2)) << 16) | (uint32_t(m_comm.ReadShared(o + 3)) << 24);
+      // SGT observation only: preserve native read data and all wire semantics.
+      // Online launch is program-CRC gated. g9/g11 hold copier source/destination.
+      if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 &&
+          mask==0xffffffff && m_i960.GetPIP()==Sgt24h::RxCopyFinalLoadPC)
+        m_comm.ObserveSgt24hRxCopy(m_i960.GetPIP(),m_i960.GetReg(2),
+                                 m_i960.GetReg(25),m_i960.GetReg(27),addr,mask);
+      if ((m_daytonaPrediction || m_daytonaTrace) && m_daytonaScene && mask==0xffffffff && m_running==CPU_I960 &&
+          m_i960.GetPIP()==0x01aa74 && o>=DaytonaMotion::Rx && o<DaytonaMotion::Rx+7*DaytonaMotion::RowBytes)
+        ObserveDaytonaCopy(o);
+      // Decouple the local car from the relay round trip. This cabinet's own
+      // car is read back out of the RX echo row, which is only current once
+      // the frame has been out to the relay and back. Serve those reads from
+      // the live local row instead. This runs before the draw hook, which
+      // otherwise returns the raw echo for this seat. The ring image in
+      // shared memory is never modified.
+      if (m_srallycLocalDraw && m_srallycRaceLive && m_running==CPU_I960)
+      {
+        unsigned source=0;
+        if (m_comm.SrallycLocalMirror(o,&source))
+        {
+          // Honour the caller's byte mask, exactly like the native read, so
+          // 8- and 16-bit accesses see the mirrored lane as well.
+          uint32_t live=0;
+          for (unsigned i=0;i<4;++i)
+            if (mask & (0xffu<<(i*8)))
+              live |= uint32_t(m_comm.ReadShared(source+i))<<(i*8);
+          ++m_srallycServed;
+          return (native & ~mask) | (live & mask);
+        }
+        if (o>=m_comm.SrallycEchoOffset() && o<m_comm.SrallycEchoOffset()+SrallycMotion::RowBytes)
+          ++m_srallycMissed;
+      }
+      if ((m_srallycPrediction || m_srallycTrace) && mask==0xffffffff && m_running==CPU_I960 &&
+          o>=SrallycMotion::Rx && o<SrallycMotion::Rx+3*SrallycMotion::RowBytes)
+        return SrallycDrawRead(o,native);
+      return native;
     }
     if (a == 0x01a04000)
     {
@@ -1288,6 +1428,10 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
   if (addr >= 0x00500000 && addr < 0x00600000)
   {
     Put32(m_workRAM, addr - 0x00500000, data, mask);
+    // Last full-decoder store; observation only, after the native write.
+    if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 &&
+        mask==0xffffffff && m_i960.GetPIP()==0x21624c)
+      ObserveSgt24hDecode(addr);
     return;
   }
   if (addr >= 0x00900000 && addr < 0x00980000)
@@ -2484,6 +2628,7 @@ void CModel2::RunLine(void)
     {
       int cycles = (int) std::max<int64_t>(1, (limit - m_time[cpu] + I960_TIME - 1) / I960_TIME);
       int done = m_i960.Run(cycles);
+      if (m_indyEntryAbort) { m_running = CPU_NONE; return; }
       m_time[cpu] += int64_t(std::max(done, 1)) * I960_TIME;
       RunTimers();
     }
@@ -2597,16 +2742,850 @@ void CModel2::BuildVideoFrame(void)
     c |= 0xFF000000;
 }
 
+uint32_t CModel2::IndyNativeRoster() const
+{
+  const unsigned players = Get32(m_workRAM,INDY_RACE_COUNT);
+  const unsigned size = m_comm.ReadShared(3), self = m_comm.ReadShared(2);
+  if (m_comm.ReadShared(0) != 1 || size < 2 || size > Indy500Online::Cabinets ||
+      !self || self > size || !players || players > size) return 0;
+  if (players==1) return 1u<<IndyRaceEntry::RingIndex(self,size);
+  // The ROM's join code freezes a map from in-race player ordinal to a
+  // row in the native RX aggregate. The first byte in that row is its
+  // native FF/FE cabinet ID. Lobby members not in the race are not ready seats.
+  uint32_t mask = 0;
+  for (unsigned i=0; i<players; ++i)
+  {
+    const unsigned row = Get32(m_workRAM,INDY_RACE_ROWS + 4*i);
+    if (row >= size) return 0;
+    const unsigned offset = INDY_RX_ROW+0x1c0*row;
+    const unsigned id = m_comm.ReadShared(offset);
+    if (!id || id > size) return 0;
+    const uint32_t bit = 1u<<IndyRaceEntry::RingIndex(id,size);
+    if (mask & bit) return 0;
+    mask |= bit;
+  }
+  return mask;
+}
+
+bool CModel2::IndyEntryInstruction()
+{
+  constexpr unsigned G4 = 20;
+  if (m_i960.GetReg(G4) != 2) return true; // the ROM hasn't finished its animation yet
+  if (Get32(m_workRAM,INDY_MODE) != 5 || Get32(m_workRAM,INDY_SUBMODE) != 6 ||
+      Get32(m_workRAM,INDY_FLAG_PHASE) != 2 || Get32(m_workRAM,INDY_PHASE) != 2 ||
+      Get32(m_workRAM,INDY_CAR_PHASE) != 2 || Get32(m_workRAM,INDY_PLAYING) != 0)
+  {
+    m_comm.FailIndyEntry("unexpected guest state at the pre-intro checkpoint");
+    m_indyEntryAbort = true;
+    return false;
+  }
+  switch (m_comm.GateIndyEntry(IndyNativeRoster(),Get32(m_workRAM,INDY_COURSE),m_frameNumber))
+  {
+  case CModel2Comm::Entry::Failed:
+    m_indyEntryAbort = true;
+    return false;
+  case CModel2Comm::Entry::Wait:
+    if (!m_indyEntryWaiting)
+    {
+      m_indyHeldFrame = m_frameNumber;
+      m_indyFlagExtended = false;
+    }
+    m_indyEntryWaiting = true;
+    // cmpibe 2,g4 normally branches to the intro. Defer only this local
+    // comparison, using the ROM's existing wait path. It reloads the phase
+    // next frame. No ROM/RAM patch; CPUs, native packets, and vblanks continue.
+    m_i960.SetReg(G4,1);
+    return true;
+  case CModel2Comm::Entry::Release:
+    m_indyEntryWaiting = false;
+    ++m_indyRace;
+    m_indyAuditIntro = m_indyAuditTrack = m_indyAuditGo = m_indyAuditReturn = true;
+    return true; // execute the successful original compare as-is
+  }
+  return false;
+}
+
+void CModel2::AuditIndyEntryFrame()
+{
+  if (m_indyAuditReturn && Get32(m_workRAM,INDY_MODE) == 3)
+  {
+    m_indyAuditIntro = m_indyAuditTrack = m_indyAuditGo = m_indyAuditReturn = false;
+    InfoLog("INDY 500 ENTRY ATTRACT_RETURN race=%u frame=%llu", m_indyRace, (unsigned long long)(m_frameNumber-1));
+  }
+  if (!(m_indyAuditIntro || m_indyAuditTrack || m_indyAuditGo) ||
+      Get32(m_workRAM,INDY_MODE) != 5 || Get32(m_workRAM,INDY_SUBMODE) != 7) return;
+  // This is render-submission evidence, not a scanout timestamp or a gate.
+  // The ROM starts the intro jobs before it shows the running track camera.
+  const auto frame = (unsigned long long)(m_frameNumber-1);
+  if (m_indyAuditIntro)
+  {
+    m_indyAuditIntro = false;
+    InfoLog("INDY 500 ENTRY INTRO_SUBMITTED race=%u frame=%llu clock_us=%llu", m_indyRace, frame, (unsigned long long)IndyAuditUs());
+  }
+  if (m_indyAuditTrack && Get32(m_workRAM,INDY_FLAG_PHASE) == 3 && Get32(m_workRAM,INDY_CAR_PHASE) == 3)
+  {
+    m_indyAuditTrack = false;
+    InfoLog("INDY 500 ENTRY TRACK_SUBMITTED race=%u frame=%llu clock_us=%llu", m_indyRace, frame, (unsigned long long)IndyAuditUs());
+    if (m_indyEntryDump) m_indyIntroShot = m_frameNumber;
+  }
+  if (m_indyAuditGo && Get32(m_workRAM,INDY_CAR_PHASE) == 4 && Get32(m_workRAM,INDY_PLAYING) == 1 &&
+      Get32(m_workRAM,INDY_GO_HUD) == 3)
+  {
+    // Confirm the stock GO tiles without hooking that branch or changing it.
+    uint32_t hash = 2166136261u;
+    for (unsigned y=104; y<160; y+=2)
+      for (unsigned x=184; x<312; x+=2)
+        hash = (hash ^ unsigned((m_video.hud[y*SCREEN_WIDTH+x] & 0xff000000u) != 0)) * 16777619u;
+    if (hash==0x2b4efdab)
+    {
+      m_indyAuditGo = false;
+      InfoLog("INDY 500 ENTRY GO_OBSERVED race=%u frame=%llu clock_us=%llu time_left=%u", m_indyRace, frame,
+              (unsigned long long)IndyAuditUs(), Get32(m_workRAM,0x44700));
+      if (m_indyEntryDump) m_indyRaceShot = m_frameNumber+429;
+    }
+  }
+}
+
+bool CModel2::IndyMotionRaceActive() const
+{
+  return Get32(m_workRAM,INDY_MODE)==5 && Get32(m_workRAM,INDY_SUBMODE)==7 &&
+    Get32(m_workRAM,INDY_CAR_PHASE)==4 && Get32(m_workRAM,INDY_PLAYING)==1;
+}
+
+void CModel2::ClearIndyMotion()
+{
+  m_indyActors={};
+  m_indyDraw={};
+  m_indyUdpPeers={};
+  m_indyUdpFrameUs=0;
+  m_indyUdpSent=false;
+  m_indyMotionActive=false;
+  m_indyMotionRoster=0;
+}
+
+void CModel2::UpdateIndyMotionFrame()
+{
+  const unsigned players=Get32(m_workRAM,INDY_RACE_COUNT);
+  const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
+  const uint32_t roster=IndyMotionRaceActive() && !m_comm.OnlineSessionFailed() &&
+    local<players && players>1 ? IndyNativeRoster() : 0;
+  if (m_indyMotionRoster!=roster) ClearIndyMotion();
+  if (!roster) return;
+  const unsigned self=m_comm.ReadShared(2);
+  const unsigned row=Get32(m_workRAM,INDY_RACE_ROWS+local*4);
+  if (row>=m_comm.ReadShared(3) || m_comm.ReadShared(INDY_RX_ROW+row*IndyMotion::RowBytes)!=self)
+  {
+    if (m_indyMotionActive) ClearIndyMotion();
+    return;
+  }
+  m_indyMotionRoster=roster;
+  m_indyMotionActive=m_indyMotionEnabled || m_indyMotionTrace;
+  const auto race=m_comm.IndyUdpRace();
+  const bool udp=m_indyUdpEnabled && race && race.roster==roster && race.course==Get32(m_workRAM,INDY_COURSE) && m_comm.IndyUdpActive();
+  const bool trace=m_indyMotionTrace && m_indyMotionTraceRows<INDY_MAX_TRACE_ROWS;
+  m_indyUdpFrameUs=0;
+  if (!trace && !udp) return;
+  const uint64_t us=IndyAuditUs();
+  constexpr unsigned TxBase=0x2000;
+  const uint32_t tick=IndySharedWord(m_comm,TxBase+IndyMotion::TickOffset);
+  const bool send=udp && (!m_indyUdpSent || m_indyUdpSentTick!=tick);
+  IndyPoseUdp::Packet poses{race,tick,uint8_t(self),0};
+  for (unsigned slot=0;(trace || send) && local+slot*players<IndyMotion::MaxActors;++slot)
+  {
+    const unsigned off=TxBase+IndyMotion::PayloadOffset+IndyMotion::RecordBytes*slot;
+    const IndyMotion::Vec p{IndyFloat(IndySharedWord(m_comm,off)),IndyFloat(IndySharedWord(m_comm,off+8))};
+    if (!IndyMotion::ValidPosition(p)) continue;
+    const unsigned yaw=IndySharedWord(m_comm,off+12)>>16;
+    if (send && slot<IndyPoseUdp::Slots && std::abs(IndyFloat(IndySharedWord(m_comm,off+4)))<1024)
+    {
+      poses.mask|=uint8_t(1u<<slot);
+      poses.poses[slot]={p,uint16_t(yaw)};
+    }
+    if (trace && m_indyMotionTraceRows<INDY_MAX_TRACE_ROWS)
+    {
+      std::fprintf(m_indyMotionTrace,"tx,%llu,%llu,%u,%u,%u,%u,%.9g,%.9g,%u,%.9g,%.9g,%u,0,%u,0,0,0\n",
+        (unsigned long long)m_frameNumber,(unsigned long long)us,self,self,slot,tick,p.x,p.z,yaw,p.x,p.z,yaw,unsigned(m_indyMotionEnabled));
+      ++m_indyMotionTraceRows;
+    }
+  }
+  if (trace && m_frameNumber%60==0) std::fflush(m_indyMotionTrace);
+  if (send && poses.mask)
+  {
+    m_comm.SendIndyPose(IndyPoseUdp::Encode(poses),us);
+    m_indyUdpSent=true;
+    m_indyUdpSentTick=tick;
+  }
+  if (udp && m_indyMotionEnabled)
+  {
+    const unsigned count=m_comm.ReadShared(3);
+    for (unsigned peer=1;peer<=count;++peer)
+      if (peer!=self && (roster & (1u<<IndyRaceEntry::RingIndex(peer,count))))
+        m_comm.LatestIndyPose(peer,m_indyUdpPeers[peer-1]);
+    m_indyUdpFrameUs=IndyAuditUs();
+  }
+}
+
+void CModel2::CaptureIndyMotion(uint32_t actor,uint32_t source)
+{
+  const int index=IndyActorIndex(actor);
+  if (index<0) return;
+  auto& car=m_indyActors[index];
+  car.sample={};
+  if (!IndyMotionRaceActive()) return;
+  const unsigned ofs=actor-0x500000;
+  if (Get32(m_workRAM,ofs+0xa4)!=unsigned(index)) return;
+  const unsigned owner=Get32(m_workRAM,ofs+4);
+  const unsigned count=m_comm.ReadShared(3), self=m_comm.ReadShared(2);
+  if (owner>=IndyMotion::MaxSeats || count<2 || count>IndyMotion::MaxSeats || !self || self>count) return;
+  const unsigned row=Get32(m_workRAM,INDY_RACE_ROWS+owner*4);
+  const auto src=IndyMotion::FindRecord(unsigned(index),owner,Get32(m_workRAM,INDY_RACE_COUNT),
+      Get32(m_workRAM,INDY_LOCAL_ACTOR),row,count,source);
+  if (!src) return;
+  const unsigned base=IndyMotion::Rx+src.row*IndyMotion::RowBytes;
+  const unsigned peer=m_comm.ReadShared(base);
+  if (!peer || peer>count || peer==self || !(m_indyMotionRoster&(1u<<IndyRaceEntry::RingIndex(peer,count))) ||
+      !(m_comm.ReadShared(base+0x19)&2)) return;
+  const unsigned off=base+IndyMotion::PayloadOffset+src.slot*IndyMotion::RecordBytes;
+  IndyMotion::Pose raw{{IndyFloat(IndySharedWord(m_comm,off)),IndyFloat(IndySharedWord(m_comm,off+8))},
+                     uint16_t(IndySharedWord(m_comm,off+12)>>16)};
+  const float y=IndyFloat(IndySharedWord(m_comm,off+4));
+  if (!IndyMotion::ValidPosition(raw.p) || !(std::abs(y)<1024)) return;
+  const auto udp=m_comm.IndyRemoteMotion(src.row,src.slot);
+  car.sample={raw,udp.sampleUs ? udp.tick : IndySharedWord(m_comm,base+IndyMotion::TickOffset),peer,src.slot};
+  car.frame=m_frameNumber;
+  const auto now=udp.sampleUs ? IndyAuditUs() : 0;
+  // Native UDP supplies a timed source sample. The reliable ring path still
+  // uses its original, approximate age hint.
+  car.lead=std::min(IndyMotion::MaxLead,udp.sampleUs && now>=udp.sampleUs ? (now-udp.sampleUs)/m_comm.FramePeriodUs() :
+    double(src.row+1)+m_comm.IndyPresentationAgeUs(src.row)/m_comm.FramePeriodUs());
+}
+
+uint32_t CModel2::IndyMotionRead(uint32_t pc,uint32_t addr,uint32_t native)
+{
+  if (pc==INDY_POSE_RX_PC)
+  {
+    // Passive capture when ab340 reads the native actor's RX source pointer.
+    CaptureIndyMotion(addr-0x15c,native);
+    return native;
+  }
+  const uint32_t fp=m_i960.GetReg(CI960::REG_FP);
+  if (pc==INDY_DRAW_X_PC)
+  {
+    m_indyDraw={};
+    const uint32_t actor=addr-0x124;
+    const int index=IndyActorIndex(actor);
+    if (index<0 || !IndyMotionRaceActive()) return native;
+    auto& car=m_indyActors[index];
+    if (!car.sample.peer || m_frameNumber-car.frame>1) return native;
+    const auto& raw=car.sample.pose;
+    const uint32_t ofs=actor-0x500000;
+    if ((Get32(m_workRAM,ofs+0x11c)&15)!=1)
+    {
+      // Leave special poses and the draw routine's positional sound effects
+      // (states 2 and 4) entirely native.
+      car.predictor.Clear(); car.udpPredictor.Clear(); car.udpBlend.Clear();
+      return native;
+    }
+    // If vblank fell in the middle of the guest copy, don't draw a half pose.
+    if (IndyFloat(native)!=raw.p.x || IndyFloat(Get32(m_workRAM,ofs+0x12c))!=raw.p.z ||
+        uint16_t(Get32(m_workRAM,ofs+0x134))!=raw.yaw) return native;
+    IndyMotion::Pose shown=raw;
+    IndyPoseUdp::Selection pick;
+    unsigned udp=0;
+    if (m_indyMotionEnabled)
+    {
+      const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
+      if (local>=IndyMotion::MaxSeats) return native;
+      const uint32_t localOfs=INDY_ACTOR_BASE-0x500000+local*INDY_ACTOR_STRIDE;
+      shown=car.predictor.Step(car.sample,m_frameNumber,car.lead,m_indySmoothing);
+      if (m_indyUdpEnabled)
+      {
+        if (m_indyUdpFrameUs)
+          pick=IndyPoseUdp::Pick(car.sample,m_indyUdpPeers[car.sample.peer-1],m_indyUdpFrameUs);
+        IndyMotion::Pose udpPose{};
+        if (pick)
+          udpPose=car.udpPredictor.Step(pick.pose,m_frameNumber,double(pick.age)/m_comm.FramePeriodUs(),m_indySmoothing);
+        shown=car.udpBlend.Step(car.sample,shown,pick ? &udpPose : nullptr,m_frameNumber);
+        udp=pick ? 1 : car.udpBlend.Weight() ? 2 : 0;
+        if (udp==1 && !m_indyUdpLogged)
+        {
+          InfoLog("INDY 500 pose UDP: fresh remote snapshots used for drawing only.");
+          m_indyUdpLogged=true;
+        }
+      }
+      shown=IndyMotion::NearLocal(raw,shown,
+        {IndyFloat(Get32(m_workRAM,localOfs+0x0c)),IndyFloat(Get32(m_workRAM,localOfs+0x14))});
+    }
+    m_indyDraw={actor,fp,m_frameNumber,car.sample,shown,car.lead,udp,pick.gap,pick.age};
+    // The native car draw routine takes these operands into its pushed TGP
+    // transform and pops it at the end. No authoritative pose, collision
+    // input, lap state, comm byte, car type, pitch or height is written here.
+    return m_indyMotionEnabled ? IndyFloatBits(float(shown.p.x)) : native;
+  }
+  if (!m_indyDraw.actor || fp!=m_indyDraw.fp || m_frameNumber-m_indyDraw.frame>1) return native;
+  if (pc==INDY_DRAW_Z_PC && addr==m_indyDraw.actor+0x12c)
+    return m_indyMotionEnabled ? IndyFloatBits(float(m_indyDraw.pose.p.z)) : native;
+  if (pc==INDY_DRAW_YAW_PC && addr==m_indyDraw.actor+0x134)
+  {
+    const auto draw=m_indyDraw;
+    m_indyDraw={};
+    if (m_indyMotionTrace && m_indyMotionTraceRows<INDY_MAX_TRACE_ROWS)
+    {
+      const auto& raw=draw.sample.pose;
+      const auto& p=draw.pose;
+      std::fprintf(m_indyMotionTrace,"draw,%llu,%llu,%u,%u,%u,%u,%.9g,%.9g,%u,%.9g,%.9g,%u,%.3f,%u,%u,%u,%.3f\n",
+        (unsigned long long)draw.frame,(unsigned long long)IndyAuditUs(),unsigned(m_comm.ReadShared(2)),
+        draw.sample.peer,draw.sample.slot,draw.sample.tick,raw.p.x,raw.p.z,unsigned(raw.yaw),
+        double(float(p.p.x)),double(float(p.p.z)),unsigned(p.yaw),draw.lead,unsigned(m_indyMotionEnabled),
+        draw.udp,draw.udpGap,draw.udpAgeUs/1000.0);
+      ++m_indyMotionTraceRows;
+    }
+    return m_indyMotionEnabled ? uint32_t(IndyMotion::SignedYaw(draw.pose.yaw)) : native;
+  }
+  return native;
+}
+
+bool CModel2::PrepareIndyRelayRole()
+{
+  if (m_comm.OnlineSessionFailed()) return false;
+  const unsigned seat = m_comm.IndyRelaySeat();
+  if (!seat) return false; // do not boot with a Standalone/duplicate role
+
+  const uint32_t options = m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+  auto image = m_eeprom.GetImage();
+  if (!Indy500Online::ConfigureRelayEeprom(image,seat-1,options))
+  {
+    // The verified ROM creates the default settings on a blank EEPROM.
+    // Let that boot run, then configure the initialized image and reboot.
+    if (++m_indyBootstrapFrames < 1800) return true;
+    return m_comm.FailIndyEntry("native settings EEPROM did not initialize");
+  }
+  m_eeprom.SetImage(image);
+  m_indyRoleConfigured = true;
+  if (m_indyBootstrapFrames) Reset();
+  InfoLog("INDY 500 Online: assigned %s / CABINET ID %u (session only%s).",
+          seat == 1 ? "MASTER" : "SLAVE", seat, m_indyBootstrapFrames ? ", initialized EEPROM" : "");
+  if (options & NativeRoomSettings::Enabled)
+    InfoLog("INDY 500 Online: room settings: Difficulty=%s, Race mode=%s, Handicap=%s.",
+            NativeRoomSettings::DifficultyName(Indy500Online::Game,NativeRoomSettings::Difficulty(options)),
+            NativeRoomSettings::ModeName(Indy500Online::Game,NativeRoomSettings::Mode(options)),
+            NativeRoomSettings::HasIndyHandicap(options) ? "On" : "Off");
+  return true;
+}
+
+void CModel2::ClearSrallycMotion()
+{
+  if (m_srallycServed || m_srallycMissed)
+  {
+    const uint64_t total=m_srallycServed+m_srallycMissed;
+    InfoLog("Sega Rally local control: %llu of %llu own-car reads served from live "
+            "local data (%.1f%%), %llu left on the relay echo.",
+            (unsigned long long) m_srallycServed, (unsigned long long) total,
+            total ? 100.0*double(m_srallycServed)/double(total) : 0.0,
+            (unsigned long long) m_srallycMissed);
+  }
+  m_srallycServed=0;
+  m_srallycMissed=0;
+  m_srallycScene={};
+  m_srallycPredictors={};
+  m_srallycMotionRx={};
+  m_srallycTracedFrame={};
+}
+
+void CModel2::TraceSrallyc(const char* kind,unsigned self,const SrallycMotion::Row& row,
+                         const SrallycMotion::Draw& draw,uint32_t site)
+{
+  if (!m_srallycTrace || m_srallycTraceRows>=80000) return;
+  std::fprintf(m_srallycTrace,
+    "%s,%llu,%llu,%u,%u,%u,%u,%u,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%u,%u,%u,%.3f,%u,%x,%llx\n",
+    kind,(unsigned long long)m_frameNumber,(unsigned long long)IndyAuditUs(),
+    self,row.seat,row.scene.race,row.scene.course,row.scene.part,row.pose.p.x,row.pose.p.z,row.pose.yaw,
+    row.velocity.x,row.velocity.z,draw.tcp.p.x,draw.tcp.p.z,draw.shown.p.x,draw.shown.p.z,draw.shown.yaw,
+    unsigned(m_srallycPrediction),draw.udp.gap,draw.udp.seq,draw.udp.age/1000.0,draw.weight,site,(unsigned long long)row.key);
+  ++m_srallycTraceRows;
+}
+
+void CModel2::UpdateSrallycMotion()
+{
+  using namespace SrallycMotion;
+  const auto local=m_comm.SrallycMotionRow(Tx);
+  if (!local || local.scene!=m_srallycScene) ClearSrallycMotion();
+  if (!local) { m_srallycRaceLive=false; return; }
+  m_srallycScene=local.scene;
+  m_srallycRaceLive=local.scene.race!=0;
+  for (unsigned row=0;row<SrallycOnline::Cabinets-1;++row)
+  {
+    const auto peer=m_comm.SrallycMotionRow(Rx+row*RowBytes);
+    if (m_srallycPrediction && peer && peer.scene==local.scene)
+      m_comm.LatestSrallycPose(peer.seat,m_srallycMotionRx[peer.seat-1]);
+  }
+  TraceSrallyc("owner",local.seat,local,{local.pose,local.pose},0);
+  if (m_srallycTrace && m_frameNumber%32==0) std::fflush(m_srallycTrace);
+}
+
+// The drawn local car: position and yaw come from the live local row, which
+// the emulated game updates every frame, not from the network echo.
+SrallycMotion::Row CModel2::SrallycMotionRowLocal(const SrallycMotion::Row& live)
+{
+  SrallycMotion::Row out=live;
+  return out;
+}
+
+uint32_t CModel2::SrallycDrawRead(unsigned offset,uint32_t native)
+{
+  using namespace SrallycMotion;
+  const uint32_t pc=m_i960.GetPIP();
+  const RallyDrawSite* site=nullptr;
+  for (const auto& s:RallyDrawSites) if (s.pc==pc) {site=&s;break;}
+  if (!site || m_i960.GetReg(2)!=site->ret || Get32(m_workRAM,pc-0x500000)!=site->instruction) return native;
+  const auto local=m_comm.SrallycMotionRow(Tx);
+  auto row=m_comm.SrallycMotionRow(offset-site->field);
+  // Decouple the local car from the relay round trip. The ROM reads this
+  // cabinet's own car from the RX echo row, which only becomes current once
+  // the frame has travelled out to the relay and back. Serve the live local
+  // row for those reads instead. The ring image itself is never modified, so
+  // the other cabinets still receive the native sequence.
+  if (m_srallycLocalDraw && local && row && local.seat==row.seat)
+    row=SrallycMotionRowLocal(local);
+  if (!local || !row || local.seat==row.seat || row.scene!=local.scene) return native;
+  const double original=site->field==0x28 ? row.pose.p.x : site->field==0x30 ? row.pose.p.z : row.pose.yaw;
+  if (FloatBits(float(original))!=native) return native;
+  if (local.scene!=m_srallycScene)
+  {
+    ClearSrallycMotion();
+    m_srallycScene=local.scene;
+  }
+  const auto draw=m_srallycPrediction ? m_srallycPredictors[row.seat-1].Step(row,local,m_srallycMotionRx[row.seat-1],m_frameNumber,IndyAuditUs(),m_comm.FramePeriodUs()) :
+    Draw{row.pose,row.pose};
+  if ((pc==0x5c2d20 || pc==0x5d09b0) && m_srallycTracedFrame[row.seat-1]!=m_frameNumber)
+  {
+    m_srallycTracedFrame[row.seat-1]=m_frameNumber;
+    TraceSrallyc("draw",local.seat,row,draw,pc);
+  }
+  if (!m_srallycPrediction) return native;
+  const double display=site->field==0x28 ? draw.shown.p.x : site->field==0x30 ? draw.shown.p.z : draw.shown.yaw;
+  return FloatBits(float(display));
+}
+
+namespace
+{
+struct DaytonaOperand { uint32_t pc,ret,op,field,mask; unsigned axis; };
+// Four native car-body LOD paths: translate (0x1212), then base Y
+// rotation (0x1515); g8 is that mesh's actor. Do not touch the later
+// +0x272 reads used to form relative wheel/body angles, or the marker,
+// shadow, sorting, camera, collision or track-database paths.
+constexpr DaytonaOperand DaytonaBody[] = {
+  {0x086e8,0x08354,0x901e201c,0x01c,0xffffffff,0},
+  {0x086f0,0x08354,0x902e2024,0x024,0xffffffff,1},
+  {0x08718,0x08354,0xc8562272,0x270,0xffff0000,2},
+  {0x08ae0,0x08384,0x901e201c,0x01c,0xffffffff,0},
+  {0x08ae8,0x08384,0x902e2024,0x024,0xffffffff,1},
+  {0x08b10,0x08384,0xc8562272,0x270,0xffff0000,2},
+  {0x08ed4,0x083b4,0x901e201c,0x01c,0xffffffff,0},
+  {0x08edc,0x083b4,0x902e2024,0x024,0xffffffff,1},
+  {0x08f04,0x083b4,0xc8562272,0x270,0xffff0000,2},
+  {0x092b0,0x083e0,0x901e201c,0x01c,0xffffffff,0},
+  {0x092b8,0x083e0,0x902e2024,0x024,0xffffffff,1},
+  {0x092e0,0x083e0,0xc8562272,0x270,0xffff0000,2},
+};
+bool DaytonaMotionCode(const std::vector<uint8_t>& program)
+{
+  // The full program CRC is checked before a Daytona board connection.
+  for (const auto& op:DaytonaBody) if (Get32(program,op.pc)!=op.op) return false;
+  return Get32(program,0x1a83c)==0x090001ac && Get32(program,0x1ab7c)==0x09000018 &&
+    Get32(program,0x1ab8c)==0x14fffe8c && Get32(program,0x1aa74)==0x901ba01c &&
+    Get32(program,0x1aa80)==0x921b601c &&
+    Get32(program,0x1aa84)==0x92236020 && Get32(program,0x1aa88)==0x922b6024 &&
+    Get32(program,0x1aabc)==0xca236272 && Get32(program,0x08704)==0x92f6e120 &&
+    Get32(program,0x08afc)==0x92f6e120 && Get32(program,0x08ef0)==0x92f6e120 &&
+    Get32(program,0x092cc)==0x92f6e120 && Get32(program,0x08724)==0x92f6e150 &&
+    Get32(program,0x08b1c)==0x92f6e150 && Get32(program,0x08f10)==0x92f6e150 &&
+    Get32(program,0x092ec)==0x92f6e150;
+}
+}
+
+void CModel2::ClearDaytonaMotion()
+{
+  m_daytonaScene={};m_daytonaActors={};m_daytonaPredictors={};
+  m_daytonaTracedRoster=0;
+  m_comm.DaytonaRaceScene({});
+}
+
+DaytonaMotion::Scene CModel2::DaytonaScene() const
+{
+  using namespace DaytonaMotion;
+  const unsigned self=m_comm.DaytonaMotionSeat();
+  if (!self || Get32(m_workRAM,0x1090)!=RaceState ||
+      Get32(m_workRAM,0x1220)!=ActorBase || Get32(m_workRAM,0x1224)!=ActorBase+ActorStride ||
+      m_workRAM[0x40001]!=m_comm.DaytonaMotionCount() || m_workRAM[0x40002]!=self ||
+      DaytonaActorSeat(ActorBase)!=self || m_workRAM[0x10f8]>=3)
+    return {};
+  return {m_daytonaEpoch?m_daytonaEpoch:1,m_workRAM[0x10f8]};
+}
+
+unsigned CModel2::DaytonaActorSeat(uint32_t actor) const
+{
+  using namespace DaytonaMotion;
+  if (actor<ActorBase || actor>=ActorBase+ActorStride*DaytonaOnline::Cabinets || (actor-ActorBase)%ActorStride) return 0;
+  const unsigned car=m_workRAM[actor-0x500000+4];
+  const auto live=Get32(m_workRAM,0x40030);
+  if (car>=DaytonaOnline::Cabinets || !(live&(1u<<car))) return 0;
+  // Actor ordinals index the ROM's car-to-link-ID map; they are not a
+  // relay-assigned seat number (even when they coincide in a two-car race).
+  const unsigned seat=m_workRAM[0x40028+car], count=m_comm.DaytonaMotionCount();
+  if (!seat || seat>count) return 0;
+  for (unsigned i=0;i<DaytonaOnline::Cabinets;++i)
+    if (i!=car && (live&(1u<<i)) && m_workRAM[0x40028+i]==seat) return 0;
+  return seat;
+}
+
+DaytonaMotion::Pose CModel2::DaytonaActorPose(uint32_t actor) const
+{
+  using namespace DaytonaMotion;
+  const unsigned o=actor-0x500000;
+  return {{AsFloat(Get32(m_workRAM,o+0x1c)),AsFloat(Get32(m_workRAM,o+0x24))},
+          Angle(uint16_t(Get32(m_workRAM,o+0x270)>>16))};
+}
+
+void CModel2::TraceDaytona(const char* kind,unsigned self,const DaytonaMotion::Row& row,DaytonaMotion::Pose native,
+                          const DaytonaMotion::Draw& p,double nearest,uint32_t pc)
+{
+  if (!m_daytonaTrace || m_daytonaTraceRows>=120000) return;
+  std::fprintf(m_daytonaTrace,
+    "%s,%llu,%llu,%u,%u,%u,%u,%u,%016llx,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%.7f,%u,%u,%u,%.3f,%u,%06x,%.7f\n",
+    kind,(unsigned long long)m_frameNumber,(unsigned long long)IndyAuditUs(),self,row.seat,row.scene.epoch,row.scene.course,unsigned(row.tick),
+    (unsigned long long)row.key,native.p.x,native.p.z,native.yaw,row.pose.p.x,row.pose.p.z,p.tcp.p.x,p.tcp.p.z,p.shown.p.x,p.shown.p.z,p.shown.yaw,
+    unsigned(m_daytonaPrediction),p.udp.gap,p.udp.seq,p.udp.age/1000.,p.weight,pc,nearest);
+  ++m_daytonaTraceRows;
+}
+
+void CModel2::UpdateDaytonaMotion()
+{
+  using namespace DaytonaMotion;
+  auto scene=DaytonaScene();
+  if (scene!=m_daytonaScene)
+  {
+    ClearDaytonaMotion();
+    if (scene)
+    {
+      if (++m_daytonaEpoch==0) ++m_daytonaEpoch;
+      scene.epoch=m_daytonaEpoch;
+      m_daytonaScene=scene;m_comm.DaytonaRaceScene(scene);
+      InfoLog("Daytona USA motion: native race %u, course %u.",scene.epoch,scene.course);
+    }
+  }
+  if (!m_daytonaTrace || !scene) return;
+  const auto live=Get32(m_workRAM,0x40030)&0xffu;
+  uint64_t mapped=live;
+  for (unsigned i=0;i<DaytonaOnline::Cabinets;++i) mapped|=uint64_t(m_workRAM[0x40028+i]&15u)<<(8+4*i);
+  if (mapped!=m_daytonaTracedRoster)
+  {
+    m_daytonaTracedRoster=mapped;
+    InfoLog("Daytona USA lab: native race %u roster mask=0x%02x, car-to-link map=0x%08x (car 1 low).",
+            scene.epoch,live,unsigned(mapped>>8));
+  }
+  const unsigned self=m_comm.DaytonaMotionSeat();
+  const auto row=m_comm.DaytonaRow(Tx,self,scene);
+  if (!row || DaytonaActorSeat(ActorBase)!=self) return;
+  const auto pose=DaytonaActorPose(ActorBase);
+  if (Valid(pose)) TraceDaytona("owner",self,row,pose,{pose,pose},0,0);
+}
+
+void CModel2::ObserveDaytonaCopy(unsigned offset)
+{
+  using namespace DaytonaMotion;
+  const uint32_t rip=m_i960.GetReg(2);
+  // The first actor returns to the RX caller at 1a840. The in-loop native
+  // extrapolator leaves RIP at 1ab80 for the following actors in that list.
+  if ((offset-Rx)%RowBytes!=0x5c || (rip!=0x01a840 && rip!=0x01ab80) || DaytonaScene()!=m_daytonaScene) return;
+  const uint32_t actor=m_i960.GetReg(13);
+  const unsigned peer=DaytonaActorSeat(actor), self=m_comm.DaytonaMotionSeat();
+  if (!self || !peer || peer==self || actor==ActorBase || m_i960.GetReg(16)!=peer) return;
+  auto& certificate=m_daytonaActors[peer-1];
+  const auto row=m_comm.DaytonaRow(offset-0x5c,peer,m_daytonaScene);
+  if (m_daytonaTrace && row && (row.key!=certificate.row.key || certificate.address!=actor))
+    TraceDaytona("copy",self,row,row.pose,{row.pose,row.pose},0,0x01aa74);
+  if (certificate.address!=actor)
+  {
+    certificate={};
+    m_daytonaPredictors[peer-1].Clear();
+  }
+  certificate.row=row;certificate.address=actor;certificate.copied=m_frameNumber;
+}
+
+uint32_t CModel2::DaytonaDrawRead(uint32_t addr,uint32_t mask,uint32_t native)
+{
+  using namespace DaytonaMotion;
+  if (!m_daytonaScene) return native;
+  const uint32_t actor=m_i960.GetReg(24);
+  if (actor<=ActorBase || actor>=ActorBase+ActorStride*DaytonaOnline::Cabinets) return native;
+  const auto pc=m_i960.GetPIP();
+  const DaytonaOperand* item=nullptr;
+  for (const auto& op:DaytonaBody) if (op.pc==pc) {item=&op;break;}
+  if (!item || actor+item->field!=addr || mask!=item->mask || (actor-ActorBase)%ActorStride ||
+      DaytonaScene()!=m_daytonaScene) return native;
+  // Some LODs can first draw a native tag, leaving its call site's RIP in
+  // r2 before the body continuation. Both paths originate at the same
+  // ROM-verified visible actor/LOD loop; never apply to the tag's loads.
+  const uint32_t rip=m_i960.GetReg(2);
+  if (rip!=item->ret && !(item->ret==0x08384 && rip==0x08ad4) &&
+                        !(item->ret==0x083b4 && rip==0x08ec8) &&
+                        !(item->ret==0x08354 && rip==0x086dc) &&
+                        !(item->ret==0x083e0 && rip==0x092a4)) return native;
+  const unsigned peer=DaytonaActorSeat(actor), self=m_comm.DaytonaMotionSeat();
+  if (!self || !peer || peer==self) return native;
+  auto& c=m_daytonaActors[peer-1];
+  // The game can advance that same certified actor on intervening frames
+  // without another RX copy. Keep the binding briefly, never across a
+  // different actor, room/track/race, native roster or long copy outage.
+  if (!c.row || c.address!=actor || c.row.scene!=m_daytonaScene || m_frameNumber<c.copied || m_frameNumber-c.copied>5)
+    return native;
+  if (item->axis==0 && c.drawn!=m_frameNumber)
+  {
+    const auto p=DaytonaActorPose(actor);
+    if (!Valid(p)) return native;
+    const auto local=DaytonaActorPose(ActorBase);
+    if (!Valid(local) || DaytonaActorSeat(ActorBase)!=self) return native;
+    double nearest=(p.p-local.p).Length();
+    for (unsigned i=1;i<DaytonaOnline::Cabinets;++i)
+    {
+      const auto a=ActorBase+i*ActorStride;
+      if (a==actor || !DaytonaActorSeat(a)) continue;
+      const auto other=DaytonaActorPose(a);
+      if (Valid(other)) nearest=std::min(nearest,(p.p-other.p).Length());
+    }
+    if (m_daytonaPrediction) m_comm.LatestDaytonaPose(peer,c.udp);
+    c.draw=m_daytonaPrediction ? m_daytonaPredictors[peer-1].Step(c.row,p,nearest,c.udp,m_frameNumber,IndyAuditUs(),m_comm.FramePeriodUs()) : Draw{p,p};
+    c.drawn=m_frameNumber;c.yaw=int(std::lround(Turn(c.draw.shown.yaw,p.yaw)/AngleUnit));
+    TraceDaytona("draw",self,c.row,p,c.draw,nearest,pc);
+  }
+  if (!m_daytonaPrediction || c.drawn!=m_frameNumber) return native;
+  if (item->axis==2) return (native&0xffffu)|(uint32_t(uint16_t((native>>16)+c.yaw))<<16);
+  const double val=item->axis==0 ? c.draw.shown.p.x : c.draw.shown.p.z;
+  return AsWord(float(val));
+}
+
+void CModel2::ObserveSgt24hDecode(uint32_t address)
+{
+  using namespace Sgt24h;
+  // Full decoder g0 = authoritative cabinet record, g1 = full slot,
+  // g2 = actor base at the final store. RIP identifies the native caller.
+  const unsigned slot=m_i960.GetReg(17);
+  if (slot>=Cabinets) {m_sgt24hDecoded={};return;}
+  m_sgt24hDecoded[slot]={};
+  if (m_i960.GetReg(2)!=0xba97c) return;
+  const uint32_t actor=m_i960.GetReg(18);
+  if (actor<CarActorBase || (actor-CarActorBase)%CarActorStride) return;
+  const uint64_t end=uint64_t(actor)+CarActorStride;
+  if (end>0x500000ull+m_workRAM.size() || address!=actor+0x1720) return;
+  const unsigned index=(actor-CarActorBase)/CarActorStride;
+  auto word=[&](uint32_t a){return Get32(m_workRAM,a-0x500000);};
+  const unsigned count=m_comm.NativeRelayCount();
+  const unsigned authority=word(SelectedCabinet);
+  if (count<2 || count>Cabinets || slot>=count || authority>=count ||
+      word(LinkCount)!=count || word(LinkDisabled)!=0 ||
+      index>=word(0x510f40) || index==word(LocalActorIndex) ||
+      word(actor)!=LinkedPeerActorType || word(actor+4)!=index ||
+      word(actor+DecodedCabinetSlot)!=slot ||
+      m_i960.GetReg(16)!=RxActors+authority*CabinetRecordStride) return;
+  const unsigned own=word(Seat);
+  if (own>=count || slot==own) return;
+  const auto* rows=m_workRAM.data()+RxActors-0x500000;
+  const unsigned group=rows[authority*CabinetRecordStride+3];
+  const unsigned state=rows[slot*CabinetRecordStride+2];
+  if ((state!=3 && state!=4) || rows[slot*CabinetRecordStride+3]!=group) return;
+  // Reconstruct fresh matches for the actor prefix. Never certify native r6
+  // retention after an exhausted scan as newly established actor ownership.
+  unsigned cursor=0,matched=Cabinets;
+  for(unsigned i=0;i<=index;++i)
+  {
+    const unsigned type=word(CarActorBase+i*CarActorStride);
+    if(type==CompactActorType) continue;
+    if(type!=LocalActorType && type!=LinkedPeerActorType) return;
+    while(cursor<count && !((rows[cursor*CabinetRecordStride+2]==3 ||
+                            rows[cursor*CabinetRecordStride+2]==4) &&
+                            rows[cursor*CabinetRecordStride+3]==group)) ++cursor;
+    if(cursor==count) return;
+    matched=cursor++;
+  }
+  if(matched!=slot) return;
+  // Require the matching authority row to have been copied from this applied
+  // generation. Age limits and scene validation belong to a future consumer.
+  const auto token=m_comm.Sgt24hCopyToken(authority,IndyAuditUs(),UINT64_MAX);
+  if (!token.generation) return;
+  // Prevent two live slot entries referring to the same actor.
+  for(auto& binding:m_sgt24hDecoded) if(binding.actor==actor) binding={};
+  auto& binding=m_sgt24hDecoded[slot];
+  binding.actor=actor;binding.authority=authority;binding.slot=slot;
+  binding.phase=word(0x510948);binding.group=group;
+  binding.decodedFrame=m_frameNumber;binding.applied=token;
+}
+
+void CModel2::ObserveSgt24hDraw(uint32_t address)
+{
+  using namespace Sgt24h;
+  // Geometry-only RAM path: called from other-actor dispatch at 28118.
+  // Never match the direct ROM path or local camera/model dispatch.
+  if (m_i960.GetReg(2)!=0x2811c) return;
+  const uint32_t body=m_i960.GetReg(16),pc=m_i960.GetPIP();
+  const unsigned axis=(pc-0x21a550)/4;
+  if (axis>2 || address!=body+StatePosition+4*axis || body<CarActorBase+ReceivedState) return;
+  const uint32_t actor=body-ReceivedState;
+  if ((actor-CarActorBase)%CarActorStride || uint64_t(actor)+CarActorStride>0x500000ull+m_workRAM.size()) return;
+  auto word=[&](uint32_t a){return Get32(m_workRAM,a-0x500000);};
+  const unsigned index=(actor-CarActorBase)/CarActorStride;
+  const unsigned count=m_comm.NativeRelayCount(), authority=word(SelectedCabinet);
+  // State3 is the relocated dispatch mode; no broader race-mode inference.
+  if (word(0x510948)!=3 || word(0x510f14)!=1 || word(LinkDisabled)!=0 ||
+      count<2 || count>Cabinets || authority>=count || word(LinkCount)!=count ||
+      index>=word(0x510f40) || index==word(LocalActorIndex) || word(actor)!=LinkedPeerActorType) return;
+  const auto* rows=m_workRAM.data()+RxActors-0x500000;
+  const unsigned group=rows[authority*CabinetRecordStride+3];
+  for(unsigned slot=0;slot<count;++slot)
+  {
+    const auto& binding=m_sgt24hDecoded[slot];
+    if(binding.actor!=actor) continue;
+    auto& draw=m_sgt24hDraws[slot];
+    const unsigned state=rows[slot*CabinetRecordStride+2];
+    // Conservative observation-only ceiling, not a prediction horizon.
+    const auto token=m_comm.Sgt24hCopyToken(authority,IndyAuditUs(),100000);
+    if (binding.authority!=authority || binding.phase!=3 || binding.group!=group ||
+        binding.slot!=slot || slot==word(Seat) || (state!=3 && state!=4) ||
+        rows[slot*CabinetRecordStride+3]!=group || word(actor+DecodedCabinetSlot)!=slot ||
+        !token.generation || token.epoch!=binding.applied.epoch || token.generation!=binding.applied.generation ||
+        m_frameNumber<binding.decodedFrame || m_frameNumber-binding.decodedFrame>1)
+    {draw={};return;}
+    // Begin one coherent triple only at the first certified load. Partial or
+    // out-of-order events cannot be consumed as a complete observation.
+    if(axis==0)
+    {
+      draw={};draw.actor=actor;draw.frame=m_frameNumber;draw.applied=token;
+      for(unsigned i=0;i<3;++i)draw.nativePosition[i]=word(body+StatePosition+4*i);
+    }
+    if(draw.actor!=actor || draw.frame!=m_frameNumber || draw.applied.epoch!=token.epoch ||
+       draw.applied.generation!=token.generation || draw.axes!=((1u<<axis)-1))
+    {draw={};return;}
+    if(draw.nativePosition[axis]!=word(address)) {draw={};return;}
+    draw.axes|=1u<<axis;
+    return;
+  }
+}
+
+bool CModel2::PrepareSgt24hRelayRole()
+{
+  const unsigned seat=m_comm.NativeRelaySeat();
+  if (!seat) return false;
+  const unsigned count=m_comm.NativeRelayCount();
+  if (count<2 || count>Sgt24hOnline::Cabinets || seat>count)
+  {
+    m_comm.FailNativeLink("invalid SGT roster");
+    return false;
+  }
+  auto image=m_eeprom.GetImage();
+  if (!Sgt24h::ConfigureRelayEeprom(image,seat-1,count))
+  {
+    // ROM may initialize a blank EEPROM. Comm remains closed during bootstrap.
+    if (++m_sgt24hBootstrapFrames<1800) return true;
+    m_comm.FailNativeLink("native SGT settings did not initialize");
+    return false;
+  }
+  m_eeprom.SetImage(image);
+  m_sgt24hRoleConfigured=true;
+  if (m_sgt24hBootstrapFrames) Reset();
+  m_comm.NativeRoleConfigured();
+  InfoLog("Super GT 24h Online: assigned %s / CAR %u of %u (session only; experimental).",
+          seat==1?"MASTER":"SLAVE",seat,count);
+  return true;
+}
+
+bool CModel2::PrepareDaytonaRelayRole()
+{
+  const unsigned seat=m_comm.NativeRelaySeat();
+  if (!seat) return false; // do not start a different saved role before Ready
+  const unsigned options=m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+  if (!NativeRoomSettings::Valid(DaytonaOnline::Game,options))
+  {
+    m_comm.FailNativeLink("invalid Daytona room settings");
+    return false;
+  }
+  if (!DaytonaOnline::ConfigureRelayBackup(m_backupRAM.data(),m_backupRAM.size(),m_dpram.data(),m_dpram.size(),seat,options))
+  {
+    if (++m_daytonaBootstrapFrames<1800) return true;
+    m_comm.FailNativeLink("native settings backup RAM did not initialize");
+    return false;
+  }
+  m_daytonaRoleConfigured=true;
+  if (m_daytonaBootstrapFrames)
+  {
+    // A cold boot of the edited backup, not a soft reset into partially
+    // initialized Daytona link/work globals from the factory-default boot.
+    std::fill(m_ram.begin(),m_ram.end(),0);
+    std::fill(m_workRAM.begin(),m_workRAM.end(),0);
+    Reset();
+  }
+  m_comm.NativeRoleConfigured();
+  InfoLog("Daytona USA Online: assigned %s / CAR NUMBER %u (session only).",seat==1?"MASTER":"SLAVE",seat);
+  if (m_daytonaBootstrapFrames) InfoLog("Daytona USA Online: ROM initialized backup in %u frames.",m_daytonaBootstrapFrames);
+  InfoLog("Daytona USA Online settings: %s / %s.",
+    NativeRoomSettings::DifficultyName(DaytonaOnline::Game,NativeRoomSettings::Difficulty(options)),
+    NativeRoomSettings::ModeName(DaytonaOnline::Game,NativeRoomSettings::Mode(options)));
+  return true;
+}
+
+bool CModel2::PrepareSrallycRelayRole()
+{
+  const unsigned seat = m_comm.NativeRelaySeat();
+  if (!seat) return false;
+  const uint32_t options = m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+  auto image = m_eeprom.GetImage();
+  if (!SrallycOnline::ConfigureRelayEeprom(image, seat, options))
+  {
+    // Let the verified ROM initialize blank/invalid serial settings. No
+    // board traffic is published until its settings validate and we reboot.
+    if (++m_srallycBootstrapFrames < 1800) return true;
+    m_comm.FailNativeLink("native settings EEPROM did not initialize");
+    return false;
+  }
+  m_eeprom.SetImage(image);
+  m_srallycRoleConfigured = true;
+  if (m_srallycBootstrapFrames) Reset();
+  m_comm.NativeRoleConfigured();
+  InfoLog("Sega Rally Championship Online: assigned CAR %u (session only%s).",
+          seat, m_srallycBootstrapFrames ? ", initialized EEPROM" : "");
+  InfoLog("Sega Rally Championship Online: room settings: Difficulty=%s, Game mode=%s.",
+          NativeRoomSettings::DifficultyName(SrallycOnline::Game, NativeRoomSettings::Difficulty(options)),
+          NativeRoomSettings::ModeName(SrallycOnline::Game, NativeRoomSettings::Mode(options)));
+  return true;
+}
+
 void CModel2::RunFrame(void)
 {
+  if (m_comm.Sgt24hOnline() && !m_sgt24hRoleConfigured && !PrepareSgt24hRelayRole()) return;
+  if (m_comm.IndyOnline() && !m_indyRoleConfigured && !PrepareIndyRelayRole()) return;
+  if (m_comm.SrallycOnline() && !m_srallycRoleConfigured && !PrepareSrallycRelayRole()) return;
+  if (m_comm.DaytonaOnline() && !m_daytonaRoleConfigured && !PrepareDaytonaRelayRole()) return;
+  if (m_srallycPrediction || m_srallycTrace) UpdateSrallycMotion();
+  if (m_daytonaPrediction || m_daytonaTrace) UpdateDaytonaMotion();
   UpdateInputs();
 
   for (m_line = 0; m_line < TOTAL_LINES; m_line++)
   {
     if (m_line == VBLANK_LINE)
     {
-      // The communication board's vblank tick (MAME's comm_tick)
-      m_comm.Tick();
+      // The communication board's vblank tick (MAME's comm_tick).
+      const auto race=m_comm.IndyUdpRace();
+      const bool indyRace=m_comm.IndyRaceUdpEnabled() && race && Get32(m_workRAM,INDY_MODE)==5 &&
+        Get32(m_workRAM,INDY_SUBMODE)==7 && race.course==Get32(m_workRAM,INDY_COURSE);
+      unsigned indySlots=0;
+      if (indyRace && IndyMotionRaceActive() && race.roster==IndyNativeRoster())
+      {
+        const unsigned players=Get32(m_workRAM,INDY_RACE_COUNT), local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
+        if (players>1 && local<players) indySlots=(IndyMotion::MaxActors-local+players-1)/players;
+      }
+      // No motion bytes are omitted before native play or for special states.
+      // During the race clock a recovering seat can still confirm UDP liveness.
+      m_comm.Tick(indyRace,indySlots);
+      if (m_indyMotionEnabled || m_indyMotionTrace || m_indyUdpEnabled) UpdateIndyMotionFrame();
       // Debugging aid: "frame:prefix" writes texture RAM 0/1 and luma RAM to prefix_tex0.bin etc.
       if (const char *dump = getenv("SUPERMODEL_MODEL2_TEXDUMP"))
       {
@@ -2657,6 +3636,7 @@ void CModel2::RunFrame(void)
       }
     }
     RunLine();
+    if (m_indyEntryAbort) return;
   }
 
   if (m_wheelBoard)
@@ -2664,8 +3644,18 @@ void CModel2::RunFrame(void)
   if (m_billBoard)
     m_billBoard->RunFrame();
 
-  BuildVideoFrame();
-  m_frameNumber++;
+  if (m_indyEntryWaiting)
+  {
+    if (Get32(m_workRAM,INDY_MODE) != 5 || Get32(m_workRAM,INDY_SUBMODE) != 6 || Get32(m_workRAM,INDY_FLAG_PHASE) != 2)
+    {
+      m_comm.FailIndyEntry("guest left the flag screen without release");
+      return;
+    }
+    // Keep the last fully rendered native flag scene visible (the ROM's
+    // animation has already reached its last frame).
+  }
+  else BuildVideoFrame();
+  ++m_frameNumber;
 
   if (m_logIO && (m_frameNumber % 60) == 0)
     DebugLog("Model 2 frame %llu: i960 IP=%08X%s%s copro PC=%05X%s%s FIFO in=%u out=%u IRQ req=%03X ena=%03X video=%X geo read=%05X write=%05X\n",
@@ -2699,7 +3689,18 @@ void CModel2::RunFrame(void)
     }
   }
 
+  if (m_render && m_indyEntryDump)
+  {
+    const uint64_t nativeFrame = m_frameNumber-1;
+    const char* stage = nullptr;
+    unsigned race = m_indyRace;
+    if (m_indyEntryWaiting && nativeFrame == m_indyHeldFrame+8) { stage = "flag"; ++race; }
+    else if (m_indyIntroShot && nativeFrame == m_indyIntroShot) { stage = "intro"; m_indyIntroShot = 0; }
+    else if (m_indyRaceShot && nativeFrame == m_indyRaceShot) { stage = "race"; m_indyRaceShot = 0; }
+    if (stage) m_render->RequestDump("indy-" + std::string(stage) + "-" + std::to_string(race) + ".bmp");
+  }
   RenderFrame();
+  AuditIndyEntryFrame();
 }
 
 void CModel2::RenderFrame(void)
@@ -2715,6 +3716,14 @@ void CModel2::RenderFrame(void)
 
 void CModel2::Reset(void)
 {
+  m_sgt24hDecoded={};
+  m_sgt24hDraws={};
+  ClearIndyMotion();
+  ClearSrallycMotion();
+  ClearDaytonaMotion();
+  m_indyEntryAbort = m_indyEntryWaiting = false;
+  m_indyAuditIntro = m_indyAuditTrack = m_indyAuditGo = m_indyAuditReturn = false;
+  m_indyHeldFrame = m_indyIntroShot = m_indyRaceShot = 0;
   if (m_extra == Extra::Crypt5881)
     m_crypt5881.Reset();
   if (m_extra == Extra::Comp0229)
@@ -2927,6 +3936,11 @@ void CModel2::SaveState(CBlockFile *SaveState)
 
 void CModel2::LoadState(CBlockFile *SaveState)
 {
+  m_sgt24hDecoded={};
+  m_sgt24hDraws={};
+  ClearIndyMotion();
+  ClearSrallycMotion();
+  ClearDaytonaMotion();
   // 2B: the state must come from the same geometrizer (low level or
   // simulation); states without the block were made by the simulation
   if (m_model2b)
@@ -3290,8 +4304,103 @@ Result CModel2::Init(const Game &game, const ROMSet &rom_set)
   // The communication board: linked to the next machine with the network on
   // (the Network options, as the Model 3 net board), else to itself
   if (m_server && m_game.netboard_present)
+  {
+    const bool relay = !m_config["NetRelay"].ValueAsDefault<std::string>("").empty();
+    const bool indyRelay = relay && m_game.name == Indy500Online::Rom;
+    const bool rallyRelay = relay && m_game.name == SrallycOnline::Rom;
+    const bool daytonaRelay = relay && m_game.name == DaytonaOnline::Rom;
+    const bool sgtRelay = relay && m_game.name == Sgt24hOnline::Rom;
+    if (sgtRelay && (m_program.size()<Sgt24h::ProgramBytes ||
+        crc32(0,m_program.data(),Sgt24h::ProgramBytes)!=Sgt24h::ProgramCRC))
+    {
+      ErrorLog("Super GT 24h Online requires the verified original program.");
+      return Result::FAIL;
+    }
+    if (daytonaRelay && (!m_original || crc32(0, m_program.data(), PROGRAM_SIZE) != DaytonaOnline::ProgramCRC))
+    {
+      ErrorLog("Daytona USA Online requires the unmodified original Model 2 Revision A program (daytona).");
+      return Result::FAIL;
+    }
+    if (rallyRelay && crc32(0, m_program.data(), PROGRAM_SIZE) != SrallycOnline::ProgramCRC)
+    {
+      ErrorLog("Sega Rally Championship Online requires the unmodified Twin/DX Revision C program (srallyc).");
+      return Result::FAIL;
+    }
+    const bool indyUdp=indyRelay && m_config["IndyPoseUdp"].ValueAsDefault<bool>(true);
+    const bool model2Udp=(sgtRelay && m_config["Sgt24hPoseUdp"].ValueAsDefault<bool>(false)) || indyUdp ||
+      (rallyRelay && m_config["SrallycPoseUdp"].ValueAsDefault<bool>(true)) ||
+      (daytonaRelay && m_config["DaytonaPoseUdp"].ValueAsDefault<bool>(true) && m_config["DaytonaPrediction"].ValueAsDefault<bool>(true));
     m_comm.Init(m_server, m_config["AddressOut"].ValueAs<std::string>(), (uint16_t) m_config["PortOut"].ValueAs<unsigned>(),
-                m_config["Model2CommFrameSync"].ValueAsDefault<bool>(false));
+                m_config["Model2CommFrameSync"].ValueAsDefault<bool>(false),
+                indyRelay || rallyRelay || daytonaRelay || sgtRelay ? m_config["NetRelayTicket"].ValueAsDefault<std::string>("") : "",
+                indyRelay ? Indy500Online::Guid : rallyRelay ? SrallycOnline::Guid : daytonaRelay ? DaytonaOnline::Guid : sgtRelay ? Sgt24hOnline::Guid : 0, model2Udp,
+                sgtRelay ? m_config["NetSgt24hSeat"].ValueAsDefault<unsigned>(0) : rallyRelay || daytonaRelay ? m_config[daytonaRelay ? "NetDaytonaSeat" : "NetSrallycSeat"].ValueAsDefault<unsigned>(0) : 0,
+                sgtRelay ? m_config["NetSgt24hCount"].ValueAsDefault<unsigned>(0) : rallyRelay || daytonaRelay ? m_config[daytonaRelay ? "NetDaytonaCount" : "NetSrallycCount"].ValueAsDefault<unsigned>(0) : 0,
+                NativeRoomSettings::HasVideo60(m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0)));
+    if (m_comm.DaytonaOnline() && DaytonaMotionCode(m_program))
+    {
+      m_daytonaPrediction=m_config["DaytonaPrediction"].ValueAsDefault<bool>(true);
+      if (std::getenv("SUPERMODEL_DAYTONA_MOTION_TRACE"))
+      {
+        m_daytonaTrace=std::fopen("daytona-motion.csv","w");
+        if (m_daytonaTrace) std::fputs("kind,frame,us,self,peer,race,course,tick,key,x,z,yaw,rx_x,rx_z,tcp_x,tcp_z,shown_x,shown_z,shown_yaw,prediction,udp_gap,udp_seq,udp_age_ms,udp_weight,draw_pc,nearest\n",m_daytonaTrace);
+      }
+      InfoLog("Daytona USA motion: Rev A draw verified, %s.",m_daytonaPrediction?"presentation enabled":"native draw selected");
+    }
+    if (m_comm.SrallycOnline())
+    {
+      m_srallycPrediction=m_config["SrallycPrediction"].ValueAsDefault<bool>(true);
+      m_srallycLocalDraw=m_config["SrallycLocalMotion"].ValueAsDefault<bool>(true);
+      if (std::getenv("SUPERMODEL_SRALLYC_MOTION_TRACE"))
+      {
+        m_srallycTrace=std::fopen("srallyc-motion.csv","w");
+        if (m_srallycTrace) std::fputs("kind,frame,us,self,peer,race,course,part,x,z,yaw,vx,vz,tcp_x,tcp_z,shown_x,shown_z,shown_yaw,prediction,udp_gap,udp_seq,udp_age_ms,udp_weight,draw_pc,native_key\n",m_srallycTrace);
+      }
+    }
+    if (m_comm.IndyOnline())
+    {
+      // Check the load, decision, native waiting path and intro phase store.
+      if (Get32(m_program,0x2e960) == 0x90a03000 && Get32(m_program,0x2e964) == 0x005ebf68 &&
+          Get32(m_program,INDY_ENTRY_PC) == 0x3a152014 && Get32(m_program,0x2e96c) == 0x09fffb04 &&
+          Get32(m_program,0x2e978) == 0x08000024 && Get32(m_program,0x2e97c) == 0x09fff8a4 &&
+          Get32(m_program,0x2e984) == 0x5ca81e07 && Get32(m_program,0x2e988) == 0x92a83000 &&
+          Get32(m_program,0x2e98c) == 0x0053c284 &&
+          // The flag callback's countdown load, subtract and expiry branch.
+          Get32(m_program,0xbebf4) == 0x000bec10 && Get32(m_program,0xbec10) == 0x59a11010 &&
+          Get32(m_program,INDY_FLAG_TIMER_READ_PC) == 0x90ad1000 && Get32(m_program,0xbec18) == 0x8cb03000 &&
+          Get32(m_program,0xbec1c) == 0x41000000 && Get32(m_program,0xbec20) == 0x78ad4696 &&
+          Get32(m_program,0xbec38) == 0x92ad1000 && Get32(m_program,0xbeca8) == 0x16000110 &&
+          Get32(m_program,0xbedd4) == 0x92e83000 && Get32(m_program,0xbedd8) == 0x005ebf68)
+        m_i960.SetInstructionGate(INDY_ENTRY_PC, [this] { return IndyEntryInstruction(); });
+      else
+        m_comm.FailIndyEntry("unverified INDY 500 program revision");
+      // Separate from the entry gate: an unknown render path disables only
+      // presentation. Verify the copy, the exact draw operands and push/pop.
+      const bool motionCode = Get32(m_program,INDY_POSE_RX_PC)==0x90a1215c &&
+        Get32(m_program,0xab378)==0x909d1000 && Get32(m_program,0xab37c)==0x92992124 &&
+        Get32(m_program,0xab38c)==0x92a9211c && Get32(m_program,0xab3a4)==0x92b12134 &&
+        Get32(m_program,0xab450)==0x5c801604 && Get32(m_program,0xab454)==0x09f637ec &&
+        Get32(m_program,INDY_DRAW_X_PC)==0x902c2124 && Get32(m_program,0xec74)==0x90342128 &&
+        Get32(m_program,INDY_DRAW_Z_PC)==0x903c212c && Get32(m_program,0xec80)==0x92983000 &&
+        Get32(m_program,0xec88)==0xb2203000 && Get32(m_program,0xedc4)==0x905a2130 &&
+        Get32(m_program,INDY_DRAW_YAW_PC)==0x907a2134 && Get32(m_program,0xee8c)==0x09fffd24 &&
+        Get32(m_program,0xee94)==0x92b83000;
+      m_indyUdpEnabled = motionCode && indyUdp;
+      m_indyMotionEnabled = motionCode && m_config["IndyPrediction"].ValueAsDefault<bool>(true);
+      m_indySmoothing = std::min(2u,m_config["NetPredictionSmoothing"].ValueAsDefault<unsigned>(1));
+      const char* trace = std::getenv("SUPERMODEL_INDY_MOTION_TRACE");
+      if (motionCode && trace && std::strcmp(trace,"1")==0)
+      {
+        m_indyMotionTrace=std::fopen("indy-motion.csv","w");
+        if (m_indyMotionTrace)
+          std::fputs("kind,frame,us,self,peer,slot,tick,x,z,yaw,draw_x,draw_z,draw_yaw,lead,prediction,udp,udp_gap,udp_age_ms\n",m_indyMotionTrace);
+      }
+      InfoLog("INDY 500 motion: %s.", m_indyMotionEnabled ? "remote pose prediction on" :
+        (motionCode ? "disabled by configuration" : "unverified render path; using native poses"));
+      const char* dump = std::getenv("SUPERMODEL_INDY_ENTRY_DUMP");
+      m_indyEntryDump = dump && std::strcmp(dump,"1") == 0;
+    }
+  }
 
   // MAME's colour space conversion ("optimal settings for vf2, fvipers and
   // schamp are bias 64, gain 51")
@@ -3503,4 +4612,7 @@ CModel2::CModel2(Util::Config::Node &config, CInputs *inputs, COutputs *outputs,
 
 CModel2::~CModel2(void)
 {
+  if (m_indyMotionTrace) std::fclose(m_indyMotionTrace);
+  if (m_srallycTrace) std::fclose(m_srallycTrace);
+  if (m_daytonaTrace) std::fclose(m_daytonaTrace);
 }

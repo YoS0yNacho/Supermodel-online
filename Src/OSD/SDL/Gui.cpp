@@ -1604,7 +1604,7 @@ GuiResult RunGUI(const std::string& configPath, const Util::Config::Node& fileCo
         SDL_GL_SwapWindow(window);
 
         if (!exit && online.PollLaunch(romDirectory)) {
-            result.secretCars = NativeRoomSettings::BaseGame(online.launch.game) == 3 && (online.launch.roomOptions & 1) != 0;
+            result.secretCars = NativeRoomSettings::HasSecretCars(online.launch.game, online.launch.roomOptions);
             result.hornet = NativeRoomSettings::HasHornet(online.launch.game, online.launch.roomOptions);
             result.realPlayers = NativeRoomSettings::HasRealPlayers(online.launch.game, online.launch.roomOptions);
             result.noCollisions = NativeRoomSettings::HasNoCollisions(online.launch.game, online.launch.roomOptions);
@@ -1612,6 +1612,18 @@ GuiResult RunGUI(const std::string& configPath, const Util::Config::Node& fileCo
             result.scudSixteen = online.launch.game == 8;
             result.nativeRoomOptions = online.launch.roomOptions;
             result.nativeCarNumber = online.launch.carNumber;
+            if (online.launch.game == Sgt24hOnline::Game) {
+              result.sgt24hSeat = online.launch.index + 1u;
+              result.sgt24hCount = online.launch.count;
+            }
+            if (online.launch.game == DaytonaOnline::Game) {
+              result.daytonaSeat = online.launch.index + 1u;
+              result.daytonaCount = online.launch.count;
+            }
+            if (online.launch.game == SrallycOnline::Game) {
+              result.srallycSeat = online.launch.index + 1u;
+              result.srallycCount = online.launch.count;
+            }
             result.spectate = online.spectate;
             result.directoryRelay = online.launch.directoryEndpoint;
             result.online = true;

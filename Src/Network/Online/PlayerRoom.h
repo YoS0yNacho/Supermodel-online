@@ -46,11 +46,11 @@ public:
   auto it=clients.find(id);
   if(it==clients.end()){
    Client c;c.id=id;
-   // Same HELLO as relay.py accepts: every lobby game bit (GameMaskAll) and the
+   // Same HELLO as relay.py accepts: the Model 3 lobby game bits and the
    // AsyncNet flag plus capability bits 2..256 (options, native, adaptive tick,
    // Hornet, race, star, ping, Video60). Newer-than-known bits are rejected so
    // the owner never hosts a client it cannot serve.
-   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~GameMaskAll)==0&&(Read(b+8)&1)&&!(Read(b+8)&~HelloCapabilityMask)&&state==0&&!closed){
+   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~Model3GameMask)==0&&(Read(b+8)&1)&&!(Read(b+8)&~HelloCapabilityMask)&&state==0&&!closed){
     bool owner=std::memcmp(b+44,settings.owner.data(),16)==0;
     if(!(Read(b+4)&(1u<<settings.game))||(!owner&&(!order.size()||!Zero(b+44)))||(owner&&ownerId)||order.size()>=Capacity())return false;
     if(owner&&ntohl(ip)!=0x7f000001)return false;

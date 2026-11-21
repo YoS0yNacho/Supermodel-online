@@ -2455,6 +2455,8 @@ void CI960::execute_run()
 
 	while(m_icount > 0) {
 		m_PIP = m_IP;
+		if (m_IP == m_gateAddress && m_gate && !m_stall_state.burst_mode && !m_gate())
+			return;
 		if (m_trace)
 			m_trace(m_IP);   // debugger_instruction_hook
 

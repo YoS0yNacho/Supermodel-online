@@ -16,9 +16,9 @@ inline bool RelayVideo60(const Util::Config::Node& config) {
 // monitor cannot dictate cabinet speed. VSync is left exactly as configured:
 // with it on, the throttle still paces emulation at 57.524/60 Hz and the swap
 // merely waits for the next display refresh.
-inline void EnforceRelayTiming(Util::Config::Node& config) {
+inline void EnforceRelayTiming(Util::Config::Node& config, float nativeHz=57.524f) {
   if (config["NetRelay"].ValueAsDefault<std::string>("").empty()) return;
-  config.Set("RefreshRate", RelayVideo60(config) ? 60.0f : 57.524f);
+  config.Set("RefreshRate", RelayVideo60(config) ? 60.0f : nativeHz);
   config.Set("Throttle", true);
 }
 // Integer milliHz accumulator preserves the negotiated real-time send rate

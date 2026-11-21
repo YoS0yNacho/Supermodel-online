@@ -203,7 +203,7 @@ void CNetServer::Accept(void)
     connection->Shutdown();
 }
 
-std::shared_ptr<CTCPConnection> CNetServer::Connect(const std::string &host, uint16_t port)
+std::shared_ptr<CTCPConnection> CNetServer::Connect(const std::string &host, uint16_t port, const char* helloOverride)
 {
   if (!m_running)
     return nullptr;
@@ -213,7 +213,7 @@ std::shared_ptr<CTCPConnection> CNetServer::Connect(const std::string &host, uin
   TCPsocket socket = SDLNet_TCP_Open(&address);
   if (!socket)
     return nullptr;
-  std::shared_ptr<CTCPConnection> connection(new CTCPConnection(socket, true, m_helloText));
+  std::shared_ptr<CTCPConnection> connection(new CTCPConnection(socket, true, helloOverride ? helloOverride : m_helloText));
   std::lock_guard<std::mutex> lock(m_pendingMutex);
   m_pending.push_back(connection);
   return connection;

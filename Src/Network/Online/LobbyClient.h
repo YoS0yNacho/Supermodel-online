@@ -13,11 +13,18 @@
 #include <vector>
 namespace Online {
 class PlayerHost;
-inline constexpr const char* Games[] = {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "srally2_8p", "dirtdvls", "scudplus_16"};
-inline constexpr const char* Titles[] = {"Daytona USA 2", "Daytona USA 2 Power Edition", "Scud Race", "Scud Race Plus", Srally2Research::Title, "Le Mans 24", Srally2Research::EightTitle, "Dirt Devils", ScudResearch::SixteenTitle};
+inline constexpr const char* Games[] = {"daytona2", "dayto2pe", "scud", "scudplus", "srally2", "lemans24", "srally2_8p", "dirtdvls", "scudplus_16", Indy500Online::Rom, SrallycOnline::Rom, DaytonaOnline::Rom, Sgt24hOnline::Rom};
+inline constexpr const char* Titles[] = {"Daytona USA 2", "Daytona USA 2 Power Edition", "Scud Race", "Scud Race Plus", Srally2Research::Title, "Le Mans 24", Srally2Research::EightTitle, "Dirt Devils", ScudResearch::SixteenTitle, "INDY 500 Twin", SrallycOnline::Title, DaytonaOnline::Title, Sgt24hOnline::Title};
 inline constexpr unsigned GameCount = sizeof(Games) / sizeof(Games[0]);
+static_assert(GameCount == Sgt24hOnline::Game + 1 && sizeof(Titles) / sizeof(Titles[0]) == GameCount);
+inline constexpr uint32_t Indy500Bit = 1u << Indy500Online::Game;
+inline constexpr uint32_t SrallycBit = 1u << SrallycOnline::Game;
+inline constexpr uint32_t Sgt24hBit = 1u << Sgt24hOnline::Game;
+inline constexpr uint32_t DaytonaBit = 1u << DaytonaOnline::Game;
+inline constexpr bool Model2RelayGame(unsigned game){return NativeRoomSettings::Model2Game(game);}
+inline constexpr uint32_t Model3GameMask = Indy500Bit - 1;
 inline constexpr uint32_t GameMaskAll = (1u << GameCount) - 1;
-inline constexpr unsigned MaxPlayers(unsigned game) { return game < 2 ? 16u : game == 4 ? Srally2Research::StockCapacity : game == 5 ? 6u : game == 7 ? 4u : game == 8 ? ScudResearch::Capacity : 8u; }
+inline constexpr unsigned MaxPlayers(unsigned game) { return game == Sgt24hOnline::Game ? Sgt24hOnline::Cabinets : game == Indy500Online::Game ? Indy500Online::Cabinets : game == SrallycOnline::Game ? SrallycOnline::Cabinets : game == DaytonaOnline::Game ? DaytonaOnline::Cabinets : game < 2 ? 16u : game == 4 ? Srally2Research::StockCapacity : game == 5 ? 6u : game == 7 ? 4u : game == 8 ? ScudResearch::Capacity : 8u; }
 // Both Rally entries use the exact same, unmodified owner archive.
 inline constexpr const char* RomGame(unsigned game){return game==6?"srally2":game==8?"scudplus":game<GameCount?Games[game]:"";}
 inline constexpr size_t MaxChatLength = 159;
@@ -37,6 +44,7 @@ struct ChatMessage {
 };
 struct Snapshot {
   bool connecting = false, connected = false, launch = false, hostedRoom = false;
+  bool sgt24hRelay = false, indy500Relay = false, srallycRelay = false, daytonaRelay = false, model2VideoRelay = false;
   uint32_t self = 0, room = 0, game = 0, index = 0, count = 0, roomOptions = 0, carNumber = 0;
   uint32_t pingMs = 0; // own smoothed RTT to the lobby host (relay or creator), 0 = not measured
   std::string status = "Not connected", error, endpoint, ticket, gameEndpoint;

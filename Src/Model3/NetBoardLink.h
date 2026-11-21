@@ -51,6 +51,7 @@
 
 #include "Network/NetServer.h"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -107,6 +108,11 @@ public:
                     datagrams=0,lost=0,reordered=0,duplicated=0; }; // see RelayUdpClient::Stats
   bool GetUdpStats(UdpStats& out);
   bool UdpActive();
+  bool Sgt24hPoseUdp() const { return m_sgt24hUdpReady.load(std::memory_order_acquire); }
+  bool DaytonaPoseUdp() const { return m_daytonaUdpReady.load(std::memory_order_acquire); }
+  bool SrallycPoseUdp() const { return m_srallycUdpReady.load(std::memory_order_acquire); }
+  bool IndyRaceUdp() const { return m_indyRaceUdp.load(std::memory_order_acquire); }
+  void SendIndyRacePair(const void* data,size_t size);
   // Every other cabinet sends usable UDP snapshots and confirms receiving ours.
   bool UdpPrimaryReady(bool holding=false);
 
@@ -136,8 +142,10 @@ public:
   // advanced: the receive thread already advanced this timed segment's header
   // (hops+1, age up to receivedUs) and forwarded it to the next machine; the
   // consumer must not advance or forward it again (see EnableEarlyForward).
-  struct PacketInfo { bool advanced = false; uint64_t receivedUs = 0; };
+  struct PacketInfo { bool indyPair=false; bool advanced = false; uint64_t receivedUs = 0; };
   ReceiveResult TryReceive(std::vector<uint8_t> &data, PacketInfo &info);
+  // Single consumer: wait for queued data or closure, false on deadline.
+  bool WaitForDataUntil(std::chrono::steady_clock::time_point deadline);
   // Early forwarding: valid timed segments of `segmentSize` bytes in a ring of
   // `machines` are advanced and sent on to the next machine by the receive
   // thread as soon as they arrive, instead of waiting for the emulation
@@ -168,14 +176,16 @@ public:
    *    address   Address of the next machine.
    *    port      Port of the next machine.
    */
-  CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay = false, uint64_t relayGUID = 0, const std::string& lobbyTicket = "");
+  CNetBoardLink(std::shared_ptr<CNetServer> server, const std::string &address, uint16_t port, bool relay = false, uint64_t relayGUID = 0, const std::string& lobbyTicket = "", bool model2PoseUdp = false);
   ~CNetBoardLink(void);
 
 private:
   bool ConnectRelay();
   bool OnUdpConfig(const std::shared_ptr<CTCPConnection>&,const uint8_t*,size_t);
   std::unique_ptr<CRelayUdpClient> m_udp;
-  CNetServer::Registration m_udpHandler, m_udpHostHandler;
+  CNetServer::Registration m_udpHandler, m_udpHostHandler, m_indyUdpHandler, m_indyPairHandler;
+  std::atomic<bool> m_indyRaceUdp{false};
+  void SendFrame(uint32_t id,const void* data,size_t length);
   bool OnRelayTickRate(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayAdaptiveTick(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool OnRelayStar(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
@@ -183,7 +193,7 @@ private:
   bool OnRelayError(const std::shared_ptr<CTCPConnection>&, const uint8_t*, size_t);
   bool LinkBroken(void) const;
   bool OnJoin(const std::shared_ptr<CTCPConnection> &connection);
-  bool OnData(const std::shared_ptr<CTCPConnection> &connection, const uint8_t *message, size_t size);
+  bool OnData(const std::shared_ptr<CTCPConnection> &connection, const uint8_t *message, size_t size, bool indyPair=false);
   void OnDisconnect(const std::shared_ptr<CTCPConnection> &connection);
 
   std::shared_ptr<CNetServer> m_server;
@@ -192,6 +202,10 @@ private:
   const bool m_relay;
   const uint64_t m_relayGUID;
   const std::string m_lobbyTicket;
+  const bool m_indyPoseUdp, m_srallycPoseUdp, m_daytonaPoseUdp, m_sgt24hPoseUdp;
+  std::atomic<bool> m_sgt24hUdpReady{false};
+  std::atomic<bool> m_daytonaUdpReady{false};
+  std::atomic<bool> m_srallycUdpReady{false};
   uint64_t m_relayNonce[2] = {};
   bool m_relayAssigned[2] = {};
   bool m_relayTickRateSeen[2] = {};

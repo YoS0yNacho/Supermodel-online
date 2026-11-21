@@ -129,13 +129,25 @@ inline bool DecodePose(const uint8_t* raw, size_t poseOffset, PoseSample& out) {
   out.vy = double(fvy);
   out.vz = double(fvz);
   out.yawRate = double(fyawRate);
-  out.carTag = tagWord & 0xF03FC000u;
+  // The pose writer at FF853E98 updates 0x00010000 from live car
+  // state and copies a live halfword to +0x46 (including 0x00004000).
+  // Both bits change on continuous drives without a change of vehicle or
+  // slot. Keep those flags in TCP, but do not let them reset motion history.
+  out.carTag = tagWord & (0xF03FC000u & ~0x00014000u);
   // World units are meters (ROM 0x0EE978..0x0EE9A0 uses 999999.0 sentinel).
   if (std::abs(out.x) > 500000.0 || std::abs(out.y) > 500000.0 || std::abs(out.z) > 500000.0)
     return false;
   if (std::hypot(out.vx, out.vz) > 6.0 || std::abs(out.vy) > 4.0 || std::abs(out.yawRate) > 0.5)
     return false;
   return true;
+}
+
+// The TCP and UDP send stamps can differ although both carried the same
+// CommRAM write. Do not feed that copy to the kinematics as a new stop.
+inline bool SameNativePose(const PoseSample& a, const PoseSample& b) {
+  return a.carTag == b.carTag && a.x == b.x && a.y == b.y && a.z == b.z &&
+         a.vx == b.vx && a.vy == b.vy && a.vz == b.vz && a.yawRate == b.yawRate &&
+         a.pitch == b.pitch && a.yaw == b.yaw && a.roll == b.roll;
 }
 
 struct PoseOutput {
@@ -163,6 +175,7 @@ class PoseMotion {
   uint32_t m_lastRaceTimer = 0;
   uint64_t m_lastSourceUs = 0;
   uint64_t m_receivedFrame = 0;
+  PoseSample m_lastNativePose{};
   double m_lastDt = 1.0;
   double m_age = 0.0;
   double m_omega = 0.0;
@@ -340,6 +353,7 @@ class PoseMotion {
     m_lastRaceTimer = raceTimer;
     m_lastSourceUs = sourceUs;
     m_receivedFrame = localFrame;
+    m_lastNativePose = s;
     m_age = std::clamp(ageFrames, 0.0, MaxFrames());
     m_pos = {s.x, s.y, s.z};
     m_pitch16 = double(s.pitch);
@@ -365,7 +379,7 @@ public:
 
   bool Apply(const PoseSample& s, uint32_t raceTimer, uint64_t sourceUs,
              uint64_t localFrame, double sampleAgeFrames, double uncertaintyFrames,
-             PoseOutput& out) {
+             PoseOutput& out, double frameUs = 16667.0) {
     if (!std::isfinite(sampleAgeFrames) || !std::isfinite(uncertaintyFrames) ||
         sampleAgeFrames < 0.0 || uncertaintyFrames < 0.0) {
       Reset();
@@ -379,10 +393,15 @@ public:
     double dt = 0.0;
     if (sourceUs != 0 && m_lastSourceUs != 0) {
       if (sourceUs < m_lastSourceUs) {
-        Seed(s, raceTimer, sourceUs, localFrame, sampleAgeFrames);
-        return false;
-      }
-      if (sourceUs > m_lastSourceUs) {
+        // A short UDP gap can expose an older ordered TCP pose. The caller
+        // still publishes its control words, but it must not rewind a car
+        // with a newer pose in this same race. Coast only inside our usual
+        // finite lead horizon; otherwise let reliable motion re-seed us.
+        if (m_age + double(localFrame - m_receivedFrame) > MaxFrames()) {
+          Seed(s, raceTimer, sourceUs, localFrame, sampleAgeFrames);
+          return false;
+        }
+      } else if (sourceUs > m_lastSourceUs) {
         if (m_lastRaceTimer > 0 && raceTimer < m_lastRaceTimer) {
           Seed(s, raceTimer, sourceUs, localFrame, sampleAgeFrames);
           return false;
@@ -391,11 +410,18 @@ public:
             (raceTimer - m_lastRaceTimer) <= 120u) {
           dt = double(raceTimer - m_lastRaceTimer);
         } else {
-          const uint64_t deltaUs = sourceUs - m_lastSourceUs;
-          if (deltaUs >= 8000ULL)
-            dt = double(deltaUs) / 16667.0;
-          else
-            dt = std::max(1.0, double(localFrame - m_receivedFrame));
+          // In native link races the timer word can stay zero. Convert the
+          // sender's monotonic interval using this room's actual frame rate.
+          if (!(frameUs >= 12000.0 && frameUs <= 25000.0)) frameUs = 16667.0;
+          const double delta = double(sourceUs - m_lastSourceUs) / frameUs;
+          if (delta < 0.5) {
+            if (raceTimer != m_lastRaceTimer || !SameNativePose(m_lastNativePose, s))
+              dt = std::max(1.0, double(localFrame - m_receivedFrame));
+          } else {
+            // Suppress sub-frame send jitter near integer native intervals.
+            const double frames = std::max(1.0, std::round(delta));
+            dt = std::abs(delta - frames) < 0.20 ? frames : delta;
+          }
         }
       }
     } else {
@@ -550,6 +576,7 @@ public:
       m_lastRaceTimer = raceTimer;
       m_lastSourceUs = sourceUs;
       m_receivedFrame = localFrame;
+      m_lastNativePose = s;
       m_age = nextAge;
       m_moving = true;
 
@@ -619,7 +646,7 @@ class Predictor {
   unsigned m_tickRateHz = 60;
   bool m_active = false;
   int32_t m_playableIndex = -1;
-  uint32_t m_raceStage = 0;
+  uint32_t m_raceStage = 0, m_linkPhase = 0;
   uint32_t m_carId = 0;
   uint32_t m_numCpuCars = 0;
   PoseMotion m_human;
@@ -648,7 +675,8 @@ public:
 
   Result Apply(const uint8_t* raw, size_t size, uint8_t* out, uint64_t localFrame,
                double sampleAgeFrames, double uncertaintyFrames, uint64_t sourceTimestampUs,
-               unsigned expectedCabinetId, unsigned localCabinetId, unsigned numMachines) {
+               unsigned expectedCabinetId, unsigned localCabinetId, unsigned numMachines,
+               double frameUs = 16667.0) {
     Result result;
     HeaderSample hdr;
     if (!out || !DecodeHeader(raw, size, expectedCabinetId, localCabinetId, numMachines, hdr)) {
@@ -656,11 +684,12 @@ public:
       return result;
     }
     if (!m_active || hdr.playableIndex != m_playableIndex || hdr.raceStage != m_raceStage ||
-        hdr.carId != m_carId) {
+        hdr.linkPhase != m_linkPhase || hdr.carId != m_carId) {
       Reset();
       m_active = true;
       m_playableIndex = hdr.playableIndex;
       m_raceStage = hdr.raceStage;
+      m_linkPhase = hdr.linkPhase;
       m_carId = hdr.carId;
       m_numCpuCars = hdr.numCpuCars;
     } else if (hdr.numCpuCars != m_numCpuCars) {
@@ -673,7 +702,7 @@ public:
     PoseOutput humanOut;
     if (DecodePose(raw, HumanPoseOffset, humanSample)) {
       if (m_human.Apply(humanSample, hdr.raceTimer, sourceTimestampUs, localFrame,
-                        sampleAgeFrames, uncertaintyFrames, humanOut)) {
+                        sampleAgeFrames, uncertaintyFrames, humanOut, frameUs)) {
         WritePose(out, HumanPoseOffset, humanOut);
         result.human = true;
       }
@@ -687,7 +716,7 @@ public:
       PoseOutput cpuOut;
       if (DecodePose(raw, poseOffset, cpuSample)) {
         if (m_cpus[i].Apply(cpuSample, hdr.raceTimer, sourceTimestampUs, localFrame,
-                            sampleAgeFrames, uncertaintyFrames, cpuOut)) {
+                            sampleAgeFrames, uncertaintyFrames, cpuOut, frameUs)) {
           WritePose(out, poseOffset, cpuOut);
           ++result.cpus;
         }

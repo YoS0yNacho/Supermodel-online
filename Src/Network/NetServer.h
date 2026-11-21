@@ -131,7 +131,7 @@ public:
    * Returns:
    *    The connection, or nullptr if it cannot open.
    */
-  std::shared_ptr<CTCPConnection> Connect(const std::string &host, uint16_t port);
+  std::shared_ptr<CTCPConnection> Connect(const std::string &host, uint16_t port, const char* helloOverride = nullptr);
 
   uint16_t GetPort(void) const
   {
