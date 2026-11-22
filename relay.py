@@ -2163,6 +2163,7 @@ class Hub:
             c['supermodel_version'] = text(body, '')
             sv = c['supermodel_version']
             c['supermodel_hash'] = sv.rsplit('-git-', 1)[-1] if '-git-' in sv else ''
+            return
         if kind == b'OLQ2' and len(body) == POLL2.size and c.get('ping_capable'):
             stamp, rtt = POLL2.unpack(body)
             c['ping_ms'] = min(rtt, MAX_PING_MS)
