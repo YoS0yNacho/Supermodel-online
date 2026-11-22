@@ -1420,7 +1420,7 @@ CModel2Comm::Entry CModel2Comm::GateDaytonaEntry(uint32_t roster, uint64_t frame
       FailDaytonaEntry(m_daytonaEntry.Error());
       return Entry::Failed;
     }
-    InfoLog("DAYTONA USA ENTRY READY seat=%u frame=%llu clock_us=%llu roster=%02x (native transmission choose)",
+    InfoLog("DAYTONA USA ENTRY READY seat=%u frame=%llu clock_us=%llu roster=%02x (native race start)",
             unsigned(m_linkID), (unsigned long long)frame, (unsigned long long)now, roster);
   }
   else if (!m_daytonaEntry.Matches(roster))

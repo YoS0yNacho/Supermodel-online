@@ -107,11 +107,13 @@ namespace
   constexpr uint32_t INDY_ACTOR_BASE = 0x53c7a0, INDY_ACTOR_STRIDE = 0x1e4;
   constexpr uint32_t INDY_POSE_RX_PC = 0xab36c;
   constexpr uint32_t INDY_DRAW_X_PC = 0xec70, INDY_DRAW_Z_PC = 0xec78, INDY_DRAW_YAW_PC = 0xedec;
-  // Daytona USA Rev A: the transmission-choose spin-wait loop. The ROM
-  // loads a byte from workRAM into r3 each iteration and loops while
-  // r3 == g0 (the snapshot). The loop exits when the byte changes
-  // (Start-hold). PC 0x139c is the cmpibe loop-exit comparison.
-  constexpr uint32_t DAYTONA_ENTRY_PC = 0x139c;
+  // Daytona USA Rev A: the race-start store to workRAM 0x1090. The ROM
+  // stores the next state value into 1090 at PC 0x197c (stob instruction,
+  // address operand 0x1090 at 0x1980). The race begins when 1090
+  // transitions from 0x00080000 (start-your-engines) to 0x00100000.
+  // The barrier gates this store: on Wait it skips the instruction (1090
+  // stays at 0x00080000); on Release it lets the store execute (race starts).
+  constexpr uint32_t DAYTONA_ENTRY_PC = 0x197c;
   constexpr uint32_t DAYTONA_CHOOSE_STATE = 0x1090;
   constexpr uint32_t DAYTONA_CHOOSE_FLAG = 0x10f8;
   constexpr uint32_t INDY_LOCAL_ACTOR = 0x3c79c;
@@ -2834,14 +2836,14 @@ uint32_t CModel2::DaytonaNativeRoster() const
 
 bool CModel2::DaytonaEntryInstruction()
 {
-  // The ROM spins at 0x1394/0x139c: ldob r3; cmpibe r3,g0,0x1394.
-  // r3 is reloaded from workRAM each iteration; the loop exits when
-  // r3 != g0 (the polled byte changed, i.e. Start was held). The gate
-  // fires at 0x139c, after r3 is loaded. On Wait, force r3 = g0 so the
-  // comparison loops back. On Release, let the original comparison run.
-  if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00040000 || m_workRAM[DAYTONA_CHOOSE_FLAG] != 7)
-    return true; // not at the transmission-choose checkpoint
-  constexpr unsigned R3 = 3, G0 = 0;
+  // The ROM stores the next state value into workRAM 0x1090 at PC
+  // 0x197c (stob instruction, address operand 0x1090 at 0x1980). The
+  // race starts when 1090 transitions from 0x00080000 (start-your-
+  // engines) to 0x00100000. The gate fires at 0x197c, before the
+  // store executes. On Wait, skip the store (1090 stays at 0x00080000).
+  // On Release, let the store execute (race starts).
+  if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00080000)
+    return true; // not at the start-your-engines checkpoint
   switch (m_comm.GateDaytonaEntry(DaytonaNativeRoster(), m_frameNumber))
   {
   case CModel2Comm::Entry::Failed:
@@ -2851,14 +2853,14 @@ bool CModel2::DaytonaEntryInstruction()
     if (!m_daytonaEntryWaiting)
       m_daytonaHeldFrame = m_frameNumber;
     m_daytonaEntryWaiting = true;
-    // Defer the ROM's own cmpibe r3,g0 by forcing r3 = g0. The ROM
-    // reloads r3 next iteration; the gate re-applies this each frame.
-    m_i960.SetReg(R3, m_i960.GetReg(G0));
-    return true;
+    // Skip the store to 1090: return false so the I960 Run returns
+    // without executing the instruction at 0x197c. The ROM PC
+    // stays at 0x197c; the gate re-fires each frame until Release.
+    return false;
   case CModel2Comm::Entry::Release:
     m_daytonaEntryWaiting = false;
     ++m_daytonaRace;
-    return true; // execute the original compare as-is
+    return true; // execute the store: 1090 becomes 0x00100000 (race)
   }
   return false;
 }
@@ -3820,7 +3822,7 @@ void CModel2::RunFrame(void)
   }
   else if (m_daytonaEntryWaiting)
   {
-    if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00040000 || m_workRAM[DAYTONA_CHOOSE_FLAG] != 7)
+    if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00080000)
     {
       // The guest left the transmission-choose checkpoint without holding
       // Start. Treat this as a graceful opt-out: release the barrier and
@@ -4583,12 +4585,10 @@ Result CModel2::Init(const Game &game, const ROMSet &rom_set)
 
     if (m_comm.DaytonaOnline())
     {
-      // Verify the exact program words at the Daytona entry checkpoint
-      // before arming the gate. The loop is: ldob g0; ldob r3; cmpibe.
-      if (Get32(m_program,0x138c) == 0x80803000 && Get32(m_program,0x1390) == 0x00500000 &&
-          Get32(m_program,0x1394) == 0x80183000 && Get32(m_program,0x1398) == 0x00500000 &&
-          Get32(m_program,DAYTONA_ENTRY_PC) == 0x3a1c1ff8 &&
-          Get32(m_program,0x13a0) == 0x80203000 && Get32(m_program,0x13a4) == 0x00500000)
+      // Verify the exact program words at the Daytona race-start checkpoint
+      // before arming the gate. The instruction is: stob to 0x1090.
+      if (Get32(m_program,DAYTONA_ENTRY_PC) == 0x92883000 &&
+          Get32(m_program,0x1980) == 0x00501090)
         m_i960.SetInstructionGate(DAYTONA_ENTRY_PC, [this] { return DaytonaEntryInstruction(); });
       else
         m_comm.FailDaytonaEntry("unverified Daytona USA program revision");
