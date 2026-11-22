@@ -107,6 +107,13 @@ namespace
   constexpr uint32_t INDY_ACTOR_BASE = 0x53c7a0, INDY_ACTOR_STRIDE = 0x1e4;
   constexpr uint32_t INDY_POSE_RX_PC = 0xab36c;
   constexpr uint32_t INDY_DRAW_X_PC = 0xec70, INDY_DRAW_Z_PC = 0xec78, INDY_DRAW_YAW_PC = 0xedec;
+  // Daytona USA Rev A: the transmission-choose spin-wait loop. The ROM
+  // loads a byte from workRAM into r3 each iteration and loops while
+  // r3 == g0 (the snapshot). The loop exits when the byte changes
+  // (Start-hold). PC 0x139c is the cmpibe loop-exit comparison.
+  constexpr uint32_t DAYTONA_ENTRY_PC = 0x139c;
+  constexpr uint32_t DAYTONA_CHOOSE_STATE = 0x1090;
+  constexpr uint32_t DAYTONA_CHOOSE_FLAG = 0x10f8;
   constexpr uint32_t INDY_LOCAL_ACTOR = 0x3c79c;
   constexpr uint32_t INDY_MAX_TRACE_ROWS = 80000;
 
@@ -2815,6 +2822,47 @@ uint32_t CModel2::IndyNativeRoster() const
   return mask;
 }
 
+uint32_t CModel2::DaytonaNativeRoster() const
+{
+  const unsigned size = m_comm.ReadShared(3), self = m_comm.ReadShared(2);
+  if (m_comm.ReadShared(0) != 1 || size < 2 || size > DaytonaOnline::Cabinets ||
+      !self || self > size) return 0;
+  // Daytona has no per-race player selection: every cabinet in the
+  // room participates, so the roster is all seats.
+  return (1u << size) - 1;
+}
+
+bool CModel2::DaytonaEntryInstruction()
+{
+  // The ROM spins at 0x1394/0x139c: ldob r3; cmpibe r3,g0,0x1394.
+  // r3 is reloaded from workRAM each iteration; the loop exits when
+  // r3 != g0 (the polled byte changed, i.e. Start was held). The gate
+  // fires at 0x139c, after r3 is loaded. On Wait, force r3 = g0 so the
+  // comparison loops back. On Release, let the original comparison run.
+  if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00040000 || m_workRAM[DAYTONA_CHOOSE_FLAG] != 7)
+    return true; // not at the transmission-choose checkpoint
+  constexpr unsigned R3 = 3, G0 = 0;
+  switch (m_comm.GateDaytonaEntry(DaytonaNativeRoster(), m_frameNumber))
+  {
+  case CModel2Comm::Entry::Failed:
+    m_daytonaEntryAbort = true;
+    return false;
+  case CModel2Comm::Entry::Wait:
+    if (!m_daytonaEntryWaiting)
+      m_daytonaHeldFrame = m_frameNumber;
+    m_daytonaEntryWaiting = true;
+    // Defer the ROM's own cmpibe r3,g0 by forcing r3 = g0. The ROM
+    // reloads r3 next iteration; the gate re-applies this each frame.
+    m_i960.SetReg(R3, m_i960.GetReg(G0));
+    return true;
+  case CModel2Comm::Entry::Release:
+    m_daytonaEntryWaiting = false;
+    ++m_daytonaRace;
+    return true; // execute the original compare as-is
+  }
+  return false;
+}
+
 bool CModel2::IndyEntryInstruction()
 {
   constexpr unsigned G4 = 20;
@@ -3770,6 +3818,18 @@ void CModel2::RunFrame(void)
     // Keep the last fully rendered native flag scene visible (the ROM's
     // animation has already reached its last frame).
   }
+  else if (m_daytonaEntryWaiting)
+  {
+    if (Get32(m_workRAM,DAYTONA_CHOOSE_STATE) != 0x00040000 || m_workRAM[DAYTONA_CHOOSE_FLAG] != 7)
+    {
+      // The guest left the transmission-choose checkpoint without holding
+      // Start. Treat this as a graceful opt-out: release the barrier and
+      // let the ROM proceed with its own choice. No abort.
+      m_daytonaEntryWaiting = false;
+      m_comm.GateDaytonaEntry(DaytonaNativeRoster(), m_frameNumber);
+    }
+    // Keep the last fully rendered transmission-choose scene visible.
+  }
   else BuildVideoFrame();
   ++m_frameNumber;
 
@@ -4519,6 +4579,19 @@ Result CModel2::Init(const Game &game, const ROMSet &rom_set)
         (motionCode ? "disabled by configuration" : "unverified render path; using native poses"));
       const char* dump = std::getenv("SUPERMODEL_INDY_ENTRY_DUMP");
       m_indyEntryDump = dump && std::strcmp(dump,"1") == 0;
+    }
+
+    if (m_comm.DaytonaOnline())
+    {
+      // Verify the exact program words at the Daytona entry checkpoint
+      // before arming the gate. The loop is: ldob g0; ldob r3; cmpibe.
+      if (Get32(m_program,0x138c) == 0x80803000 && Get32(m_program,0x1390) == 0x00500000 &&
+          Get32(m_program,0x1394) == 0x80183000 && Get32(m_program,0x1398) == 0x00500000 &&
+          Get32(m_program,DAYTONA_ENTRY_PC) == 0x3a1c1ff8 &&
+          Get32(m_program,0x13a0) == 0x80203000 && Get32(m_program,0x13a4) == 0x00500000)
+        m_i960.SetInstructionGate(DAYTONA_ENTRY_PC, [this] { return DaytonaEntryInstruction(); });
+      else
+        m_comm.FailDaytonaEntry("unverified Daytona USA program revision");
     }
   }
 

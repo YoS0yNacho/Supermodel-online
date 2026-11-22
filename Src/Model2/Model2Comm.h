@@ -55,6 +55,7 @@
 #include "Network/Games/Indy500/RaceUdp.h"
 #include "Network/Games/Srallyc/Motion.h"
 #include "Network/Games/Daytona/Motion.h"
+#include "Network/Games/Daytona/EntryBarrier.h"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -176,6 +177,8 @@ public:
   enum class Entry { Wait, Release, Failed };
   Entry GateIndyEntry(uint32_t roster, unsigned course, uint64_t frame);
   bool FailIndyEntry(const char* reason);
+  Entry GateDaytonaEntry(uint32_t roster, uint64_t frame);
+  bool FailDaytonaEntry(const char* reason);
 
   CModel2Comm();
   ~CModel2Comm();
@@ -200,6 +203,9 @@ private:
   void TickIndyEntry();
   bool ReceiveIndyEntry(const std::vector<uint8_t>& frame);
   void SendIndyEntry(const IndyRaceEntry::Control& control);
+  void TickDaytonaEntry();
+  bool ReceiveDaytonaEntry(const std::vector<uint8_t>& frame);
+  void SendDaytonaEntry(const DaytonaRaceEntry::Control& control);
   bool m_srallycOnline = false, m_daytonaOnline = false, m_nativeRoleReady = false;
   bool m_sgt24hOnline = false;
   mutable std::mutex m_sgt24hFreshnessMutex;
@@ -222,6 +228,9 @@ private:
   uint64_t m_indyPresentationHalfRttUs = 0;
   double m_indyPresentationDwellUs = 0;
   IndyRaceEntry::Barrier m_indyEntry;
+  bool m_daytonaEntryInitialized = false;
+  uint64_t m_daytonaLastPingUs = 0;
+  DaytonaRaceEntry::Barrier m_daytonaEntry;
   IndyPoseUdp::Race m_indyUdpRace;
   void RecordIndyAge(uint64_t ageUs);
   unsigned IndyAgePercentile(unsigned percentile) const;

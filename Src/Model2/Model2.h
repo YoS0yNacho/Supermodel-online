@@ -256,6 +256,8 @@ private:
   SrallycMotion::Row SrallycMotionRowLocal(const SrallycMotion::Row& live);
   void TraceSrallyc(const char* kind,unsigned self,const SrallycMotion::Row&,const SrallycMotion::Draw&,uint32_t site);
   bool IndyEntryInstruction();
+  bool DaytonaEntryInstruction();
+  uint32_t DaytonaNativeRoster() const;
   uint32_t IndyNativeRoster() const;
   void AuditIndyEntryFrame();
   bool IndyMotionRaceActive() const;
@@ -364,6 +366,9 @@ private:
   bool m_indyAuditIntro = false, m_indyAuditTrack = false, m_indyAuditGo = false, m_indyAuditReturn = false;
   unsigned m_indyRace = 0;
   uint64_t m_indyHeldFrame = 0, m_indyIntroShot = 0, m_indyRaceShot = 0;
+  bool m_daytonaEntryWaiting = false, m_daytonaEntryAbort = false;
+  unsigned m_daytonaRace = 0;
+  uint64_t m_daytonaHeldFrame = 0;
   void DrawFrameBuffer(uint32_t *dest);
   bool LoadROMs(const ROMSet &rom_set);
 

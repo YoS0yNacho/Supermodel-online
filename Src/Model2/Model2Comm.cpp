@@ -429,6 +429,11 @@ bool CModel2Comm::EstablishLink()
       m_indyEntry = IndyRaceEntry::Barrier(IndyRaceEntry::RingIndex(m_linkID,count), count);
       m_indyEntryInitialized = true;
     }
+    if (m_daytonaOnline && !m_daytonaEntryInitialized)
+    {
+      m_daytonaEntry = DaytonaRaceEntry::Barrier(DaytonaRaceEntry::RingIndex(m_linkID,count), count);
+      m_daytonaEntryInitialized = true;
+    }
   }
   InfoLog("Model 2 communication board: link established, id %d of %d.", m_linkID, m_linkCount);
   m_linkAlive = 1;
@@ -649,6 +654,13 @@ void CModel2Comm::Tick(bool indyRaceContext,unsigned indyMotionSlots)
     return;
   }
 
+  // Daytona entry barrier: tick the ring exchange each frame.
+  if (m_daytonaOnline && m_linkAlive == 1 && !OnlineSessionFailed() && m_daytonaEntry.Active())
+  {
+    TickDaytonaEntry();
+    if (OnlineSessionFailed()) return;
+  }
+
   // link established
   if (m_linkAlive == 1)
   {
@@ -677,6 +689,12 @@ void CModel2Comm::Tick(bool indyRaceContext,unsigned indyMotionSlots)
           m_linkTimer = 0;
           if (!isMaster)
             SendFrame(dataSize);
+        }
+        else if (idx == DaytonaRaceEntry::Tag)
+        {
+          // Daytona entry control frame
+          std::vector<uint8_t> entryFrame(m_buffer0, m_buffer0 + recv);
+          if (!ReceiveDaytonaEntry(entryFrame)) return;
         }
         recv = ReadFrame(dataSize);
       }
@@ -794,6 +812,10 @@ bool CModel2Comm::DrainIndyPairs(int dataSize, uint8_t other)
     {
       if (!ReceiveIndyEntry(frame)) return false;
     }
+    else if (frame[0] == DaytonaRaceEntry::Tag)
+    {
+      if (!ReceiveDaytonaEntry(frame)) return false;
+    }
     else if (frame[0] == other)
     {
       if (!m_indyPartial.data.empty())
@@ -847,6 +869,7 @@ void CModel2Comm::TickIndyPlayout(int frameStart, int frameSize, int frameOffset
   }
   if (OnlineSessionFailed()) return;
   TickIndyEntry();
+  if (m_daytonaOnline) TickDaytonaEntry();
   if (OnlineSessionFailed()) return;
   // In descending ID order, the incoming frame is the predecessor's
   // aggregate (its local record followed by the records it received).
@@ -1196,6 +1219,14 @@ bool CModel2Comm::FailIndyEntry(const char* reason)
   return false;
 }
 
+bool CModel2Comm::FailDaytonaEntry(const char* reason)
+{
+  if (!m_onlineFailed) ErrorLog("DAYTONA USA ENTRY ABORT: %s; no unsynchronized fallback.", reason);
+  m_onlineFailed = true;
+  m_linkAlive = 2;
+  return false;
+}
+
 void CModel2Comm::SendIndyEntry(const IndyRaceEntry::Control& control)
 {
   const auto& t = control.token;
@@ -1204,6 +1235,17 @@ void CModel2Comm::SendIndyEntry(const IndyRaceEntry::Control& control)
             unsigned(m_linkID), t.epoch, t.serial, (unsigned long long)m_indyEntry.LastRound(),
             (unsigned long long)m_indyEntry.Lead(), m_indyEntry.Retries(), t.participants);
   const auto wire = IndyRaceEntry::Encode(control);
+  m_link->Send(wire.data(), wire.size());
+}
+
+void CModel2Comm::SendDaytonaEntry(const DaytonaRaceEntry::Control& control)
+{
+  const auto& t = control.token;
+  if (t.kind == 2 && t.hops == 0)
+    InfoLog("DAYTONA USA ENTRY PREPARE seat=%u epoch=%u serial=%u round_us=%llu lead_us=%llu retries=%u roster=%02x",
+            unsigned(m_linkID), t.epoch, t.serial, (unsigned long long)m_daytonaEntry.LastRound(),
+            (unsigned long long)m_daytonaEntry.Lead(), m_daytonaEntry.Retries(), t.participants);
+  const auto wire = DaytonaRaceEntry::Encode(control);
   m_link->Send(wire.data(), wire.size());
 }
 
@@ -1220,6 +1262,20 @@ void CModel2Comm::TickIndyEntry()
   }
   if (const auto next = m_indyEntry.Tick(now, {clock.offset,clock.rtt,clock.received})) SendIndyEntry(*next);
   if (m_indyEntry.Error()) FailIndyEntry(m_indyEntry.Error());
+}
+
+void CModel2Comm::TickDaytonaEntry()
+{
+  const uint64_t now = IndyNowUs();
+  const auto clock = m_link->GetIncomingClock();
+  const uint64_t interval = m_daytonaEntry.Active() ? std::max<uint64_t>(300000, std::max<int64_t>(0,clock.rtt)) : 1000000;
+  if (now - m_daytonaLastPingUs >= interval)
+  {
+    m_daytonaLastPingUs = now;
+    m_link->RefreshIncomingClock();
+  }
+  if (const auto next = m_daytonaEntry.Tick(now, {clock.offset,clock.rtt,clock.received})) SendDaytonaEntry(*next);
+  if (m_daytonaEntry.Error()) FailDaytonaEntry(m_daytonaEntry.Error());
 }
 
 bool CModel2Comm::ReceiveIndyEntry(const std::vector<uint8_t>& frame)
@@ -1243,6 +1299,30 @@ bool CModel2Comm::ReceiveIndyEntry(const std::vector<uint8_t>& frame)
     InfoLog("INDY 500 ENTRY COMMITTED seat=%u epoch=%u serial=%u clock_us=%llu deadline_us=%llu",
             unsigned(m_linkID), m_indyEntry.Epoch(), m_indyEntry.Serial(),
             (unsigned long long)now, (unsigned long long)m_indyEntry.Deadline());
+  return true;
+}
+
+bool CModel2Comm::ReceiveDaytonaEntry(const std::vector<uint8_t>& frame)
+{
+  const auto control = DaytonaRaceEntry::Decode(frame.data(), frame.size());
+  if (!control) return FailDaytonaEntry("invalid or incompatible entry control version");
+  const auto clock = m_link->GetIncomingClock();
+  const uint64_t now = IndyNowUs();
+  const unsigned retries = m_daytonaEntry.Retries();
+  const bool committed = m_daytonaEntry.Committed();
+  const auto next = m_daytonaEntry.Receive(*control,now,{clock.offset,clock.rtt,clock.received});
+  if (m_daytonaEntry.Error()) return FailDaytonaEntry(m_daytonaEntry.Error());
+  if (m_daytonaEntry.Retries() != retries)
+  {
+    InfoLog("DAYTONA USA ENTRY RETRY seat=%u epoch=%u serial=%u retries=%u", unsigned(m_linkID),
+            m_daytonaEntry.Epoch(), m_daytonaEntry.Serial(), m_daytonaEntry.Retries());
+    m_link->RefreshIncomingClock();
+  }
+  if (next) SendDaytonaEntry(*next);
+  if (!committed && m_daytonaEntry.Committed())
+    InfoLog("DAYTONA USA ENTRY COMMITTED seat=%u epoch=%u serial=%u clock_us=%llu deadline_us=%llu",
+            unsigned(m_linkID), m_daytonaEntry.Epoch(), m_daytonaEntry.Serial(),
+            (unsigned long long)now, (unsigned long long)m_daytonaEntry.Deadline());
   return true;
 }
 
@@ -1313,6 +1393,48 @@ CModel2Comm::Entry CModel2Comm::GateIndyEntry(uint32_t roster, unsigned course, 
   m_indyUdpRace = {m_indyEntry.Epoch(),m_indyEntry.Serial(),uint8_t(roster),uint8_t(course)};
   if (m_indyRaceUdp) ClearIndyRaceUdp();
   m_indyEntry.End();
+  return Entry::Release;
+}
+
+CModel2Comm::Entry CModel2Comm::GateDaytonaEntry(uint32_t roster, uint64_t frame)
+{
+  if (OnlineSessionFailed()) return Entry::Failed;
+  const unsigned index = DaytonaRaceEntry::RingIndex(m_linkID,m_linkCount);
+  if (!m_daytonaOnline || !m_daytonaEntryInitialized || m_linkAlive != 1)
+  {
+    FailDaytonaEntry("native link was not established at race entry");
+    return Entry::Failed;
+  }
+  if (!RaceStart::ValidRoster(roster,m_linkCount,index))
+  {
+    FailDaytonaEntry("native gate without a verified race roster");
+    return Entry::Failed;
+  }
+  if ((roster & (roster-1)) == 0 && !m_daytonaEntry.Active()) return Entry::Release; // native solo race
+
+  const uint64_t now = IndyNowUs();
+  if (!m_daytonaEntry.Active())
+  {
+    if (!m_daytonaEntry.Begin(roster,now))
+    {
+      FailDaytonaEntry(m_daytonaEntry.Error());
+      return Entry::Failed;
+    }
+    InfoLog("DAYTONA USA ENTRY READY seat=%u frame=%llu clock_us=%llu roster=%02x (native transmission choose)",
+            unsigned(m_linkID), (unsigned long long)frame, (unsigned long long)now, roster);
+  }
+  else if (!m_daytonaEntry.Matches(roster))
+  {
+    FailDaytonaEntry("native cohort changed at the gate");
+    return Entry::Failed;
+  }
+  if (!m_daytonaEntry.Released(now)) return Entry::Wait;
+
+  InfoLog("DAYTONA USA ENTRY RELEASE seat=%u epoch=%u serial=%u frame=%llu clock_us=%llu deadline_us=%llu held_us=%llu",
+          unsigned(m_linkID), m_daytonaEntry.Epoch(), m_daytonaEntry.Serial(), (unsigned long long)frame,
+          (unsigned long long)now, (unsigned long long)m_daytonaEntry.Deadline(),
+          (unsigned long long)(now-m_daytonaEntry.Entered()));
+  m_daytonaEntry.End();
   return Entry::Release;
 }
 
@@ -1407,7 +1529,8 @@ int CModel2Comm::ReadFrame(int dataSize, bool wait)
     }
     return 0;
   }
-  if (m_link->IsRelay() && frame.size() != size_t(dataSize))
+  if (m_link->IsRelay() && frame.size() != size_t(dataSize) &&
+      !(m_daytonaOnline && frame[0] == DaytonaRaceEntry::Tag))
   {
     ClearSgt24hFreshness();
     ErrorLog("Model 2 Online: local and relayed board frame sizes disagree.");
@@ -1418,6 +1541,13 @@ int CModel2Comm::ReadFrame(int dataSize, bool wait)
   if (m_indyOnline && frame[0] == IndyRaceEntry::Tag)
   {
     FailIndyEntry("entry control before native link was ready");
+    return 0;
+  }
+  if (m_daytonaOnline && m_linkAlive != 1 && frame[0] == DaytonaRaceEntry::Tag)
+  {
+    // Entry control arrived during link establishment. The sender
+    // reached its checkpoint before our link was ready. Skip it; the
+    // barrier will re-send and DrainIndyPairs will receive it later.
     return 0;
   }
   memcpy(m_buffer0, frame.data(), std::min<size_t>(frame.size(), sizeof(m_buffer0)));
