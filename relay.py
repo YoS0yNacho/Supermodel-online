@@ -19,9 +19,11 @@ import argparse
 import asyncio
 import contextlib
 import gc
+import os
 import random
 import socket
 import struct
+import subprocess
 import sys
 import time
 
@@ -53,6 +55,20 @@ INDY500_POSE_WIRE = 116  # 20-byte race/tick header + eight 12-byte poses
 INDY500_RACE_HELLO = b'Supermodel INDY500 IRU1'
 INDY500_RACE_WIRE = 180  # 20-byte race/tick header + eight native 20-byte motion/state records
 INDY500_PAYLOAD = 0x0E00 + 1  # same size for FF, FE, FC and cabinet data
+def _repo_version():
+    """Return (version_string, short_hash) for the supermodel-online repo."""
+    try:
+        d = os.path.dirname(os.path.abspath(__file__))
+        h = subprocess.check_output(["git","rev-parse","--short","HEAD"],
+                                    cwd=d, stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+        dt = subprocess.check_output(["git","show","-s","--format=%cd","--date=format:%Y%m%d","HEAD"],
+                                     cwd=d, stderr=subprocess.DEVNULL, timeout=5).decode().strip()
+        return f"0.4-{dt}-git-{h}", h
+    except Exception:
+        return None, None
+
+REPO_VERSION, REPO_HASH = _repo_version()
+
 GAMES = {GUID: ("dayto2pe", 848), 0x5BF177DA34876: ("scud", 1024),
          0x5BF177DA34877: ("scudplus", 1024), 0x5BF177DA34878: ("daytona2", 848),
          0x5BF177DA34879: ("srally2", 2048), 0x5BF177DA3487B: ("srally2_8p", 2048), 0x5BF177DA3487A: ("lemans24", 3264),
@@ -1848,6 +1864,18 @@ class Hub:
                 body = struct.pack('<II', room.id, len(members))
                 body += b''.join(PING_ROW.pack(m['id'], m.get('ping_ms', 0) if room.state == 0 or m['id'] in self.clients else 0) for m in members)
                 self.send(c, b'ORP1', body)
+            # Version check: relay reports repo hash + client version + status.
+            if c.get('ping_capable'):
+                sv = c.get('supermodel_version', '')
+                sh = c.get('supermodel_hash', '')
+                if REPO_HASH and sh:
+                    vstatus = 'up_to_date' if REPO_HASH == sh else 'update_available'
+                else:
+                    vstatus = 'unknown'
+                relay_ver = REPO_VERSION or 'unknown'
+                body = struct.pack('<II', room.id, 1)
+                body += struct.pack('<64s64s8s', fixed(relay_ver, 64), fixed(sv, 64), vstatus.encode())
+                self.send(c, b'ORV1', body)
             if c.get(room_capability(room.game, 'native_capable')) and not (room.host_mode == 3 and room.directory_ready):
                 enabled = all_native(room)
                 body = struct.pack('<III', room.id, int(enabled), len(members))
@@ -2131,6 +2159,10 @@ class Hub:
         if kind == b'OLQ1' and not body:
             self.snapshot(c)
             return
+        if kind == b'OLV1' and len(body) == 68:
+            c['supermodel_version'] = text(body, 64)
+            sv = c['supermodel_version']
+            c['supermodel_hash'] = sv.rsplit('-git-', 1)[-1] if '-git-' in sv else ''
         if kind == b'OLQ2' and len(body) == POLL2.size and c.get('ping_capable'):
             stamp, rtt = POLL2.unpack(body)
             c['ping_ms'] = min(rtt, MAX_PING_MS)
@@ -2548,7 +2580,7 @@ class Hub:
         for room in tuple(self.rooms.values()):
             await self.destroy(room, 'Relay stopped.')
 
-''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE','ADAPTIVE_CAPABILITY','VIDEO_CAPABILITY','VIDEO60_OPTION','INDY500_GUID','INDY500_MAX_CABINETS','SRALLYC_GUID','SRALLYC_MAX_CABINETS','DAYTONA_GUID','DAYTONA_MAX_CABINETS','SGT24H_GUID','SGT24H_MAX_CABINETS')})
+''',{name:globals()[name] for name in ('Room','frame','read_frame','tune_socket','JOIN','VERSION','DEFAULT_TICK_RATE','ADAPTIVE_CAPABILITY','VIDEO_CAPABILITY','VIDEO60_OPTION','INDY500_GUID','INDY500_MAX_CABINETS','SRALLYC_GUID','SRALLYC_MAX_CABINETS','DAYTONA_GUID','DAYTONA_MAX_CABINETS','SGT24H_GUID','SGT24H_MAX_CABINETS','REPO_VERSION','REPO_HASH')})
 
 # Public namespaces for source tests/tools; compatibility names are in memory
 # only. None of these modules is a separate file or relay launcher.

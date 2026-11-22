@@ -2,6 +2,7 @@
 #include "OnlineGui.h"
 #include "Network/RelayProtocol.h"
 #include "Pkgs/imgui/imgui.h"
+#include "Version.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -136,6 +137,26 @@ void OnlineGui::Draw(const std::string& dir) {
   if(!s.connected) { DrawCreateDialog(dir,s,false); DrawRoomOptionsDialog(s,false); return; }
   bool openCreateDialog=false, openRoomOptions=false;
   ImGui::Separator();
+
+  // Version check: relay reports its repo git revision; compare with local binary.
+  if(s.connected && !s.relayVersion.empty()) {
+    const std::string ownV=SupermodelVersion();
+    ImGui::TextUnformatted("Version check");
+    ImGui::SameLine();
+    if(s.versionStatus=="up_to_date")
+      ImGui::TextColored(ImVec4(0.3f,0.8f,0.3f,1.0f),"Up to date");
+    else if(s.versionStatus=="update_available")
+      ImGui::TextColored(ImVec4(0.9f,0.5f,0.2f,1.0f),"Update available");
+    else
+      ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1.0f),"Unknown");
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Supermodel: %s",ownV.c_str());
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Repo: %s",s.relayVersion.c_str());
+    if(s.versionStatus=="update_available")
+      ImGui::TextWrapped("Your binary is not built from the latest repo commit. Update and rebuild.");
+    ImGui::Spacing();
+  }
 
   const Online::Room* current=nullptr;
   for(const auto& r:s.rooms) if(r.id==s.room) current=&r;

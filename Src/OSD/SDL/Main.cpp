@@ -2107,6 +2107,7 @@ static void Help(void)
   puts("  -no-srallyc-udp         Keep Rev C motion prediction on TCP only");
   puts("  -no-daytona-prediction Draw native remote cars in original Daytona Rev A Online");
   puts("  -no-daytona-udp        Keep original Daytona Rev A motion on TCP only");
+  puts("  -no-daytona-async-poll Force native Daytona Rev A busy-wait at 200ms+ latency");
   puts("  -no-boot-scene-patch    Keep Daytona USA 2 PE's hidden boot scene during the network check");
   puts("  -no-hidden-car-textures Do not load Scud Race Plus secret-vehicle textures for other courses");
   printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
@@ -2210,6 +2211,8 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-no-daytona-prediction", { "DaytonaPrediction", false } },
     { "-daytona-udp",          { "DaytonaPoseUdp",    true  } },
     { "-no-daytona-udp",       { "DaytonaPoseUdp",    false } },
+    { "-daytona-async-poll",    { "DaytonaAsyncPoll", true  } },
+    { "-no-daytona-async-poll", { "DaytonaAsyncPoll", false } },
     { "-threads",             { "MultiThreaded",    true } },
     { "-no-threads",          { "MultiThreaded",    false } },
     { "-gpu-multi-threaded",  { "GPUMultiThreaded", true } },

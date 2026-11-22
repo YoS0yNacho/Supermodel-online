@@ -16,7 +16,7 @@ inline constexpr unsigned Tx=0x2000, Rx=0x21c0, RowBytes=0x1c0, HeaderBytes=0x54
 inline constexpr double FrameUs=1000000.0/SrallycOnline::RefreshRate;
 inline constexpr double MaxShift=6.0, MaxYawShift=0.16, TwoPi=6.283185307179586477;
 inline constexpr unsigned HistorySize=24;
-inline constexpr uint64_t MaxUdpAgeUs=180000, MaxUncertaintyUs=80000;
+inline constexpr uint64_t MaxUdpAgeUs=300000, MaxUncertaintyUs=80000;
 
 struct Vec
 {

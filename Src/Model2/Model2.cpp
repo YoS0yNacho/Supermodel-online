@@ -1195,7 +1195,33 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
     if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 && mask==0xffffffff)
     {
       const uint32_t pc=m_i960.GetPIP();
-      if (pc==0x21a550 || pc==0x21a554 || pc==0x21a558) ObserveSgt24hDraw(addr);
+      // Authority physics entry: 0x2ee00 first reads state +0x278.
+      if(pc==0x2ee00 && addr==(m_i960.GetReg(16)+0x278) &&
+         std::getenv("SUPERMODEL_SGT_SIM_TRACE"))
+      {
+        const uint32_t state=m_i960.GetReg(16);
+        (void)state;
+        if(std::getenv("SUPERMODEL_SGT_STATE_TRACE"))
+        {
+          auto word=[&](uint32_t a){return Get32(m_workRAM,a-0x500000);};
+          auto backup=[&](uint32_t a){return Get32(m_backupRAM,a-0x01d00000);};
+          if(++m_sgt24hPhysicsCalls%30==0)
+            InfoLog("SGT_PHYSIC us=%llu frame=%llu calls=%llu state=%08x "
+              "px=%08x py=%08x pz=%08x authority=%u seat=%u count=%u "
+              "nativeFrames=%u rt=%08x t1=%08x t2=%08x t3=%08x t4=%08x "
+              "t5=%08x t6=%08x t7=%08x t8=%08x",
+              (unsigned long long)IndyAuditUs(),(unsigned long long)m_frameNumber,
+              (unsigned long long)m_sgt24hPhysicsCalls,state,
+              word(state+0x28),word(state+0x2c),word(state+0x30),
+              word(0x510dd0),word(0x51095c),m_comm.NativeRelayCount(),
+              word(0x510e8c),
+              backup(0x1d00068),backup(0x1d00058),backup(0x1d0005c),
+              backup(0x1d00060),backup(0x1d00064),backup(0x1d0006c),
+              backup(0x1d0006e),backup(0x1d00070),backup(0x1d00072));
+        }
+        ++m_sgt24hSimTicks;
+      }
+      if (pc==0x21a550 || pc==0x21a554 || pc==0x21a558) return ObserveSgt24hDraw(addr,native);
     }
     if (addr == INDY_FLAG_TIMER && m_indyEntryWaiting && native == 0x41000000u &&
         m_running == CPU_I960 && mask == 0xffffffff && m_i960.GetPIP() == INDY_FLAG_TIMER_READ_PC)
@@ -1377,7 +1403,20 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
       if (mask & 0x000000ff)
         d |= m_comm.ReadCN();
       if (mask & 0x00ff0000)
-        d |= uint32_t(m_comm.ReadFG()) << 16;
+      {
+        uint8_t fg=m_comm.ReadFG();
+        // Rev A race-only native busy wait, not a fabricated RX application.
+        // Preserve the last native row and all real receive generations.
+        if(m_config["DaytonaAsyncPoll"].ValueAsDefault<bool>(true) &&
+           m_comm.DaytonaOnline() && m_running==CPU_I960 &&
+           m_i960.GetPIP()==0x1b24c && bool(DaytonaScene()) &&
+           m_program.size()>0x1b25c &&
+           Get32(m_program,0x1b240)==0x80183000 && Get32(m_program,0x1b244)==0x540054 &&
+           Get32(m_program,0x1b24c)==0x80227400 && Get32(m_program,0x1b250)==0x4002 &&
+           Get32(m_program,0x1b254)==0x58290303 && Get32(m_program,0x1b258)==0x30397ff0)
+          fg=(fg&0x7f)|((m_workRAM[0x40054]^0x80)&0x80);
+        d |= uint32_t(fg) << 16;
+      }
       return d;
     }
     return 0;
@@ -3421,24 +3460,24 @@ void CModel2::ObserveSgt24hDecode(uint32_t address)
   binding.decodedFrame=m_frameNumber;binding.applied=token;
 }
 
-void CModel2::ObserveSgt24hDraw(uint32_t address)
+uint32_t CModel2::ObserveSgt24hDraw(uint32_t address,uint32_t native)
 {
   using namespace Sgt24h;
   // Geometry-only RAM path: called from other-actor dispatch at 28118.
   // Never match the direct ROM path or local camera/model dispatch.
-  if (m_i960.GetReg(2)!=0x2811c) return;
+  if (m_i960.GetReg(2)!=0x2811c) return native;
   const uint32_t body=m_i960.GetReg(16),pc=m_i960.GetPIP();
   const unsigned axis=(pc-0x21a550)/4;
-  if (axis>2 || address!=body+StatePosition+4*axis || body<CarActorBase+ReceivedState) return;
+  if (axis>2 || address!=body+StatePosition+4*axis || body<CarActorBase+ReceivedState) return native;
   const uint32_t actor=body-ReceivedState;
-  if ((actor-CarActorBase)%CarActorStride || uint64_t(actor)+CarActorStride>0x500000ull+m_workRAM.size()) return;
+  if ((actor-CarActorBase)%CarActorStride || uint64_t(actor)+CarActorStride>0x500000ull+m_workRAM.size()) return native;
   auto word=[&](uint32_t a){return Get32(m_workRAM,a-0x500000);};
   const unsigned index=(actor-CarActorBase)/CarActorStride;
   const unsigned count=m_comm.NativeRelayCount(), authority=word(SelectedCabinet);
   // State3 is the relocated dispatch mode; no broader race-mode inference.
   if (word(0x510948)!=3 || word(0x510f14)!=1 || word(LinkDisabled)!=0 ||
       count<2 || count>Cabinets || authority>=count || word(LinkCount)!=count ||
-      index>=word(0x510f40) || index==word(LocalActorIndex) || word(actor)!=LinkedPeerActorType) return;
+      index>=word(0x510f40) || index==word(LocalActorIndex) || word(actor)!=LinkedPeerActorType) return native;
   const auto* rows=m_workRAM.data()+RxActors-0x500000;
   const unsigned group=rows[authority*CabinetRecordStride+3];
   for(unsigned slot=0;slot<count;++slot)
@@ -3454,21 +3493,69 @@ void CModel2::ObserveSgt24hDraw(uint32_t address)
         rows[slot*CabinetRecordStride+3]!=group || word(actor+DecodedCabinetSlot)!=slot ||
         !token.generation || token.epoch!=binding.applied.epoch || token.generation!=binding.applied.generation ||
         m_frameNumber<binding.decodedFrame || m_frameNumber-binding.decodedFrame>1)
-    {draw={};return;}
+    {draw={};return native;}
     // Begin one coherent triple only at the first certified load. Partial or
     // out-of-order events cannot be consumed as a complete observation.
     if(axis==0)
     {
       draw={};draw.actor=actor;draw.frame=m_frameNumber;draw.applied=token;
       for(unsigned i=0;i<3;++i)draw.nativePosition[i]=word(body+StatePosition+4*i);
+      auto& udp=m_sgt24hUdp[authority];
+      m_comm.LatestSgt24hPose(authority,udp);
+      const auto now=IndyAuditUs();
+      const auto nativeKey=Sgt24hPose::Hash(rows+authority*CabinetRecordStride,RowBytes);
+      // Same authoritative row lineage is mandatory; UDP bytes never enter
+      // guest state. This only makes a candidate available to future drawing.
+      if(udp.received && now>=udp.received && now-udp.received<=Sgt24hPose::FreshUs &&
+         udp.age<=Sgt24hPose::FreshUs-(now-udp.received) &&
+         udp.packet.origin==authority && udp.packet.row[3]==group &&
+         Sgt24hPose::HasNativeKey(udp.packet,nativeKey))
+        draw.udpValid=ReadFullPosition(udp.packet.row.data(),udp.packet.row.size(),slot,draw.udpPosition);
+      auto& history=m_sgt24hPredictionHistory[slot];
+      // Frame continuity is local. Velocity uses sender timestamps only:
+      // never subtract an unsynchronized sender clock from this host clock.
+      if(!draw.udpValid || history.actor!=actor || history.group!=group ||
+         history.localEpoch!=token.epoch || history.current.epoch!=udp.packet.epoch ||
+         history.current.authority!=authority || m_frameNumber<history.lastFrame ||
+         m_frameNumber-history.lastFrame>1)
+        history={};
+      if(draw.udpValid)
+      {
+        history.actor=actor;history.group=group;history.localEpoch=token.epoch;
+        history.lastFrame=m_frameNumber;
+        if(udp.stamp>history.current.time)
+        {
+          history.previous=history.current;
+          history.current={draw.udpPosition,udp.stamp,udp.packet.epoch,authority,slot};
+        }
+        const uint64_t ahead=udp.age+(now-udp.received);
+        // Limits are native-unit research settings, deliberately zero until
+        // measured in an isolated run. Zero disables prediction safely.
+        const double speed=m_config["Sgt24hPredictionMaxSpeed"].ValueAsDefault<double>(0);
+        const double shift=m_config["Sgt24hPredictionMaxShift"].ValueAsDefault<double>(0);
+        if(history.current.time==udp.stamp && UINT64_MAX-udp.stamp>=ahead)
+          draw.predictedValid=Predict(history.previous,history.current,udp.stamp+ahead,
+                                    100000,50000,speed,shift,draw.predictedPosition);
+      }
+
+
     }
     if(draw.actor!=actor || draw.frame!=m_frameNumber || draw.applied.epoch!=token.epoch ||
        draw.applied.generation!=token.generation || draw.axes!=((1u<<axis)-1))
-    {draw={};return;}
-    if(draw.nativePosition[axis]!=word(address)) {draw={};return;}
+    {draw={};return native;}
+    if(draw.nativePosition[axis]!=word(address)) {draw={};return native;}
     draw.axes|=1u<<axis;
-    return;
+    // Only this certified geometry-load triple may see the predicted value.
+    // All simulation/camera/guest-memory reads keep their original values.
+    if(draw.predictedValid && m_config["Sgt24hPrediction"].ValueAsDefault<bool>(false))
+    {
+      uint32_t result;
+      std::memcpy(&result,&draw.predictedPosition.component[axis],sizeof(result));
+      return result;
+    }
+    return native;
   }
+  return native;
 }
 
 bool CModel2::PrepareSgt24hRelayRole()
@@ -3585,6 +3672,26 @@ void CModel2::RunFrame(void)
       // No motion bytes are omitted before native play or for special states.
       // During the race clock a recovering seat can still confirm UDP liveness.
       m_comm.Tick(indyRace,indySlots);
+      if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured &&
+          std::getenv("SUPERMODEL_SGT_SIM_TRACE"))
+      {
+        const uint64_t nowUs=IndyAuditUs();
+        ++m_sgt24hVblankTicks;
+        if (m_sgt24hVblankTicks%60==0 && m_sgt24hLastVblankUs)
+        {
+          // dt is the interval since the previous tick (one tick, not 60),
+          // so the actual tick rate is 1e6/dt. Log both the per-tick rate
+          // and the 60-tick aggregate rate for clarity.
+          const uint64_t dt=nowUs-m_sgt24hLastVblankUs;
+          InfoLog("SGT_VBLANK ticks=%llu dt_us=%llu rate=%.2f/s rate60=%.2f/s nativeFrames=%u rt=%08x",
+            (unsigned long long)m_sgt24hVblankTicks,(unsigned long long)dt,
+            1.0*1e6/double(dt),
+            60.0*1e6/double(dt),
+            Get32(m_workRAM,0x510e8c-0x500000),
+            Get32(m_backupRAM,0x1d00068-0x01d00000));
+        }
+        m_sgt24hLastVblankUs=nowUs;
+      }
       if (m_indyMotionEnabled || m_indyMotionTrace || m_indyUdpEnabled) UpdateIndyMotionFrame();
       // Debugging aid: "frame:prefix" writes texture RAM 0/1 and luma RAM to prefix_tex0.bin etc.
       if (const char *dump = getenv("SUPERMODEL_MODEL2_TEXDUMP"))
@@ -3718,6 +3825,8 @@ void CModel2::Reset(void)
 {
   m_sgt24hDecoded={};
   m_sgt24hDraws={};
+  m_sgt24hUdp={};
+  m_sgt24hPredictionHistory={};
   ClearIndyMotion();
   ClearSrallycMotion();
   ClearDaytonaMotion();
@@ -3938,6 +4047,8 @@ void CModel2::LoadState(CBlockFile *SaveState)
 {
   m_sgt24hDecoded={};
   m_sgt24hDraws={};
+  m_sgt24hUdp={};
+  m_sgt24hPredictionHistory={};
   ClearIndyMotion();
   ClearSrallycMotion();
   ClearDaytonaMotion();

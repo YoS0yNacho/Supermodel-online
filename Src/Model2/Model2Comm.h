@@ -47,6 +47,7 @@
 
 #include "Network/NetServer.h"
 #include "Network/Games/Sgt24h/Freshness.h"
+#include "Network/Games/Sgt24h/Pose.h"
 #include "Network/Games/Sgt24h/CopyContext.h"
 #include <array>
 #include <mutex>
@@ -129,6 +130,7 @@ public:
   // Read-only application token. Never consulted by native ring delivery.
   // Token lifetime is confined to this comm instance and reset epoch.
   Sgt24h::FrameToken Sgt24hAppliedToken() const;
+  void LatestSgt24hPose(unsigned cabinet,Sgt24hPose::Received& out);
   bool Sgt24hAppliedCurrent(Sgt24h::FrameToken token,uint64_t nowUs,uint64_t maxAgeUs) const;
   void ObserveSgt24hRxCopy(uint32_t pc,uint32_t rip,uint32_t source,
                           uint32_t destination,uint32_t address,uint32_t mask);
@@ -202,6 +204,7 @@ private:
   bool m_sgt24hOnline = false;
   mutable std::mutex m_sgt24hFreshnessMutex;
   Sgt24h::Freshness m_sgt24hFreshness;
+  Sgt24hPose::Sender m_sgt24hPoseSender;
   std::array<Sgt24h::FrameToken,Sgt24h::Cabinets> m_sgt24hCopies{};
   uint64_t m_sgt24hEpoch=0;
   void ResetSgt24hFreshness();
@@ -285,6 +288,7 @@ private:
   uint8_t  m_cn = 0;              // board enable
   uint8_t  m_fg = 0;              // the i960 side's flip gate
   uint8_t  m_buffer0[0x4000];
+  unsigned m_onlineReadBudget=64; // shared by Tick and guest FG polls
   bool     m_frameSync = false;
   uint16_t m_frameOffset = 0x1c0; // 180 in Power Sled
   uint8_t  m_linkEnable = 0;

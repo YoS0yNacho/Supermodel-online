@@ -24,7 +24,7 @@ constexpr uint64_t FirstFfStamp(uint64_t previous, uint64_t now)
 // can be in flight. Keep the old small window when it already covers the trip.
 constexpr unsigned SeedLimit(unsigned seats, uint64_t roundUs, uint64_t frameUs = FrameUs)
 {
-  if (seats < 3 || seats > 8 || !frameUs) return 0; // two-seat playout is independent
+  if (seats < 2 || seats > 8 || !frameUs) return 0; // only supported native rosters
   const uint64_t frames = roundUs / frameUs + (roundUs % frameUs != 0);
   if (frames <= seats) return seats;
   return frames >= MaxSeedPairs - JitterFrames ? MaxSeedPairs : unsigned(frames) + JitterFrames;

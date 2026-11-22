@@ -133,6 +133,7 @@ void CModel2Comm::ResetSgt24hFreshness()
 {
   std::lock_guard<std::mutex> lock(m_sgt24hFreshnessMutex);
   m_sgt24hCopies={};
+  m_sgt24hPoseSender.Clear();
   // Never wrap into a previous epoch. Exhaustion disables observation.
   if (m_sgt24hEpoch==UINT64_MAX) {m_sgt24hFreshness.Clear();return;}
   m_sgt24hFreshness.Begin(++m_sgt24hEpoch);
@@ -142,6 +143,7 @@ void CModel2Comm::ClearSgt24hFreshness()
 {
   std::lock_guard<std::mutex> lock(m_sgt24hFreshnessMutex);
   m_sgt24hCopies={};
+  m_sgt24hPoseSender.Clear();
   m_sgt24hFreshness.Clear();
 }
 
@@ -195,6 +197,20 @@ Sgt24h::FrameToken CModel2Comm::Sgt24hCopyToken(unsigned cabinet,uint64_t now,ui
   std::lock_guard<std::mutex> lock(m_sgt24hFreshnessMutex);
   const auto token=m_sgt24hCopies[cabinet];
   return m_sgt24hFreshness.Current(token,now,age)?token:Sgt24h::FrameToken{};
+}
+
+void CModel2Comm::LatestSgt24hPose(unsigned cabinet,Sgt24hPose::Received& out)
+{
+  if (!m_sgt24hOnline || !m_link || !m_link->Sgt24hPoseUdp() || OnlineSessionFailed() ||
+      m_linkAlive!=1 || cabinet>=m_linkCount || cabinet+1==m_linkID) {out={};return;}
+  CNetBoardLink::UdpSnapshot snap;
+  if(!m_link->LatestSnapshot(cabinet,out.stamp,snap))return;
+  const auto old=out;out={};out.stamp=snap.sourceUs;
+  if(!snap.timed || snap.controlUs || !snap.mask.empty() || !snap.receivedUs ||
+     snap.ageUs>Sgt24hPose::FreshUs || snap.uncertaintyUs>Sgt24hPose::UncertaintyUs ||
+     !Sgt24hPose::Decode(snap.raw.data(),snap.raw.size(),cabinet,m_linkCount,out.packet)) {out.packet={};return;}
+  if(old.packet.epoch==out.packet.epoch && old.packet.n && out.packet.seq<=old.packet.seq){out.packet={};return;}
+  out.received=snap.receivedUs;out.age=snap.ageUs;out.uncertainty=snap.uncertaintyUs;
 }
 
 unsigned CModel2Comm::NativeRelayCount() const
@@ -372,7 +388,7 @@ bool CModel2Comm::ConfigureIndyOnline()
   m_indyRaceUdp = m_link->IndyRaceUdp();
   const unsigned count = m_link->RelayCount();
   if (count < 2 || count > Indy500Online::Cabinets) return FailIndyEntry("invalid Online roster");
-  if (count > 2)
+  if (count >= 2)
   {
     // The native watchdog checks its predecessor's 0,1,2 sequence each frame.
     // Do not publish a burst of several received ring aggregates at once.
@@ -399,7 +415,7 @@ bool CModel2Comm::EstablishLink()
       m_linkAlive = 2;
       return false;
     }
-    if (m_indyOnline && id == 1 && count > 2)
+    if (m_indyOnline && id == 1 && count >= 2)
     {
       // FF took the same ordered path as a returned native data/FC pair.
       // It already includes the slowest hops and guest forwarding cadence.
@@ -489,6 +505,7 @@ uint8_t CModel2Comm::ReadFG()
 
 void CModel2Comm::Tick(bool indyRaceContext,unsigned indyMotionSlots)
 {
+  m_onlineReadBudget=64;
   m_indyGuestViewActive=false;
   if (m_srallycOnline || m_daytonaOnline || m_sgt24hOnline)
   {
@@ -663,7 +680,7 @@ void CModel2Comm::Tick(bool indyRaceContext,unsigned indyMotionSlots)
         }
         recv = ReadFrame(dataSize);
       }
-    } while (m_linkTimer == 1 && m_linkAlive == 1);
+    } while (m_frameSync && m_linkTimer == 1 && m_linkAlive == 1);
 
     // wait for the vsync (MAME's -comm_framesync)
     m_linkTimer = m_frameSync ? 1 : 0;
@@ -814,10 +831,11 @@ bool CModel2Comm::CheckIndyAge(uint64_t nowUs, uint64_t receivedUs)
 {
   const uint64_t ageUs = IndyQueueAge(nowUs, receivedUs);
   if (!m_indyMaxQueueUs || ageUs <= m_indyMaxQueueUs) return true;
-  ErrorLog("INDY 500 lab playout: oldest data age %.3f ms, limit %.3f ms, queue %zu.",
-           ageUs / 1000.0, m_indyMaxQueueUs / 1000.0, m_indyFifo.size());
-  FailIndyPlayout("excess receive dwell; ending room rather than skipping or replaying frames");
-  return false;
+  // Queue dwell is presentation latency, not evidence of a broken link.
+  // A short jitter burst or slower cabinet must not fail an otherwise intact
+  // ordered stream. DrainIndyPairs retains the hard capacity check; malformed
+  // traffic and disconnects still fail. Never skip/replay a native sequence.
+  return true;
 }
 
 void CModel2Comm::TickIndyPlayout(int frameStart, int frameSize, int frameOffset, int dataSize, bool isMaster, bool isSlave, bool raceContext, unsigned slots)
@@ -834,7 +852,7 @@ void CModel2Comm::TickIndyPlayout(int frameStart, int frameSize, int frameOffset
   // aggregate (its local record followed by the records it received).
   const uint8_t predecessor = m_linkID == m_linkCount ? 1 : m_linkID + 1;
   if (!DrainIndyPairs(dataSize, predecessor)) return;
-  const bool flowControlled = m_linkCount > 2;
+  const bool flowControlled = m_linkCount >= 2;
   // Only the master can seed, once per guest frame. With a long ring trip,
   // a fixed seat-count window can expire before its first return packet.
   // Stop extending the window once a complete pair can be consumed.
@@ -842,20 +860,14 @@ void CModel2Comm::TickIndyPlayout(int frameStart, int frameSize, int frameOffset
       m_linkCount, m_indySeedLimit, m_indySeedPairs, m_indyPrimed, !m_indyFifo.empty());
   if (flowControlled && (isMaster ? !seeding : m_indyPrimed) && m_indyFifo.empty())
   {
-    // After priming, each native frame advances one complete pair. Do not
-    // repeat a stale predecessor record, skip a sequence, or let independent
-    // emulation clocks grow the backlog. Bound the stall (including any
-    // partial pair) and end the room if the slowest seat cannot keep up.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-    do
-    {
-      if (std::chrono::steady_clock::now() >= deadline || !m_link->WaitForDataUntil(deadline))
-      {
-        FailIndyPlayout("timed out waiting for a complete ring pair (250 ms)");
-        return;
-      }
-      if (!DrainIndyPairs(dataSize, predecessor)) return;
-    } while (m_indyFifo.empty());
+    // An empty ring is not a reason to block the emulation thread. Keep
+    // the previous guest view and retry next vblank. Do not fabricate a
+    // completion, consume a partial pair, or extend the master's credit
+    // window: the normal send below runs only when a pair is available.
+    ++m_indyMissed;
+    m_linkTimer=0;
+    m_zfgDelay=2;
+    return;
   }
   const uint64_t nowUs = IndyNowUs();
   const uint64_t oldestUs = IndyOldestReceived();
@@ -1349,7 +1361,7 @@ void CModel2Comm::ReadFGLink()
       }
       recv = ReadFrame(dataSize);
     }
-  } while (m_linkTimer == 1 && m_linkAlive == 1);
+  } while (m_frameSync && m_linkTimer == 1 && m_linkAlive == 1);
 }
 
 // One frame into m_buffer0: its size, or 0 if there is none (wait: until one
@@ -1365,9 +1377,22 @@ int CModel2Comm::ReadFrame(int dataSize, bool wait)
     memcpy(m_buffer0, frame.data(), std::min<size_t>(frame.size(), sizeof(m_buffer0)));
     return (int) frame.size();
   }
-  if (!m_connected || (!wait && !m_link->CheckDataAvailable()))
-    return 0;
-  std::vector<uint8_t> &frame = m_link->Receive();
+  if (!m_connected) return 0;
+  std::vector<uint8_t> polled;
+  if (m_link->IsRelay())
+  {
+    // Online reads must never enter Receive's condition-variable wait,
+    // including after loading a state containing a legacy sync timer.
+    if(m_linkAlive==1) m_linkTimer=0; // preserve FF/FE startup countdown
+    // Bound receive work across vblank and repeated guest FG polls.
+    // Excess packets remain queued in order for the next emulated frame.
+    if(!m_onlineReadBudget) return 0;
+    const auto result=m_link->TryReceive(polled);
+    if(result==CNetBoardLink::ReceiveResult::Data) --m_onlineReadBudget;
+    if(result==CNetBoardLink::ReceiveResult::Pending) return 0;
+  }
+  else if (!wait && !m_link->CheckDataAvailable()) return 0;
+  std::vector<uint8_t> &frame = m_link->IsRelay() ? polled : m_link->Receive();
   if (frame.empty())
   {
     ClearSgt24hFreshness();
@@ -1403,6 +1428,20 @@ void CModel2Comm::SendData(uint8_t frameType, int frameStart, int frameSize, int
   for (int i = 0; i < frameSize; i++)
     m_buffer0[1 + i] = m_shared[(frameStart + i) & 0x3fff];
   SendFrame(dataSize);
+  if (m_sgt24hOnline && m_link && m_link->Sgt24hPoseUdp() && !OnlineSessionFailed())
+  {
+    if (m_linkID && m_linkID==m_nativeSeat && frameType==m_linkID && frameStart==Sgt24h::Tx &&
+        frameSize==Sgt24h::FrameBytes && dataSize==Sgt24hOnline::PayloadSize)
+    {
+      Sgt24hPose::Wire wire{};bool send=false;
+      {
+        std::lock_guard<std::mutex> lock(m_sgt24hFreshnessMutex);
+        if (const auto* packet=m_sgt24hPoseSender.Push(m_buffer0+1,Sgt24h::RowBytes,m_linkID-1,m_linkCount,m_sgt24hEpoch))
+        {wire=Sgt24hPose::Encode(*packet);send=true;}
+      }
+      if(send)m_link->SendPresentation(wire.data(),wire.size(),IndyNowUs(),Sgt24hPose::FreshUs,0,nullptr,0,uint64_t(m_framePeriodUs));
+    }
+  }
   // The complete TCP frame was already offered on the normal path. UDP
   // can echo a pose from the exact local TX row but never omits any bytes.
   if (m_daytonaOnline && m_daytonaScene && m_link && m_link->DaytonaPoseUdp())

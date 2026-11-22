@@ -6,7 +6,7 @@
 #include <limits>
 
 using namespace IndyRing;
-static_assert(SeedLimit(2, 350000) == 0 && SeedLimit(9, 350000) == 0);
+static_assert(SeedLimit(2, 350000) == 23 && SeedLimit(9, 350000) == 0);
 static_assert(SeedLimit(3, 0) == 3 && SeedLimit(8, 8 * FrameUs) == 8);
 static_assert(SeedLimit(3, 342000) == 22);
 static_assert(SeedLimit(3, 342000, 1000000 / 60) == 23);
@@ -34,6 +34,8 @@ static void Test(unsigned seats, uint64_t handshakeUs, uint64_t firstCompleteUs)
 
 int main()
 {
+  Test(2, 35000, 49000);
+  Test(2, 200000, 210000);
   Test(3, 35000, 49000);
   // Repeated FF sends must not turn a 342 ms full round into one vblank.
   uint64_t ff = 0;

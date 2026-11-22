@@ -1,3 +1,4 @@
+#include "Network/Games/Sgt24h/Prediction.h"
 /**
  ** Supermodel
  ** A Sega Model Series Arcade Emulator.
@@ -297,6 +298,9 @@ private:
   unsigned m_daytonaBootstrapFrames = 0;
   bool m_sgt24hRoleConfigured = false;
   unsigned m_sgt24hBootstrapFrames = 0;
+  uint64_t m_sgt24hSimTicks=0,m_sgt24hPhysicsCalls=0;
+  uint64_t m_sgt24hVblankTicks=0,m_sgt24hLastVblankUs=0;
+
   struct Sgt24hDecodedBinding {
     uint32_t actor=0, authority=0, slot=0, phase=0, group=0;
     uint64_t decodedFrame=0;
@@ -304,15 +308,26 @@ private:
   };
   std::array<Sgt24hDecodedBinding,Sgt24h::Cabinets> m_sgt24hDecoded{};
   void ObserveSgt24hDecode(uint32_t address);
-  void ObserveSgt24hDraw(uint32_t address);
+  uint32_t ObserveSgt24hDraw(uint32_t address,uint32_t native);
   struct Sgt24hDrawObservation {
     uint32_t actor=0;
     uint64_t frame=0;
     Sgt24h::FrameToken applied{};
     std::array<uint32_t,3> nativePosition{};
     unsigned axes=0;
+    bool udpValid=false;
+    Sgt24h::Position udpPosition{}, predictedPosition{};
+    bool predictedValid=false;
   };
   std::array<Sgt24hDrawObservation,Sgt24h::Cabinets> m_sgt24hDraws{};
+  std::array<Sgt24hPose::Received,Sgt24h::Cabinets> m_sgt24hUdp{};
+  struct Sgt24hPredictionHistory {
+    Sgt24h::PredictSample previous{},current{};
+    uint64_t localEpoch=0,lastFrame=0;
+    uint32_t actor=0,group=0;
+  };
+  std::array<Sgt24hPredictionHistory,Sgt24h::Cabinets> m_sgt24hPredictionHistory{};
+
   bool m_daytonaPrediction=false;
   FILE* m_daytonaTrace=nullptr;
   unsigned m_daytonaTraceRows=0;

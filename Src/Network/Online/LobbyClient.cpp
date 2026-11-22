@@ -17,6 +17,7 @@
 #include "LobbyClient.h"
 #include "PlayerHost.h"
 #include "Network/RelayProtocol.h"
+#include "Version.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -264,6 +265,12 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
     std::vector<uint8_t> output=Frame("HEL1", {greeting.begin(), greeting.end()});
     if(route.native)hello.insert(hello.end(),route.key.begin(),route.key.end());
     const auto registration=Frame(Srally2Research::LobbyHello,hello);output.insert(output.end(),registration.begin(),registration.end());
+    // OLV1: send our Supermodel version so the relay can compare with the repo.
+    {
+      const std::string sv=SupermodelVersion();
+      std::vector<uint8_t> vbody;Put(vbody,1);Text(vbody,sv.c_str(),64);
+      output.insert(output.end(),Frame("OLV1",vbody).begin(),Frame("OLV1",vbody).end());
+    }
     std::vector<uint8_t> input; size_t sent=0;
     bool bindPending=false,armPending=false;
     Snapshot pending; size_t expected=0; bool collecting=false, greeted=false, admitted=false, indy500Relay=false;
@@ -364,6 +371,12 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Require(r.game!=Sgt24hOnline::Game || sgt24hRelay);
           Require(r.game!=DaytonaOnline::Game || daytonaRelay);
           Require(r.master==r.members[0].id);pending.rooms.push_back(std::move(r));
+        } else if(kind=="ORV1") {
+          // Version check: relay sends its repo version + our version + status.
+          Require(collecting && b.size()==8+64+64+8);
+          pending.relayVersion=String(b,8,64);
+          pending.clientVersion=String(b,72,64);
+          pending.versionStatus=String(b,136,8);
         } else if(kind=="OHP1") {
           Require(admitted && !collecting && b.size()==24 && !host);
           hostRoom=U32(b,0);auto port=U32(b,4);Require(port>=1024 && port<=65535);

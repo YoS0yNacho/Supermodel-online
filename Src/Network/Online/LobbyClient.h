@@ -50,6 +50,8 @@ struct Snapshot {
   std::string status = "Not connected", error, endpoint, ticket, gameEndpoint;
   // Original discovery server, never overwritten by a creator-room redirect.
   std::string directoryEndpoint;
+  // Version check: relay reports its repo git revision; client compares with its own.
+  std::string relayVersion, clientVersion, versionStatus;
   std::shared_ptr<PlayerHost> playerHost;
   std::vector<Room> rooms;
   std::vector<ChatMessage> loungeChat;

@@ -30,7 +30,7 @@ def main():
     def run(command):
         subprocess.run(command, cwd=ROOT, check=True, timeout=300)
     with tempfile.TemporaryDirectory(prefix='sgt-source-tests-') as temp:
-        for name in ('Profile', 'RelayEeprom', 'Position', 'Orientation', 'Inputs', 'FullSlots', 'Selection', 'Membership', 'RingMembership', 'CopyContext', 'Freshness', 'Prediction'):
+        for name in ('Profile', 'RelayEeprom', 'Position', 'Orientation', 'Inputs', 'FullSlots', 'Selection', 'Membership', 'RingMembership', 'CopyContext', 'Freshness', 'Prediction', 'Pose'):
             target = str(Path(temp) / name)
             command = [args.cxx, '-std=c++17', '-O1', '-Wall', '-Wextra', '-Werror', '-ISrc']
             if args.sanitize:

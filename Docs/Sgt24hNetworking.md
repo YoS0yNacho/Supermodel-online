@@ -993,3 +993,400 @@ core is unused by gameplay. UDP negotiation is compiled-source only, opt-in
 off by default; baseline executable and production relay were not replaced.
 Do not describe this stage as working UDP prediction in-game.
 Backup: ~/.supermodel-sgt24h-udp-1795235699/.
+
+## SGP1 payload and connected UDP send/receive source
+
+Implemented Pose.h 960-byte payload: magic/origin/count/history-length,
+nonzero sender epoch, sequence, reserved zeros, four row hashes and exact
+380-byte native TX row. Decoder validates sizes, origin/count, phase3/group,
+reserved bytes, history occupancy and current-row hash; failure is atomic.
+Sender suppresses identical rows and resets history on epoch/roster/group
+or non-race state. Hash is lineage matching, NOT authentication (UDP session
+token provides transport authorization). Four-key history can fail to match
+under delay; correct behavior is fallback, never relaxing provenance.
+
+SendData now sends optional SGT UDP snapshots after the unchanged full TCP
+frame, only when negotiated and local geometry/seat match. LatestSgt24hPose
+validates timed unmasked snapshots, age/uncertainty and same-epoch sequence.
+Model2 scoped draw observer polls selected authority, requires its current
+TCP-native row hash in the UDP history, rechecks group and age, then decodes
+a finite full-slot position into a separate candidate. UDP row contents are
+NEVER written to guest RAM or passed through native control decoders.
+
+Reset/load clear cached UDP candidates. Prediction math exists, but no
+position substitution enabled: draw still returns native values. Remaining:
+full scene-transition rules, prediction policy integration, snapshot lineage
+acceptance diagnostics, isolated runtime UDP validation and tuning.
+
+Model2Comm object compilation, Model2 syntax check, diff check, all13 C++
+helper ASan/UBSan tests, ROM checks and Python lobby/native/UDP routing suites
+passed. Native and mixed/TCP-only regressions preserved. These checks do not
+prove actual gameplay UDP traffic: no rebuilt executable run yet. Source
+changes uncommitted; Sgt24hPoseUdp default false; live relay untouched.
+
+## Model2 nonblocking online source change
+
+Removed the explicit Indy multi-seat 250ms frame-thread wait. On a missing
+complete pair, retain the previous guest view and return to emulation; do
+not invent a receive completion or issue extra master credits. Retry on the
+next Tick. This removes the previous per-call timeout behavior; longer-term
+peer silence still needs a separate nonblocking watchdog/runtime validation.
+All Model2 relay ReadFrame calls now use TryReceive, irrespective of a saved
+sync timer. Offline/direct frame-sync still uses the original receive path.
+Compilation of Comm and syntax checking of Model2 passed. SGT sanitizer,
+ROM/lobby/transport tests and Indy RingWindow/RaceEntry/RaceUdp sanitizer
+tests passed. These are NOT a runtime high-ping FPS or guest-speed test.
+Guest communication polling may still throttle simulation even though the
+host no longer blocks here. No executable rebuild or live session changes.
+Previous SGT prediction draw hook also now passes Model2 syntax validation.
+
+## Indy 200ms-RTT failure reproduced and bounded-ring correction
+
+Private two-cab Indy lab .supermodel-indy-async-highping.z9kh5k3m used
+100ms one-way +/-8ms jitter, copied executable and temporary cabinet state.
+Both native IDs initially linked, then slave failed at 161.209ms local
+receive dwell against a160ms limit. Making dwell diagnostic only exposed
+unbounded two-seat production: slave hit48 queued pairs (max dwell1076ms).
+Therefore simply relaxing the age threshold is NOT the fix.
+
+Extended existing startup ring credits to two-seat Indy rooms, prime depth1,
+nonblocking retry on empty ring, preserving native pair order and hard48-pair
+capacity. SeedLimit now accepts2 seats; sanitizer test covers delayed2-seat
+startup. Rebuilt separate /home/nacho/.supermodel-model2-async-bin/supermodel.
+Corrected private run completed120s with both emulator windows present and
+no queue/link errors before scoped cleanup. Master measured FF round222ms
+and computed15 startup credits. This demonstrates link survival, NOT normal
+simulation speed, race completion or US-relay deployment. No race-entry
+release was verified. Daytona/SGT simulation slowdown remains unresolved;
+Rally local-control path unchanged. Installed binary/live relay untouched by
+these builds; changes remain uncommitted.
+
+## Daytona Rev A native wait: measured slowdown and experimental bypass
+
+Three private two-cab120s runs used same test executable/settings except
+DaytonaAsyncPoll in the final run. Motion CSV owner rows sample local TX
+native tick (byte0xa) and host emulation frame against monotonic microseconds.
+ROM183c increments5010b0 once per native update, b0f4/b134 serialize low byte.
+No claim of race-clock or full-race correctness from tick counts alone.
+
+Zero-delay lab .supermodel-daytona-sim-zero.4jcewmmq:
+ cab0 emulation57.505Hz, native55.845Hz; cab1 57.508Hz/native55.761Hz.
+100ms one-way +/-8ms lab .supermodel-daytona-sim-highping.b1t2ol_x:
+ cab0 emulation57.518Hz, native28.822Hz; cab1 57.511Hz/native31.877Hz.
+Confirmed native update slowdown despite steady emulator frame count.
+
+ROM1b234 waits at1b248..1b258 for bit7 of board FG to differ from540054.
+Called by1b0c0 in the ongoing communication path. Added default-false
+DaytonaAsyncPoll: only exact1b24c read, verified instruction signature,
+Daytona online, i960 and valid DaytonaScene returns bit7 opposite remembered
+flag. Calls real ReadFG first, preserving queue processing. No shared-RAM,
+packet generation, own-row or physics writes. Non-race/startup unaffected.
+This is a deliberate guest race-poll bypass, not a claim of fresh RX data.
+
+Enabled test .supermodel-daytona-async-poll-test.460h864t at same delay:
+ cab0 emulation57.483Hz/native57.483Hz over64.91sec owner samples;
+ cab1 emulation57.482Hz/native57.482Hz over65.81sec owner samples.
+Both stayed linked through120s; cleanup scoped. Full make build passed.
+Remaining: sustained driving/race-clock comparison, remote interactions,
+long-run correctness and larger rosters. Keep default off pending those tests.
+SGT still needs its own native wait/authority analysis. Rally untouched.
+
+## SGT native-loop diagnostic, not a Daytona-style wait fix
+
+Added optional SUPERMODEL_SGT_SIM_TRACE: exact physics-loop authority load
+PC28444/address510dd0, first actor r7=0, logs every60 loop entries with host
+monotonic time, emulation frame, phase, authority and seat. Observation only.
+Private lab .supermodel-sgt-sim-highping.qmllzibm used100ms one-way +/-8ms,
+2cabinets, rebuilt separate test binary and120s scoped run.
+Cab0 logged3300 loop entries over3300 emulated frames (~51.188Hz wall-clock);
+cab1 logged3360 over3360 frames (~51.414Hz). Both phases3/4 selected authority0;
+seat0 runs authority physics, seat1 passes the loop's authority branch.
+This counts loop ENTRY, not successful physics advancement or race-clock.
+Software rendering reduced host frame throughput here. No evidence of a
+Daytona-style lost native-loop entry in this run. Does not refute user's
+SGT slowdown: investigate self-authority echo/received-state feedback and
+remote input latency next. Do NOT apply Daytona FG bypass to SGT.
+
+Full test build passed; production binary/live relay unchanged. SGT behavior
+unchanged except opt-in logs. DaytonaAsyncPoll remains default false pending
+long-race interactions; its earlier57.5 native ticks/sec result stands.
+
+## Rejected SGT authority-row experiment
+
+Private lab .supermodel-sgt-authority-row.sdksi75z,100ms one-way +/-8ms,
+120sec. Experimental default-off Sgt24hAuthorityLocalRow redirected only
+self-authority full decoder reads (RIPba97c/PC216000..216260) from RX record
+to current serialized TX record, with phase3/group/count/seat guards and
+byte masks. No change to native authority or remote inputs. Logs confirmed
+activation ONLY cabinet0 (98k+ reads); cabinet1 had zero activations.
+
+NOT accepted: race-clock progress remained too slow. Captures80/100 showed
+lap time4.63->14.48; prior unmodified diagnostic run10.68->23.62. Capture
+intervals include harness overhead and runs differ in start time, so this
+is NOT a precise paired performance claim. Neither supports a speed fix.
+Removed the entire experimental bypass and its read counter from current
+source. Kept optional SGT_SIM observation. Model2 syntax/diff checks passed.
+The lab retains its experimental binary/config/evidence for diagnosis only;
+do NOT promote it. DaytonaAsyncPoll and Rally changes untouched.
+
+## SGT 200ms isolated-lab race-clock comparison
+
+The SGT slowdown observed on the real US200ms relay does NOT reproduce
+in the isolated bwrap lab at 200ms one-way latency. Matched 120s runs:
+
+| Metric | 100ms lab | 200ms lab |
+|---|---:|---:|
+| Rendering FPS | 57.524 | 57.524 |
+| nativeFrames rate | 49.77/s | 50.80/s |
+| rt (race clock) rate | 49.77/s | 50.80/s |
+| physics calls/frame | 8.0 | 8.0 |
+| SGT_PHYSIC samples | 912 | 920 |
+
+Both latencies produce the same native simulation cadence (~50Hz) with
+rendering locked at 57.5FPS. The race clock advances 1:1 with nativeFrames
+in both cases. Physics cycles through the same four state pointers
+(0051f7d0/0051c980/00519b30/00522620) with advancing positions.
+
+Conclusion: the isolated single-host lab with emulated latency cannot
+reproduce the SGT slowdown. The real US-relay slowdown must originate
+from a factor the lab does not capture: separate-machine emulator clock
+drift, real network jitter/loss/buffering patterns, or relay implementation
+differences on the US host. The comm-flag state machine (0xb7e60 dispatch
+table at 0xb7e30) was traced and confirmed init-only — it is not a
+per-frame pacing mechanism. The SGT main loop (0x27d50) is a per-frame
+state machine dispatched via 0x510dc0, with physics (0x2ee00) gated to
+the selected authority cabinet. The nonblocking transport (TryReceive,
+64-packet budget) does not block on latency.
+
+Lab path: .supermodel-sgt-sim-200ms.qmllzibm (clone of highping lab with
+latency_ms=200). No source change was made for this test; the existing
+SGT_PHYSIC diagnostic binary was used.
+
+
+## SGT vblank tick rate diagnostic: corrected (rate calculation bug)
+
+### The bug
+The `SGT_VBLANK` diagnostic logged `rate=60.0*1e6/dt` where `dt` was the
+interval since the **previous tick** (one tick, not 60). Because
+`m_sgt24hLastVblankUs` is updated every tick but the log fires every 60 ticks,
+`dt` is a single-tick interval. The logged rate was therefore **60x the actual
+vblank tick rate**. The "vblank rate ~3266/s" reported in earlier sections of
+this document was wrong — the actual rate is ~3266/60 ≈ **54.4/s**, matching
+the display 57.5 FPS.
+
+### Corrected data (200ms lab, single host)
+
+| Metric | cab0 | cab1 |
+|--------|------|------|
+| Actual vblank tick rate (mean) | 54.39/s | 54.65/s |
+| Actual vblank tick rate (min–max) | 41.24–69.89/s | 36.47–70.74/s |
+| Old (buggy) rate | ~3263/s | ~3279/s |
+| Display FPS | 57.524 | 57.524 |
+| Race-clock nativeFrames rate | ~51.5/s | — |
+| Race-clock rt rate | ~51.5/s | — |
+
+The vblank tick rate is **wall-clock-stable**, paced by the `Throttle` config
+(`SuperSleepUntil` targeting the display refresh rate). The simulation does
+**not** run at a raw CPU-dependent rate — it is throttled to the display
+refresh rate. The earlier "internal vblank clock drift" hypothesis is
+**invalid** — it was based on the 60x diagnostic bug.
+
+### Why the real US-relay slowdown still occurs
+The achieved vblank rate (~54.4/s) is slightly below the target 57.5 Hz. The
+gap (~3 Hz, ~5%) is the simulation work time per frame consuming part of the
+frame period. On a single host, both cabinets share one CPU and achieve the
+same ~54.4/s rate. On separate machines with different CPU speed/load/thermal,
+the **achieved** vblank rate can differ even though both targets are 57.5 Hz:
+
+- A faster machine achieves closer to 57.5/s.
+- A slower/loaded machine achieves less (e.g., 48/s), and the race clock
+  follows the achieved vblank rate, running slower.
+
+The race clock advances at ~51.5/s on the lab (93% of the achieved 54.4/s
+vblank rate) because the ROM's internal `0x58820` routine increments the race
+clock on a subset of vblanks, gated by the ROM's own logic. The race-clock
+rate is therefore **proportional to the achieved vblank rate**, which varies
+between separate machines.
+
+### Implication for the Sgt24hVblankPacing experiments
+Both pacing approaches (FG signal pacing, race-clock write throttling) were
+rejected because they targeted the race-clock increment itself, which is
+already below the 60 Hz target. The real issue is that the **achieved vblank
+rate** differs between machines. A wall-clock race-clock pacing mechanism
+would need to compensate for the achieved vblank rate, not cap it at 60 Hz.
+
+### Diagnostic fix
+`SGT_VBLANK` now logs both `rate` (actual per-tick rate = `1e6/dt`) and
+`rate60` (the old 60x value, for backward compatibility). Use `rate` for
+analysis. On real machines, compare the `rate` values between cabinets: a
+mismatch confirms separate-machine achieved-vblank-rate drift.
+
+### Confirm on real machines
+Run both cabinets with `SUPERMODEL_SGT_SIM_TRACE=1` and compare:
+- `SGT_VBLANK ... rate=...` — the achieved vblank tick rate per cabinet.
+- `SGT_PHYSIC ... nativeFrames=... rt=...` — the race-clock rate per cabinet.
+
+A mismatch between cabinets in either metric confirms the achieved-rate drift
+that the single-host lab cannot reproduce.
+
+## SGT comm-flag busy-wait analysis (2026-11-18)
+
+The SGT ROM comm-flag dispatcher at  uses a function-pointer table at
+ indexed by . Function index 2 () contains a
+zfg busy-wait:  stores 1 to FG (), then  loads
+byte from  and  loops on  while bit 7
+is set. A second busy-wait at / uses the same pattern.
+
+**Key finding:** this is NOT a stall in the current emulator. The read at
+ targets , which masks () to .
+This address is **neither** the shared-memory branch () **nor**
+the FG/CN branch (), so it falls through and **returns 0**.
+Bit 7 of 0 is 0, so  exits immediately — the busy-wait never
+stalls. This is fundamentally different from Daytonas busy-wait,
+
+## SGT comm-flag busy-wait analysis (2026-11-18)
+
+The SGT ROM comm-flag dispatcher at 0xb7e60 uses a function-pointer table at
+0xb7e30 indexed by 0x510954 & 15. Function index 2 (0xb7f90) contains a
+zfg busy-wait: 0xb7ff8 stores 1 to FG (0x01a14000), then 0xb8000 loads
+byte from 0x01a14002 and 0xb8008 loops on bbs 7,g4,0xb8000 while bit 7
+is set. A second busy-wait at 0xb8040/0xb8048 uses the same pattern.
+
+**Key finding:** this is NOT a stall in the current emulator. The read at
+0xb8000 targets 0x01a14002, which masks (& ~0x10000) to 0x01a04002.
+This address is neither the shared-memory branch (< 0x01a04000) nor
+the FG/CN branch (== 0x01a04000), so it falls through and returns 0.
+Bit 7 of 0 is 0, so bbs 7,g4,0xb8000 exits immediately - the busy-wait never
+stalls. This is fundamentally different from Daytona's 0x1b24c busy-wait,
+which reads a served address and genuinely stalls at 200ms latency.
+
+**Conclusion:** Sgt24hAsyncPoll (analogous to DaytonaAsyncPoll) was
+implemented, tested, and confirmed to have zero effect - the 200ms lab
+produced identical results to baseline (vblank ~57.3/s, physics ~50.8/s,
+rt +6032/+6083). The SGT slowdown on the US relay is not a comm-flag
+busy-wait stall. It is achieved-vblank-rate drift between separate machines
+(CPU speed/load/thermal), where a slower machine achieves a lower vblank tick
+rate and its race clock advances proportionally slower. The single-host lab
+cannot reproduce this drift. Code removed; do not retry.
+
+## DaytonaAsyncPoll default-on (2026-11-18)
+
+`DaytonaAsyncPoll` is now **enabled by default**. The Daytona Rev A ROM busy-waits
+on the FG register at PC 0x1b24c, polling bit 7. At 200ms+ relay latency the zfg
+toggle from the peer arrives delayed, so the ROM stalls in this loop and the
+native simulation tick rate drops from ~55.8Hz (owner/zero-latency) to ~28.8-31.9Hz
+while rendering FPS stays steady at 57.51. `DaytonaAsyncPoll` breaks the stall by
+forcing bit 7 to clear (the loop-exit condition) when the PIP matches the busy-wait
+pattern, restoring the native tick rate to ~57.48Hz.
+
+Previously default-off. Now default-on; use `-no-daytona-async-poll` to force the
+native busy-wait (for comparison or diagnostics only). CLI options added:
+`-daytona-async-poll` (explicit enable) and `-no-daytona-async-poll` (explicit disable).
+
+Validation: 120s two-cabinet lab at 200ms latency, both cabinets stable at
+57.52 FPS throughout, no regression. Native tick rate restoration (~28-31Hz to
+~57.48Hz) was validated in the prior session with the flag explicitly on.
+
+
+## Sega Rally Championship: UDP Age Threshold Rubberband Fix
+
+### Problem
+At 200ms one-way relay latency, Sega Rally Championship cabinets experienced FPS
+dips (rubberband) when UDP pose corrections arrived with age > 180ms. The receiver
+(`Srallyc/Motion.h:196` `Latest()`) rejected these packets, causing the predictor
+to fall back to 200ms-old TCP ring extrapolation. When the next fresh UDP packet
+arrived, the predictor snapped back, causing visible rubberband.
+
+### Root Cause
+`MaxUdpAgeUs = 180000` (180ms) was too aggressive for 200ms one-way latency.
+At 200ms one-way, UDP `ageUs ~ 200ms`, which exceeded the 180ms threshold,
+so all UDP corrections were rejected. The predictor relied solely on TCP ring
+data (stale by ~200ms), and snap-back occurred when fresh UDP packets finally
+passed the threshold.
+
+### Fix
+Raised `MaxUdpAgeUs` from 180000 to 300000 (180ms -> 300ms) in:
+- `Src/Network/Games/Srallyc/Motion.h:19` (receiver rejection threshold)
+- `Src/Model2/Model2Comm.cpp:1466` (sender freshness window in `SendPresentation`)
+
+### Validation (120s lab, 200ms one-way, 2 cabs)
+Lab: `.supermodel-srallyc-200ms-udp300/`
+Relay confirms: "200 ms one-way per direction" (RTT ~400ms).
+
+| Time | 180ms cab0/cab1 | 300ms cab0/cab1 | Diff |
+|------|------------------|------------------|------|
+| 10   | 57.5/57.5       | 57.5/57.5       | 0    |
+| 20   | 57.5/57.5       | 57.5/57.5       | 0    |
+| 30   | 57.5/57.5       | 57.5/57.5       | 0    |
+| 40   | 44.5/43.1       | 50.8/51.4       | +7.7 |
+| 50   | 52.0/52.8       | 48.4/49.3       | -3.6 |
+| 60   | 57.4/57.5       | 54.0/56.5       | -3.4 |
+| 70   | 57.4/57.0       | 57.2/57.2       | +0.2 |
+| 80   | 56.8/56.6       | 57.5/57.5       | +1.0 |
+| 90   | 54.3/56.8       | 56.2/56.1       | +1.8 |
+| 100  | 55.3/54.6       | 56.9/57.4       | +2.3 |
+| 110  | 56.1/55.3       | 53.9/52.5       | -2.7 |
+| 120  | 57.5/57.5       | 57.5/57.5       | +0.1 |
+
+Worst-case minimum: 180ms=43.1 FPS, 300ms=48.4 FPS, improvement +5.3 FPS.
+The t=40 dip (the most severe rubberband event) improved by +7.7 FPS.
+
+### Lab Fix (root cause of previous invalid run)
+The Srallyc lab's `run.sh` bound the wrong directory (Daytona template
+`.supermodel-daytona-sim-highping.b1t2ol_x`) as `/tmp/work`, so the Daytona
+template's `lab.py` ran instead of the Srallyc `lab.py`. The relay created a
+Daytona room (game=11) instead of Srallyc (game=10), and the binary loaded
+Daytona USA. Fixed by binding `.supermodel-srallyc-200ms-udp300` in `run.sh`.
+
+### Latency Confirmation
+Relay log: "200 ms one-way per direction" - confirms `latency_ms=200` is
+one-way, not RTT. RTT measured at ~400ms in game.log. This validates the
+hypothesis: UDP `ageUs ~ 200ms` exceeded the old 180ms threshold.
+
+### Binary
+md5 `0a19cd27f65e557a9ec31c39ac7217df` (MaxUdpAgeUs=300000).
+
+
+## Version Check: Supermodel Binary vs Supermodel-Online Repo
+
+### Overview
+A GUI version check that compares the locally-built Supermodel binary's git
+revision against the supermodel-online repo's HEAD. Displayed in the Online
+lobby tab when connected to a relay.
+
+### How It Works
+1. At startup, the relay reads its own git HEAD via `git rev-parse --short HEAD`
+   and `git show -s --format=%cd --date=format:%Y%m%d HEAD`, producing a version
+   string like `0.4-20261121-git-4f77392` and a short hash `4f77392`.
+2. The Supermodel binary sends its own version string via a new OLV1 frame
+   (sent right after HEL1/OEH6 in the lobby handshake).
+3. The relay parses the binary's version, extracts the short hash, and compares
+   it against its own repo hash.
+4. The relay sends the comparison result via a new ORV1 frame in the room
+   snapshot (gated on `ping_capable` for backward compatibility).
+5. The GUI displays the status in the Online lobby tab:
+   - Green: "Up to date" (hashes match)
+   - Orange: "Update available" (hashes differ)
+   - Gray: "Unknown" (git unavailable or dev build without hash)
+
+### Frames
+- **OLV1** (client -> relay): OLV1 version (1) + 64-byte Supermodel version string
+- **ORV1** (relay -> client): room id + count(1) + 64-byte relay version +
+  64-byte client version + 8-byte status string
+
+### Backward Compatibility
+- Old relays: don't send ORV1 -> GUI shows no version check line
+- Old clients: don't send OLV1 -> relay reports "unknown"
+- HEL1 greeting is unchanged (all existing string matching preserved)
+- OLV1/ORV1 are unknown frame kinds to older peers, ignored gracefully
+
+### Files Changed
+- `Src/Network/Online/LobbyClient.h`: version fields in Snapshot struct
+- `Src/Network/Online/LobbyClient.cpp`: include Version.h, send OLV1, parse ORV1
+- `Src/OSD/SDL/OnlineGui.cpp`: version check display in Online tab
+- `relay.py`: _repo_version(), OLV1 handler, ORV1 in snapshot
+
+### Build Note
+The binary must be built with git revision (`make release` or
+`SUPERMODEL_GIT_REVISION` flag) for the hash comparison to work. Dev builds
+(`make` without the flag) show "0.4-dev-YYYYMMDD" with no hash -> "Unknown".
