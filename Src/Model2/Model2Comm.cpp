@@ -1113,7 +1113,9 @@ void CModel2Comm::PublishIndyRaceMotion(int frameOffset,uint64_t now,bool drivin
       const auto selected=VisibleMotion(ordered,visible[s],udp,controlTick,now);
       visible[s]=selected;
       m_indyAppliedMotion[r][s]={selected.tick,selected.sampleUs};
-      if (selected.motion.bytes==native.bytes) continue;
+      // Always mirror the selected motion into the guest view. Skipping the
+      // write when it equals the native row left a stale overlay value on
+      // screen once UDP corrections stopped, freezing the car.
       if (!m_indyGuestViewActive)
       {
         std::copy_n(m_shared+IndyMotion::Rx,m_indyGuestView.size(),m_indyGuestView.data());

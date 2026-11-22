@@ -145,7 +145,14 @@ inline Known VisibleMotion(const Known& ordered,const Known& previous,const Know
     return gap<=MaxTickAhead && (gap ? IndyPoseUdp::Aligned(earlier.motion.Pose(),later.motion.Pose(),gap) :
                                       earlier.motion.bytes==later.motion.bytes);
   };
+  // A periodic full TCP row can be older than the continuous UDP position
+  // already on screen. Never roll the car back to that stale anchor: when the
+  // previous pose is a continuous, same-state lead, keep it as the base and
+  // let the loop advance from there. A state change (reset/correction) still
+  // takes the ordered row.
   Known visible=ordered;
+  if (previous.motion && previous.tick>ordered.tick && previous.motion.state==ordered.motion.state &&
+      follows(ordered,previous)) visible=previous;
   for (const Known* candidate:{&previous,&udp})
   {
     if (!candidate->sampleUs || now<candidate->sampleUs || now-candidate->sampleUs>LeaveFreshUs ||
