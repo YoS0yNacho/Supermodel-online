@@ -269,7 +269,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
     {
       const std::string sv=SupermodelVersion();
       std::vector<uint8_t> vbody;Put(vbody,1);Text(vbody,sv.c_str(),64);
-      output.insert(output.end(),Frame("OLV1",vbody).begin(),Frame("OLV1",vbody).end());
+      const auto olv1=Frame("OLV1",vbody);output.insert(output.end(),olv1.begin(),olv1.end());
     }
     std::vector<uint8_t> input; size_t sent=0;
     bool bindPending=false,armPending=false;
