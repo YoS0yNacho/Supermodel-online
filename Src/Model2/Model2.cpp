@@ -1407,9 +1407,18 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
         uint8_t fg=m_comm.ReadFG();
         // Rev A race-only native busy wait, not a fabricated RX application.
         // Preserve the last native row and all real receive generations.
-        if(m_config["DaytonaAsyncPoll"].ValueAsDefault<bool>(true) &&
-           m_comm.DaytonaOnline() && m_running==CPU_I960 &&
-           m_i960.GetPIP()==0x1b24c && bool(DaytonaScene()) &&
+        const bool asyncPollOn = m_config["DaytonaAsyncPoll"].ValueAsDefault<bool>(true) &&
+           m_comm.DaytonaOnline() && m_running==CPU_I960;
+        // DaytonaScene() is deliberately NOT required here. Requiring the full
+        // race-state m_workRAM snapshot creates a deadlock under real latency:
+        // the network-gated FG bit throttles the guest so it never reaches the
+        // RaceState scene, DaytonaScene() stays false, the override never
+        // engages, and the FG bit stays network-gated. The PIP==0x1b24c check
+        // plus the exact polling-loop program bytes already confirm the Rev A
+        // race busy-wait, so decouple the FG bit to the native gate unconditionally
+        // within that loop.
+        if(asyncPollOn &&
+           m_i960.GetPIP()==0x1b24c &&
            m_program.size()>0x1b25c &&
            Get32(m_program,0x1b240)==0x80183000 && Get32(m_program,0x1b244)==0x540054 &&
            Get32(m_program,0x1b24c)==0x80227400 && Get32(m_program,0x1b250)==0x4002 &&
