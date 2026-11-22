@@ -2160,7 +2160,7 @@ class Hub:
             self.snapshot(c)
             return
         if kind == b'OLV1' and len(body) == 68:
-            c['supermodel_version'] = text(body, 64)
+            c['supermodel_version'] = text(body, '')
             sv = c['supermodel_version']
             c['supermodel_hash'] = sv.rsplit('-git-', 1)[-1] if '-git-' in sv else ''
         if kind == b'OLQ2' and len(body) == POLL2.size and c.get('ping_capable'):
