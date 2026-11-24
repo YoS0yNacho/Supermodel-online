@@ -198,26 +198,37 @@ public:
     }
     const auto stale=frame-m_seen;
     if (!m_warm || stale>=9 || m_velocity.Length()<.025) return Seed(r,native,frame);
-    // Estimate latency from the latest received UDP sample.
-    if (latest.received && frameUs>0.0) {
-      const double latFrames=double(now-latest.received)/frameUs;
-      if (latFrames>0.0 && latFrames<100.0)
-        m_latencyFrames=m_latencyFrames*0.9+latFrames*0.1;
-      m_latencyFrames=std::min(m_latencyFrames,MaxLatencyFrames);
-    }
     const double elapsed=double(frame-m_frame);
-    const double boost=std::clamp((9.-double(stale))/4.,0.,1.);
+    // Total sample age in frames: capture age + network delay + local
+    // staleness. This is the key lead on high pings — the car must be
+    // projected ahead by the total delay, not just by the elapsed frame.
+    // The old boost=clamp((9-stale)/4) decreased with staleness, which
+    // made high-ping cars project LESS ahead and look choppy.
+    double sampleAge=0.0;
+    if (latest.received && frameUs>0.0) {
+      const double totalAge=double(latest.age+(now-latest.received))/frameUs;
+      sampleAge=std::clamp(totalAge,0.0,EffectiveMaxLeadFrames());
+      if (totalAge>0.0 && totalAge<100.0)
+        m_latencyFrames=m_latencyFrames*0.9+totalAge*0.1;
+      m_latencyFrames=std::min(m_latencyFrames,MaxLatencyFrames);
+    } else {
+      // No UDP: use TCP staleness as the latency estimate.
+      sampleAge=std::clamp(double(stale),0.0,EffectiveMaxLeadFrames());
+      m_latencyFrames=std::max(m_latencyFrames*0.95,double(stale));
+    }
     // Lead confidence: reduce prediction during sharp turns and speed changes.
     const double confidence=LeadConfidence(m_chordVelocity,m_velocity);
-    // Arc-based lead: follow curved motion instead of pure linear coast.
+    // Arc-based lead: project ahead by the total sample age.
     const double leadFrames=EffectiveMaxLeadFrames();
-    const double softLead=SoftCap(boost*leadFrames*confidence+elapsed,leadFrames,2.0);
+    const double softLead=SoftCap(sampleAge*confidence+elapsed,leadFrames,2.0);
     const Vec arcDisp=ArcLead(m_velocity,m_omega,softLead);
     const Vec coast=m_tcp.p+arcDisp;
     const double yawCoast=m_tcp.yaw+m_turn*softLead;
-    // Carry display velocity for continuity, then converge on the live actor.
-    m_tcp=Bound(native,{native.p+(coast-native.p)*.40,
-                         native.yaw+Turn(yawCoast,native.yaw)*.30},MaxShift*.70);
+    // Carry display velocity for continuity. Blend less toward the native
+    // pose when the lead is large, so high-ping cars project further ahead.
+    const double blendFactor=std::clamp(.40-.15*(sampleAge/leadFrames),.15,.40);
+    m_tcp=Bound(native,{native.p+(coast-native.p)*blendFactor,
+                         native.yaw+Turn(yawCoast,native.yaw)*blendFactor},MaxShift*.70);
     // UDP correction with smooth weight blending and exponential decay.
     const auto udp=Latest(r,latest,now);
     Pose baseTarget=m_tcp;
@@ -225,8 +236,9 @@ public:
       // Aim at the newer UDP pose rather than projecting several frames
       // based on nominal refresh.
       const Vec vel=(udp.row.pose.p-r.pose.p)*(1.0/double(udp.gap));
-      const double coastFrac=std::clamp((double(udp.age)-double(latest.uncertainty))/frameUs,0.,1.);
-      const Pose newer=Bound(m_tcp,{udp.row.pose.p+vel*coastFrac,udp.row.pose.yaw+m_turn*coastFrac},1.7);
+      const double coastFrac=std::clamp(double(udp.age)/frameUs,0.,double(leadFrames));
+      const double corrLimit=std::clamp(.40*(1.0+sampleAge),1.7,MaxShift);
+      const Pose newer=Bound(m_tcp,{udp.row.pose.p+vel*coastFrac,udp.row.pose.yaw+m_turn*coastFrac},corrLimit);
       m_udpWeight=std::min(m_udpWeight+elapsed*.20,1.0);
       baseTarget.p=m_tcp.p+(newer.p-m_tcp.p)*m_udpWeight;
       baseTarget.yaw=m_tcp.yaw+Turn(newer.yaw,m_tcp.yaw)*m_udpWeight;
