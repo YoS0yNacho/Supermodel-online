@@ -493,6 +493,11 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
           if(ImGui::Checkbox("Disable car collisions (no crashes)",&noCollisions))client.SetRoomOptions(room->id,(room->options&~NativeRoomSettings::NoCollisions)|(noCollisions?NativeRoomSettings::NoCollisions:0u));
           ImGui::EndDisabled();
           ImGui::TextDisabled("All cars ghost through each other; walls still collide.");
+          bool noPitstop=NativeRoomSettings::HasNoPitstop(room->game,room->options);
+          ImGui::BeginDisabled(room->master!=s.self || frozen || !room->optionsSupported);
+          if(ImGui::Checkbox("Pit stops off (open lane shortcut)",&noPitstop))client.SetRoomOptions(room->id,(room->options&~NativeRoomSettings::NoPitstop)|(noPitstop?NativeRoomSettings::NoPitstop:0u));
+          ImGui::EndDisabled();
+          ImGui::TextDisabled("The pit lane stays open; use it as a shortcut.");
           ImGui::TextDisabled("Master only; update every client and relay for these options.");
         }
         if(NativeRoomSettings::Supported(room->game))ImGui::TextDisabled("Applied at launch for this online session only. Offline NVRAM is unchanged.");
