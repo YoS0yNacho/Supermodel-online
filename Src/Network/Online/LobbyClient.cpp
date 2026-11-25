@@ -422,15 +422,35 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Require(U32(b,0)==room.id && count==room.members.size() && b.size()==8+8*count);
           for(unsigned i=0;i<count;++i){Require(U32(b,8+8*i)==room.members[i].id);room.members[i].pingMs=std::min<uint32_t>(U32(b,12+8*i),9999);}
         } else if(kind=="ORO1") {
-          Require(collecting && !pending.rooms.empty() && b.size()==8);
-          auto& room=pending.rooms.back();Require(U32(b,0)==room.id && !room.optionsSupported);
-          Require(room.game!=Indy500Online::Game || indyRoomRelay);
-          Require(room.game!=SrallycOnline::Game || srallycRelay);
-          Require(room.game!=Sgt24hOnline::Game || sgt24hRelay);
-          Require(room.game!=DaytonaOnline::Game || daytonaRelay);
-          room.options=U32(b,4);Require(NativeRoomSettings::Valid(room.game,room.options));
-          Require(!Model2RelayGame(room.game) || !NativeRoomSettings::HasVideo60(room.options) || model2VideoRelay);
-          room.optionsSupported=true;
+          Require(b.size()==8);
+          const uint32_t optRoom=U32(b,0);
+          const uint32_t optValue=U32(b,4);
+          if(collecting && !pending.rooms.empty())
+          {
+            auto& room=pending.rooms.back();Require(optRoom==room.id && !room.optionsSupported);
+            Require(room.game!=Indy500Online::Game || indyRoomRelay);
+            Require(room.game!=SrallycOnline::Game || srallycRelay);
+            Require(room.game!=Sgt24hOnline::Game || sgt24hRelay);
+            Require(room.game!=DaytonaOnline::Game || daytonaRelay);
+            room.options=optValue;Require(NativeRoomSettings::Valid(room.game,room.options));
+            Require(!Model2RelayGame(room.game) || !NativeRoomSettings::HasVideo60(room.options) || model2VideoRelay);
+            room.optionsSupported=true;
+          }
+          else
+          {
+            // Live option update broadcast by the relay after the initial snapshot.
+            Require(!collecting);
+            std::lock_guard<std::mutex> l(s->mutex);
+            const auto roomIt=std::find_if(s->view.rooms.begin(),s->view.rooms.end(),[&](const Room& r){return r.id==optRoom;});
+            Require(roomIt!=s->view.rooms.end() && roomIt->optionsSupported);
+            Require(roomIt->game!=Indy500Online::Game || indyRoomRelay);
+            Require(roomIt->game!=SrallycOnline::Game || srallycRelay);
+            Require(roomIt->game!=Sgt24hOnline::Game || sgt24hRelay);
+            Require(roomIt->game!=DaytonaOnline::Game || daytonaRelay);
+            Require(NativeRoomSettings::Valid(roomIt->game,optValue));
+            Require(!Model2RelayGame(roomIt->game) || !NativeRoomSettings::HasVideo60(optValue) || model2VideoRelay);
+            roomIt->options=optValue;
+          }
         } else if(kind=="ORN1") {
           Require(collecting && !pending.rooms.empty() && b.size()>=12);
           auto& room=pending.rooms.back();const auto count=U32(b,8);
