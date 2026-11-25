@@ -3678,6 +3678,56 @@ bool CModel2::PrepareDaytonaRelayRole()
     m_comm.FailNativeLink("native settings backup RAM did not initialize");
     return false;
   }
+  // Session-only in-memory ROM patches for Daytona 1 race-rule options.
+  // m_program is the loaded main-CPU image; we patch it in memory (never the
+  // on-disk ROM). The original bytes are restored when an option is off so
+  // every session start re-applies the correct state.
+  auto daytonaPatch32 = [&](uint32_t addr, uint32_t orig, uint32_t patched, bool on)
+  {
+    if (addr + 4 > m_program.size()) return;
+    uint32_t v = on ? patched : orig;
+    for (int i = 0; i < 4; i++)
+      m_program[addr + i] = uint8_t(v >> (8 * i));
+  };
+  // No Pitstop: at 0xDF9C the original `ldos 0x13c(g13),r4` (3C 61 27 88)
+  // gates the automatic pit entry/service transition. Replace it with
+  // `b 0xe038` (9C 00 00 08) so the gate returns early and the pit-service
+  // state install never runs; the lane stays open as a shortcut.
+  daytonaPatch32(0xDF9C, 0x8827613C, 0x0800009C,
+                 NativeRoomSettings::HasNoPitstop(DaytonaOnline::Game, options));
+  // No Collision: skip human-human collision pairs before the solver.
+  // The pair-loop router at 0x147D0 (`cmpobne r7,r3,0x147F4`) is replaced
+  // with `b 0x030D84` to a 44-byte stub. The stub loads both car IDs and
+  // the human roster size from workRAM 0x501098; if both IDs are < size
+  // (both human) it branches to 0x147F8 (after the solver, at the loop-
+  // counter decrements) to skip separation/velocity/timer writes while
+  // preserving the loop counters. Otherwise it replicates the original
+  // routing (direct solver or swap path). CPU/wall contacts stay solid.
+  const bool noColl =
+      NativeRoomSettings::HasNoCollisions(DaytonaOnline::Game, options);
+  // Router: cmpobne r7,r3,0x147F4  ->  b 0x030D84
+  daytonaPatch32(0x147D0, 0x3538C024, 0x0801C5B4, noColl);
+  // Stub at 0x030D84 (44-byte zero run in the data area = 11 words).
+  static const uint32_t daytonaNoCollisionStub[11] = {
+    0x80266004, 0x90283000, 0x00501098, 0x5A016003, 0x13000010,
+    0x5A016004, 0x13000008, 0x08FE3A58, 0x5A00E007, 0x15FE3A4C,
+    0x08FE3A28,
+  };
+  for (int i = 0; i < 11; i++)
+    daytonaPatch32(0x030D84 + uint32_t(i) * 4, 0x00000000,
+                   daytonaNoCollisionStub[i], noColl);
+  // Write the human roster size (number of human cabinets) to the free
+  // workRAM slot 0x501098 so the stub can compare car IDs against it.
+  {
+    const unsigned dsize = m_comm.ReadShared(3);
+    if (m_comm.ReadShared(0) == 1 && dsize >= 2 &&
+        dsize <= DaytonaOnline::Cabinets)
+    {
+      const uint32_t rv = uint32_t(dsize);
+      for (int i = 0; i < 4; i++)
+        m_workRAM[0x1098 + i] = uint8_t(rv >> (8 * i));
+    }
+  }
   m_daytonaRoleConfigured=true;
   if (m_daytonaBootstrapFrames)
   {

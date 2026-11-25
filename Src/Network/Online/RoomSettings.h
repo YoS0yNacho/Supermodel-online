@@ -13,12 +13,14 @@ namespace NativeRoomSettings {
 // Bit9 (512) is RealPlayers: no CPU cars; solo play is native time attack.
 // Bit10 (1024) is Video60: every cabinet emulates 60 Hz video instead of the
 // 57.524 Hz original rate; chosen by the master for the whole room.
-constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlayers=512, Video60=1024;
-constexpr uint32_t AllBits=2047; // Model 3 only
+// Bit12 (4096) is NoPitstop: keep the pit lane open as a shortcut; the
+// automatic pit entry/service transition is skipped for Daytona 1.
+constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlayers=512, Video60=1024, NoPitstop=4096;
+constexpr uint32_t AllBits=8191; // Model 3 only
 constexpr uint32_t IndyHandicap=1u<<11;
 constexpr uint32_t SrallycSettingsBits=Enabled|28u|224u;
 constexpr uint32_t IndySettingsBits=Enabled|28u|224u|IndyHandicap;
-constexpr uint32_t DaytonaSettingsBits=Enabled|28u|224u|RealPlayers|NoCollisions;
+constexpr uint32_t DaytonaSettingsBits=Enabled|28u|224u|RealPlayers|NoCollisions|NoPitstop;
 inline constexpr bool Model2Game(unsigned game){return game==Sgt24hOnline::Game || game==Indy500Online::Game || game==SrallycOnline::Game || game==DaytonaOnline::Game;}
 inline bool HasIndyHandicap(uint32_t options){return (options&IndyHandicap)!=0;}
 inline bool HasVideo60(uint32_t options){return (options&Video60)!=0;}
@@ -31,6 +33,7 @@ inline bool SupportsRaceModifiers(unsigned game){return BaseGame(game)<4 || game
 inline bool HasSecretCars(unsigned game,uint32_t options){return SupportsSecretCars(game) && (options&SecretCars);}
 inline bool HasRealPlayers(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&RealPlayers);}
 inline bool HasNoCollisions(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&NoCollisions);}
+inline bool HasNoPitstop(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&NoPitstop);}
 // Game 7 (dirtdvls) has no native settings: like Le Mans 24 only Video60 applies.
 inline bool Supported(unsigned game){return game<5 || game==6 || game==8 || game==Indy500Online::Game || game==SrallycOnline::Game || game==DaytonaOnline::Game;}
 inline unsigned CarLimit(unsigned game){return game<2?16:game==8?16:game<4?8:game==DaytonaOnline::Game?8:0;}
