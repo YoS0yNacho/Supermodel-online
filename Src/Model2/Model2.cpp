@@ -1017,7 +1017,20 @@ uint8_t CModel2::IORead(unsigned offset)
     {
       switch (offset)
       {
-      case 1:  return In0Read();    // port B
+      case 1:  {
+        // port B: the Start input (active-low, bit 0x10 reads 1 when pressed).
+        // With Real players only, fake Start pressed during menu/setup screens
+        // so the game treats the car as a real player (no CPU cars), matching
+        // Daytona 2's hold-Start-at-at/mt UX. Race states are left untouched.
+        uint8_t v = In0Read();
+        if (m_daytonaRealPlayers)
+        {
+          const uint32_t st = Get32(m_workRAM, DAYTONA_CHOOSE_STATE);
+          if (st != 0x00080000u && st != 0x00100000u && st != 0x00400000u)
+            v |= 0x10;
+        }
+        return v;
+      }
       case 2:  return m_in[1];      // port C
       case 3:                       // port D (or the drive board)
         if (m_wheelBoardReplies)
@@ -3648,13 +3661,18 @@ bool CModel2::PrepareDaytonaRelayRole()
 {
   const unsigned seat=m_comm.NativeRelaySeat();
   if (!seat) return false; // do not start a different saved role before Ready
-  const unsigned options=m_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0);
+  const unsigned options=m_config["NetNativeRoomOptions"]
+    .ValueAsDefault<unsigned>(0);
+  const unsigned carNumber=m_config["NetNativeCarNumber"]
+    .ValueAsDefault<unsigned>(0);
+  m_daytonaRealPlayers=m_config["NetRoomRealPlayers"]
+    .ValueAsDefault<bool>(false);
   if (!NativeRoomSettings::Valid(DaytonaOnline::Game,options))
   {
     m_comm.FailNativeLink("invalid Daytona room settings");
     return false;
   }
-  if (!DaytonaOnline::ConfigureRelayBackup(m_backupRAM.data(),m_backupRAM.size(),m_dpram.data(),m_dpram.size(),seat,options))
+  if (!DaytonaOnline::ConfigureRelayBackup(m_backupRAM.data(),m_backupRAM.size(),m_dpram.data(),m_dpram.size(),seat,carNumber,options))
   {
     if (++m_daytonaBootstrapFrames<1800) return true;
     m_comm.FailNativeLink("native settings backup RAM did not initialize");

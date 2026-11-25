@@ -26,7 +26,7 @@ inline bool ValidBlock(const uint8_t* block)
     BackupChecksum(block)==(uint16_t(block[8])|(uint16_t(block[9])<<8));
 }
 inline bool ConfigureRelayBackup(uint8_t* ram,size_t bytes,uint8_t* dpram,size_t ioBytes,
-                                 unsigned seat,uint32_t options)
+                                 unsigned seat,unsigned carNumber,uint32_t options)
 {
   if (!ram || bytes<2*BlockBytes || !dpram || ioBytes<IoOffset+BlockBytes ||
       !seat || seat>Cabinets || !NativeRoomSettings::Valid(Game,options)) return false;
@@ -43,6 +43,7 @@ inline bool ConfigureRelayBackup(uint8_t* ram,size_t bytes,uint8_t* dpram,size_t
   edited[0x0c]=seat==1?0:1;
   edited[0x1c]=uint8_t(NativeRoomSettings::Mode(options));
   edited[0x20]=uint8_t(NativeRoomSettings::Difficulty(options));
+  if(carNumber)edited[0x7c]=uint8_t(carNumber);
   const auto sum=BackupChecksum(edited.data());
   edited[8]=uint8_t(sum);edited[9]=uint8_t(sum>>8);
   std::copy(edited.begin(),edited.end(),ram);

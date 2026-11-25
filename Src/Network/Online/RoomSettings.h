@@ -18,7 +18,7 @@ constexpr uint32_t AllBits=2047; // Model 3 only
 constexpr uint32_t IndyHandicap=1u<<11;
 constexpr uint32_t SrallycSettingsBits=Enabled|28u|224u;
 constexpr uint32_t IndySettingsBits=Enabled|28u|224u|IndyHandicap;
-constexpr uint32_t DaytonaSettingsBits=Enabled|28u|224u;
+constexpr uint32_t DaytonaSettingsBits=Enabled|28u|224u|RealPlayers|NoCollisions;
 inline constexpr bool Model2Game(unsigned game){return game==Sgt24hOnline::Game || game==Indy500Online::Game || game==SrallycOnline::Game || game==DaytonaOnline::Game;}
 inline bool HasIndyHandicap(uint32_t options){return (options&IndyHandicap)!=0;}
 inline bool HasVideo60(uint32_t options){return (options&Video60)!=0;}
@@ -27,13 +27,13 @@ inline bool HasHornet(unsigned game,uint32_t options){return game==0 && (options
 // share every native setting of their stock game (4 and 3).
 inline unsigned BaseGame(unsigned game){return game==6?4:game==8?3:game;}
 inline bool SupportsSecretCars(unsigned game){return BaseGame(game)==3;}
-inline bool SupportsRaceModifiers(unsigned game){return BaseGame(game)<4;}
+inline bool SupportsRaceModifiers(unsigned game){return BaseGame(game)<4 || game==DaytonaOnline::Game;}
 inline bool HasSecretCars(unsigned game,uint32_t options){return SupportsSecretCars(game) && (options&SecretCars);}
 inline bool HasRealPlayers(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&RealPlayers);}
 inline bool HasNoCollisions(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&NoCollisions);}
 // Game 7 (dirtdvls) has no native settings: like Le Mans 24 only Video60 applies.
 inline bool Supported(unsigned game){return game<5 || game==6 || game==8 || game==Indy500Online::Game || game==SrallycOnline::Game || game==DaytonaOnline::Game;}
-inline unsigned CarLimit(unsigned game){return game<2?16:game==8?16:game<4?8:0;}
+inline unsigned CarLimit(unsigned game){return game<2?16:game==8?16:game<4?8:game==DaytonaOnline::Game?8:0;}
 inline unsigned DifficultyCount(unsigned game){return BaseGame(game)<4 || game==SrallycOnline::Game || game==DaytonaOnline::Game?4:BaseGame(game)==4 || game==Indy500Online::Game?5:0;}
 inline unsigned ModeCount(unsigned game){return game<2?7:(BaseGame(game)<4 || game==SrallycOnline::Game || game==DaytonaOnline::Game)?3:BaseGame(game)==4 || game==Indy500Online::Game?2:0;}
 inline unsigned Difficulty(uint32_t options){return (options>>2)&7;}

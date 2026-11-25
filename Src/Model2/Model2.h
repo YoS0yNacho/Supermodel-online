@@ -298,6 +298,7 @@ private:
   unsigned m_indyBootstrapFrames = 0;
   bool m_srallycRoleConfigured = false, m_daytonaRoleConfigured = false;
   unsigned m_daytonaBootstrapFrames = 0;
+  bool m_daytonaRealPlayers = false;
   bool m_sgt24hRoleConfigured = false;
   unsigned m_sgt24hBootstrapFrames = 0;
   uint64_t m_sgt24hSimTicks=0,m_sgt24hPhysicsCalls=0;
