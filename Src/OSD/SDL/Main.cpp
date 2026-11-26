@@ -2720,7 +2720,9 @@ static int RunSession(int argc, char **argv)
       if (!RelayProtocol::ParseEndpoint(relay, host, port) || (!gameRelay.empty() && gameRelay != relay) ||
           !RelayProtocol::ParseTicket(s_runtime_config["NetRelayTicket"].ValueAsDefault<std::string>(""), ticket) ||
           !NativeRoomSettings::Valid(onlineGame,s_runtime_config["NetNativeRoomOptions"].ValueAsDefault<unsigned>(0)) ||
-          s_runtime_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0) == 0)
+          // Only games with a car limit (Daytona) need a CAR NUMBER. Indy 500, Sega Rally
+          // and Sgt24h have no car limit, so the relay assigns 0 and that is valid.
+          (NativeRoomSettings::CarLimit(onlineGame) && (s_runtime_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0) == 0 || s_runtime_config["NetNativeCarNumber"].ValueAsDefault<unsigned>(0) > NativeRoomSettings::CarLimit(onlineGame))))
       {
         ErrorLog("%s needs a central-relay Online ticket and valid room settings; no car-number override.", Online::Titles[onlineGame]);
         return 1;
