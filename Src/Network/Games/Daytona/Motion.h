@@ -191,7 +191,7 @@ public:
         }
       } else m_omega=0.0;
       m_lastDelta=delta;
-      m_velocity=m_warm ? m_velocity*.53+v*.47 : v;
+      m_velocity=v;
       m_chordVelocity=v;
       m_turn=m_warm ? m_turn*.61+turn*.39 : turn;
       m_warm=true;m_seen=frame;m_receivedFrame=frame;m_row=r;
@@ -251,8 +251,11 @@ public:
     // Decays exponentially so small errors blend slowly without a visible
     // nudge (the micro rubber band of relays), while large corrections
     // (collisions, respawns) still close quickly.
-    const Vec correction=m_displayed.p-baseTarget.p;
-    const double correctionYaw=Turn(m_displayed.yaw,baseTarget.yaw);
+    // The base target moves on its own each frame. Add back that expected motion
+    // so only real jumps (UDP corrections, respawns) become error; otherwise steady
+    // motion is folded into the error and the display trails by velocity*tau.
+    const Vec correction=m_displayed.p-baseTarget.p+m_velocity*elapsed;
+    const double correctionYaw=Turn(m_displayed.yaw,baseTarget.yaw)+m_turn*elapsed;
     const double tau=EffectiveCorrectionTau(correction.Length(),m_velocity.Length());
     const double e=std::exp(-elapsed/tau);
     const Pose shown={baseTarget.p+correction*e,

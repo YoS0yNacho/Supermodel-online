@@ -20,7 +20,10 @@ async def room_view(client, room_id):
             else:
                 _, shared, n = struct.unpack_from('<III', body)
                 assert len(body) == 12 + n * 8
-                assert all(struct.unpack_from('<II', body, 12 + i * 8)[1] == 0 for i in range(n))
+                # Each row is (member id, native car number): 0 = none, else unique 1..8.
+                cars = [struct.unpack_from('<II', body, 12 + i * 8)[1] for i in range(n)]
+                nonzero = [c for c in cars if c]
+                assert all(c <= 8 for c in cars) and len(set(nonzero)) == len(nonzero)
 
 
 async def await_view(client, room_id, expected):

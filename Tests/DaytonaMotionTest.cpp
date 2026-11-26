@@ -22,7 +22,7 @@ static void BackupCases()
   std::array<uint8_t,0x800> dpram;dpram.fill(0xff);
   const auto blankIo=dpram;
   auto backup=ram;
-  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),2,6) && ram==backup);
+  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),2, 0,6) && ram==backup);
   auto* valid=ram.data()+Backup::BlockBytes;
   std::copy(Backup::Signature.begin(),Backup::Signature.end(),valid);
   std::fill(valid+10,valid+Backup::BlockBytes,0);
@@ -36,10 +36,10 @@ static void BackupCases()
       {
         ram=backup;dpram=blankIo;
         const auto opts=Room::WithMode(Room::WithDifficulty(Room::Defaults(Backup::Game),d),m);
-        assert(Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),seat,opts));
+        assert(Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),seat, 0,opts));
         auto ram60=backup;
         auto io60=blankIo;
-        assert(Backup::ConfigureRelayBackup(ram60.data(),ram60.size(),io60.data(),io60.size(),seat,opts | Room::Video60));
+        assert(Backup::ConfigureRelayBackup(ram60.data(),ram60.size(),io60.data(),io60.size(),seat, 0,opts | Room::Video60));
         assert(ram60==ram && io60==dpram);
         assert(Backup::ValidBlock(ram.data()) && std::equal(ram.begin(),ram.begin()+0x80,ram.begin()+0x80));
         assert(std::equal(ram.begin(),ram.begin()+0x80,dpram.begin()+Backup::IoOffset));
@@ -51,17 +51,21 @@ static void BackupCases()
         assert(std::equal(ram.begin()+0x100,ram.end(),backup.begin()+0x100));
       }
   ram=backup;
-  for (unsigned options : {0u, 1u, 6u|256u, 6u|512u, 6u|2048u, 2u|(4u<<2), 6u|(3u<<5)})
-    assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),1,options) && ram==backup);
-  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),9,6) && ram==backup);
-  assert(!Backup::ConfigureRelayBackup(ram.data(),0xff,dpram.data(),dpram.size(),1,6) && ram==backup);
+  for (unsigned options : {0u, 1u, 6u|8192u, 6u|2048u, 2u|(4u<<2), 6u|(3u<<5)})
+    assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),1, 0,options) && ram==backup);
+  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),9, 0,6) && ram==backup);
+  assert(!Backup::ConfigureRelayBackup(ram.data(),0xff,dpram.data(),dpram.size(),1, 0,6) && ram==backup);
+  // Daytona flags No Collisions (256), Real Players (512), No Pitstop (4096) and a car number are accepted.
+  ram=backup;dpram=blankIo;
+  assert(Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),2,5,6|256u|512u|4096u));
+  assert(Backup::ValidBlock(ram.data()) && ram[0x7c]==5 && ram[0x20]==1);
   // A saved I/O record alone can recover bad backup RAM, but not if all
   // copies fail the signature/CRC. No unrelated I/O bytes are changed.
   ram.fill(0xff);
-  assert(Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),3,6));
+  assert(Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),3, 0,6));
   ram=backup;dpram=blankIo;
   ram[0x80+0x20]^=1;
-  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),1,6));
+  assert(!Backup::ConfigureRelayBackup(ram.data(),ram.size(),dpram.data(),dpram.size(),1, 0,6));
 }
 
 static std::array<uint8_t,PoseBytes> Native(uint8_t tick,float x,float z,uint16_t yaw)
@@ -112,7 +116,9 @@ static void DatagramCases()
   assert(Latest(a,r,2000).gap==2 && Latest(b,r,2000).gap==1);
   assert(!Latest(c,r,2000));
   assert(!Latest(a,r,152000));
-  assert(!Latest(Car(254,10,19,0x7ff0),r,2000));
+  // Native key missing from UDP history: the fresh UDP pose is still a correction target.
+  const auto fallback=Latest(Car(254,10,19,0x7ff0),r,2000);
+  assert(fallback && fallback.row.key==r.p.row.key && fallback.gap>=1);
   r.uncertainty=80001;assert(!Latest(a,r,2000));
   const auto discontinuity=send.Push(Car(5,90,0,0,{2,0}));
   assert(discontinuity && discontinuity->seq==1 && discontinuity->n==1);
@@ -135,8 +141,14 @@ static void DrawCases()
   }
   draw=filter.Step(b,b.pose,50,udp,6,350000);
   assert(!draw.udp && draw.weight==3);
-  for (unsigned i=7;i<=9;++i) draw=filter.Step(b,b.pose,50,{},i,350000+i);
-  assert(!draw.weight && draw.shown.p.x==draw.tcp.p.x && draw.shown.p.z==draw.tcp.p.z);
+  // Without UDP the displayed correction decays toward the native-coasted pose.
+  double gap=1e9;
+  for (unsigned i=7;i<=9;++i) {
+    draw=filter.Step(b,b.pose,50,{},i,350000+i);
+    const double next=(draw.shown.p-draw.tcp.p).Length();
+    assert(next<=gap+1e-12 && (i<9 || !draw.weight));
+    gap=next;
+  }
   draw=filter.Step(c,c.pose,ContactRadius,udp,10,350100);
   assert(!draw.udp && !draw.weight && draw.shown.p.x==c.pose.p.x);
   draw=filter.Step(d,d.pose,ContactRadius+.5,{},11,350200);

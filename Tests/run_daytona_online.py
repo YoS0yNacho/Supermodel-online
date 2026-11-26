@@ -83,23 +83,27 @@ async def check(count, latency, stream=False, udp=True, mixed=False):
             ninth.send(b'OLJ1',struct.pack('<I', room))
             assert b'full' in await ninth.until(b'OLE1')
         opts = 2 | (3 << 2) | (1 << 5)
-        for wrong in (0,1,2|4<<2,2|3<<5,opts|256,opts|512,opts|2048):
+        for wrong in (0,1,2|4<<2,2|3<<5,opts|2048,opts|8192):
             host.send(b'ORO1',struct.pack('<II',room,wrong)); assert b'valid room options' in await host.until(b'OLE1')
         seats[-1].send(b'ORO1',struct.pack('<II',room,opts))
         assert b'Only the master' in await seats[-1].until(b'OLE1')
-        host.send(b'OCN1',struct.pack('<II',room,1)); assert b'CAR NUMBER' in await host.until(b'OLE1')
+        host.send(b'OCN1',struct.pack('<II',room,9)); assert b'CAR NUMBER' in await host.until(b'OLE1')
         host.send(b'ORO1',struct.pack('<II',room,opts))
         await asyncio.gather(*(await_view(c,room,(opts,1)) for c in seats))
         seats[-1].send(b'OLT1',struct.pack('<I',room)); assert b'Only' in await seats[-1].until(b'OLE1')
         host.send(b'OLT1',struct.pack('<I',room))
         tickets = []
+        cars_seen = []
         for i,c in enumerate(seats):
             payload = await launch(c,b'OLG5')
             ident, game, index, n, ticket = online.LAUNCH.unpack_from(payload)
             assert (ident,game,index,n)==(room,lobby_game,i,count)
-            assert struct.unpack_from('<II',payload,online.LAUNCH.size)==(opts,0)
+            options_now, car_now = struct.unpack_from('<II',payload,online.LAUNCH.size)
+            assert options_now==opts and 1<=car_now<=8
+            cars_seen.append(car_now)
             tickets.append(ticket)
         assert len(set(tickets))==count and bytes(16) not in tickets
+        assert len(set(cars_seen))==count
         host.send(b'ORO1',struct.pack('<II',room,6)); assert b'before launch' in await host.until(b'OLE1')
         for c in seats: c.close()
         await rejected(bytes(16))
@@ -168,7 +172,10 @@ async def main():
     assert online.GAMES[11]==('daytona',0x5bf177da34880)
     assert online.max_players_for_game(11)==relay.DAYTONA_MAX_CABINETS==8
     assert relay.nbd1_wire_sizes(relay.DAYTONA_GUID)=={3593}
-    valid={2 | d<<2 | m<<5 for d in range(4) for m in range(3)}
+    base={2 | d<<2 | m<<5 for d in range(4) for m in range(3)}
+    # Daytona settings: No Collisions (256), Real Players (512), No Pitstop (4096).
+    extras={e for e in range(1<<13) if e & ~(256|512|4096)==0}
+    valid={v | e for v in base for e in extras}
     valid |= {v | relay.VIDEO60_OPTION for v in valid}
     assert {v for v in range(1<<14) if online.valid_room_options(11,v)}==valid
     for n in range(2,9): await check(n,0)
