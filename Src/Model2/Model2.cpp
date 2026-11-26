@@ -1019,17 +1019,9 @@ uint8_t CModel2::IORead(unsigned offset)
       {
       case 1:  {
         // port B: the Start input (active-low, bit 0x10 reads 1 when pressed).
-        // With Real players only, fake Start pressed during menu/setup screens
-        // so the game treats the car as a real player (no CPU cars), matching
-        // Daytona 2's hold-Start-at-at/mt UX. Race states are left untouched.
-        uint8_t v = In0Read();
-        if (m_daytonaRealPlayers)
-        {
-          const uint32_t st = Get32(m_workRAM, DAYTONA_CHOOSE_STATE);
-          if (st != 0x00080000u && st != 0x00100000u && st != 0x00400000u)
-            v |= 0x10;
-        }
-        return v;
+        // Real Players is enforced via the ROM patch at 0x225C9C, not by
+        // faking Start. Return the real input.
+        return In0Read();
       }
       case 2:  return m_in[1];      // port C
       case 3:                       // port D (or the drive board)
@@ -3716,6 +3708,21 @@ bool CModel2::PrepareDaytonaRelayRole()
   for (int i = 0; i < 11; i++)
     daytonaPatch32(0x030D84 + uint32_t(i) * 4, 0x00000000,
                    daytonaNoCollisionStub[i], noColl);
+  // Real Players: patch the Start-request branch at offset 0x25C9C
+  // (game address 0x225C9C). The original routine at 0x225C90 loads the
+  // Start input, then `bbc 4,r3,0x25ca4` branches to the store at 0x225CA4
+  // if Start is NOT pressed (r4 stays 0 = normal grid). If Start IS pressed,
+  // r4 is set to 1 (humans-only request) before the store `st r4,0x501a80`.
+  // ON (Real Players only): replace with `b 0x25ca0` so r4 is always set
+  //   to 1 before the store -> request 1 -> humans-only race.
+  // OFF (CPU cars on):     replace with `b 0x25ca4` so r4=1 is always
+  //   skipped -> request 0 -> normal arcade grid with CPU cars.
+  if (0x25C9C + 4 <= m_program.size())
+  {
+    const uint32_t rpWord = m_daytonaRealPlayers ? 0x08000004u : 0x08000008u;
+    for (int i = 0; i < 4; i++)
+      m_program[0x25C9C + i] = uint8_t(rpWord >> (8 * i));
+  }
   m_daytonaRoleConfigured=true;
   if (m_daytonaBootstrapFrames)
   {
