@@ -3700,12 +3700,15 @@ bool CModel2::PrepareDaytonaRelayRole()
   // Router: cmpobne r7,r3,0x147F4  ->  b 0x030D84
   daytonaPatch32(0x147D0, 0x3538C024, 0x0801C5B4, noColl);
   // Stub at 0x030D84 (44-byte zero run in the data area = 11 words).
-  static const uint32_t daytonaNoCollisionStub[11] = {
-    0x80266004, 0x90283000, 0x00501098, 0x5A016003, 0x13000010,
-    0x5A016004, 0x13000008, 0x08FE3A58, 0x5A00E007, 0x15FE3A4C,
-    0x08FE3A28,
+  // Stub checks r7 (local human ID, from workRAM 0x501088) and r3 (g8 ID,
+  // from g8+0x4) against the roster size at workRAM 0x501098. If both are
+  // human (ID < size), branch to 0x147F8 to skip the collision solver.
+  // Otherwise, replicate the original routing: cmpo r7,r3 then bne/b.
+  static const uint32_t daytonaNoCollisionStub[10] = {
+    0x90283000, 0x00501098, 0x5A016007, 0x13000010, 0x5A016003,
+    0x13000008, 0x08FE3A5C, 0x5A00E007, 0x15FE3A50, 0x08FE3A2C,
   };
-  for (int i = 0; i < 11; i++)
+  for (int i = 0; i < 10; i++)
     daytonaPatch32(0x030D84 + uint32_t(i) * 4, 0x00000000,
                    daytonaNoCollisionStub[i], noColl);
   // Real Players: patch the Start-request branch at offset 0x25C9C
