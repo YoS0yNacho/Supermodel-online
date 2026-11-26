@@ -3687,30 +3687,6 @@ bool CModel2::PrepareDaytonaRelayRole()
   // state install never runs; the lane stays open as a shortcut.
   daytonaPatch32(0xDF9C, 0x8827613C, 0x0800009C,
                  NativeRoomSettings::HasNoPitstop(DaytonaOnline::Game, options));
-  // No Collision: skip human-human collision pairs before the solver.
-  // The pair-loop router at 0x147D0 (`cmpobne r7,r3,0x147F4`) is replaced
-  // with `b 0x030D84` to a 44-byte stub. The stub loads both car IDs and
-  // the human roster size from workRAM 0x501098; if both IDs are < size
-  // (both human) it branches to 0x147F8 (after the solver, at the loop-
-  // counter decrements) to skip separation/velocity/timer writes while
-  // preserving the loop counters. Otherwise it replicates the original
-  // routing (direct solver or swap path). CPU/wall contacts stay solid.
-  const bool noColl =
-      NativeRoomSettings::HasNoCollisions(DaytonaOnline::Game, options);
-  // Router: cmpobne r7,r3,0x147F4  ->  b 0x030D84
-  daytonaPatch32(0x147D0, 0x3538C024, 0x0801C5B4, noColl);
-  // Stub at 0x030D84 (44-byte zero run in the data area = 11 words).
-  // Stub checks r7 (local human ID, from workRAM 0x501088) and r3 (g8 ID,
-  // from g8+0x4) against the roster size at workRAM 0x501098. If both are
-  // human (ID < size), branch to 0x147F8 to skip the collision solver.
-  // Otherwise, replicate the original routing: cmpo r7,r3 then bne/b.
-  static const uint32_t daytonaNoCollisionStub[10] = {
-    0x90283000, 0x00501098, 0x5A016007, 0x13000010, 0x5A016003,
-    0x13000008, 0x08FE3A5C, 0x5A00E007, 0x15FE3A50, 0x08FE3A2C,
-  };
-  for (int i = 0; i < 10; i++)
-    daytonaPatch32(0x030D84 + uint32_t(i) * 4, 0x00000000,
-                   daytonaNoCollisionStub[i], noColl);
   // Real Players: patch the Start-request branch at offset 0x25C9C
   // (game address 0x225C9C). The original routine at 0x225C90 loads the
   // Start input, then `bbc 4,r3,0x25ca4` branches to the store at 0x225CA4
@@ -3735,21 +3711,7 @@ bool CModel2::PrepareDaytonaRelayRole()
     std::fill(m_workRAM.begin(),m_workRAM.end(),0);
     Reset();
   }
-  // Write the human roster size (number of human cabinets) to the free
-  // workRAM slot 0x501098 so the No Collision stub can compare car IDs
-  // against it. This must happen AFTER Reset() which clears workRAM.
-  {
-    const unsigned dsize = m_comm.ReadShared(3);
-    if (m_comm.ReadShared(0) == 1 && dsize >= 2 &&
-        dsize <= DaytonaOnline::Cabinets)
-    {
-      const uint32_t rv = uint32_t(dsize);
-      for (int i = 0; i < 4; i++)
-        m_workRAM[0x1098 + i] = uint8_t(rv >> (8 * i));
-    }
-  }
-  InfoLog("Daytona USA Online: NoCollision=%d RealPlayers=%d NoPitstop=%d.",
-    NativeRoomSettings::HasNoCollisions(DaytonaOnline::Game, options),
+  InfoLog("Daytona USA Online: RealPlayers=%d NoPitstop=%d.",
     m_daytonaRealPlayers,
     NativeRoomSettings::HasNoPitstop(DaytonaOnline::Game, options));
   m_comm.NativeRoleConfigured();
