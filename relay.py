@@ -1586,7 +1586,7 @@ DAYTONA_HELLO = b'Supermodel Online DAYTONA1 '
 DAYTONA_RELAY_HELLO = b'Supermodel Online lobby v1 DAYTONA1 '
 MODEL2_VIDEO_HELLO = b'Supermodel Online M2VIDEO1 '
 MODEL2_VIDEO_RELAY_HELLO = b'Supermodel Online lobby v1 M2VIDEO1 '
-DAYTONA_SETTINGS_BITS = 2 | 28 | 224
+DAYTONA_SETTINGS_BITS = 2 | 28 | 224 | 256 | 512 | 4096  # +NoCollisions +RealPlayers +NoPitstop
 DAYTONA_DEFAULT_OPTIONS = 2 | (1 << 2)  # Normal / Normal
 MODEL2_GAMES = frozenset((INDY500_GAME, SRALLYC_GAME, DAYTONA_GAME, SGT24H_GAME))
 SRALLYC_HELLO = b'Supermodel Online (srallyc)'
@@ -1662,7 +1662,7 @@ def base_game(game):
 
 
 def native_car_limit(game):
-    return 16 if game < 2 or game == 8 else 8 if game < 4 else 0
+    return 16 if game < 2 or game == 8 else 8 if game < 4 or game == DAYTONA_GAME else 0
 
 
 def valid_room_options(game, value):

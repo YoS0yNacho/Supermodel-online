@@ -3716,8 +3716,18 @@ bool CModel2::PrepareDaytonaRelayRole()
   for (int i = 0; i < 11; i++)
     daytonaPatch32(0x030D84 + uint32_t(i) * 4, 0x00000000,
                    daytonaNoCollisionStub[i], noColl);
+  m_daytonaRoleConfigured=true;
+  if (m_daytonaBootstrapFrames)
+  {
+    // A cold boot of the edited backup, not a soft reset into partially
+    // initialized Daytona link/work globals from the factory-default boot.
+    std::fill(m_ram.begin(),m_ram.end(),0);
+    std::fill(m_workRAM.begin(),m_workRAM.end(),0);
+    Reset();
+  }
   // Write the human roster size (number of human cabinets) to the free
-  // workRAM slot 0x501098 so the stub can compare car IDs against it.
+  // workRAM slot 0x501098 so the No Collision stub can compare car IDs
+  // against it. This must happen AFTER Reset() which clears workRAM.
   {
     const unsigned dsize = m_comm.ReadShared(3);
     if (m_comm.ReadShared(0) == 1 && dsize >= 2 &&
@@ -3728,15 +3738,10 @@ bool CModel2::PrepareDaytonaRelayRole()
         m_workRAM[0x1098 + i] = uint8_t(rv >> (8 * i));
     }
   }
-  m_daytonaRoleConfigured=true;
-  if (m_daytonaBootstrapFrames)
-  {
-    // A cold boot of the edited backup, not a soft reset into partially
-    // initialized Daytona link/work globals from the factory-default boot.
-    std::fill(m_ram.begin(),m_ram.end(),0);
-    std::fill(m_workRAM.begin(),m_workRAM.end(),0);
-    Reset();
-  }
+  InfoLog("Daytona USA Online: NoCollision=%d RealPlayers=%d NoPitstop=%d.",
+    NativeRoomSettings::HasNoCollisions(DaytonaOnline::Game, options),
+    m_daytonaRealPlayers,
+    NativeRoomSettings::HasNoPitstop(DaytonaOnline::Game, options));
   m_comm.NativeRoleConfigured();
   InfoLog("Daytona USA Online: assigned %s / CAR NUMBER %u (session only).",seat==1?"MASTER":"SLAVE",seat);
   if (m_daytonaBootstrapFrames) InfoLog("Daytona USA Online: ROM initialized backup in %u frames.",m_daytonaBootstrapFrames);
