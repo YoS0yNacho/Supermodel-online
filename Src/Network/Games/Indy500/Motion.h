@@ -52,6 +52,13 @@ inline Record FindRecord(unsigned actor, unsigned owner, unsigned players, unsig
 }
 
 struct Pose { Vec p; uint16_t yaw=0; };
+// The display may move on its own by at most MaxRate + 1.5*speed per frame.
+constexpr double MaxRate = 1.0;
+inline Vec LimitMove(Vec from, Vec to, double maxMove)
+{
+  const Vec d = to - from; const double n = d.Length();
+  return n > maxMove ? from + d * (maxMove / n) : to;
+}
 struct Sample { Pose pose; uint32_t tick=0; unsigned peer=0; unsigned slot=0; };
 
 // Near the local car, match the native collision pose instead of showing a
@@ -95,15 +102,17 @@ public:
     const double priorTurn=m_turn;
     if (dt)
     {
-      // A reset/teleport or abrupt speed/heading change is native, not motion
-      // to be extended. Begin a new history without dragging the old pose.
-      if (dt>8 || frame-m_sampleFrame>8 || delta.Length()>3.5*dt || std::abs(turn)>700*int(dt))
-        return Seed(s,frame);
+      // Backwards tick or a move no car can make: a native reset/warp, snap.
+      if (int32_t(dt)<0 || delta.Length()>3.5*dt) return Seed(s,frame);
       const Vec v=delta*(1.0/dt);
       const double w=double(turn)/dt;
-      if (m_velocity && ((v-m_speed).Length()>0.95 || std::abs(w-m_turn)>420))
-        return Seed(s,frame);
-      const double a=m_velocity ? 0.38 : 1.0;
+      const bool hole=dt>8 || frame-m_sampleFrame>8;
+      const bool abrupt=m_velocity && ((v-m_speed).Length()>0.95 || std::abs(w-m_turn)>420);
+      // Warm-up with a hole or spin: nothing to glide from, snap to native.
+      if (!m_velocity && (hole || std::abs(turn)>700*int(dt))) return Seed(s,frame);
+      // Holes and abrupt changes keep the history and glide the display; the
+      // speed estimate follows the new sample at once rather than staying stale.
+      const double a=(!m_velocity || abrupt) ? 1.0 : 0.38;
       m_speed=m_speed+(v-m_speed)*a;
       m_turn+=(w-m_turn)*a;
       m_velocity=true;
@@ -113,7 +122,8 @@ public:
     else if (!Same(raw,m_last.pose)) return Seed(s,frame); // inconsistent row
 
     const double stale=double(frame-m_sampleFrame);
-    if (!m_velocity || stale>=10) return Seed(s,frame);
+    if (!m_velocity) return Seed(s,frame);  // warm-up: no speed yet, snap to native
+    // Stale samples do not reseed: the fade below eases the display to native.
     lead=std::isfinite(lead) ? std::clamp(lead,0.0,MaxLead) : 0.0;
     // Ramp in after a reset, but don't let momentary receive jitter pull the
     // display back and forth. Long-run lead only follows sustained changes.
@@ -140,7 +150,8 @@ public:
     const double carryYaw=YawDelta(m_shown.yaw,raw.yaw)+(hadVelocity ? priorTurn : m_turn)*step*fade;
     const int yawShift=int(std::lround(std::clamp(goalYaw+(carryYaw-goalYaw)*blend,
                                 -double(MaxYawShift),double(MaxYawShift))));
-    m_shown={raw.p+shift,uint16_t(int(raw.yaw)+yawShift)};
+    const Vec prevShown=m_shown.p;
+    m_shown={LimitMove(prevShown,raw.p+shift,(MaxRate+1.5*m_speed.Length())*step),uint16_t(int(raw.yaw)+yawShift)};
     m_frame=frame;
     return m_shown;
   }
