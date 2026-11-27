@@ -79,6 +79,9 @@ public:
   }
   auto& c=it->second;auto now=Now();if(now-c.window>=1000000){c.window=now;c.requests=0;}if(++c.requests>24||closed)return false;
   if(c.role==1){
+   // Version checking belongs to the directory, but older clients send it
+   // after every lobby handshake. Accept its bounded v1 frame and ignore it.
+   if(kind=="OLV1"&&n==68&&Read(b)==1)return true;
    if(kind=="OLQ1"&&!n){Snapshot(id);return true;}
    if(kind=="OLQ2"&&n==12&&c.pingCapable){c.pingMs=std::min<uint32_t>(Read(b+8),9999);Bytes e(b,b+8);send(id,Frame("OLP2",e));Snapshot(id);return true;}
    if(kind=="OLS1"&&n==160){Post(Car(id),c.name,Chat(b,n));return true;}

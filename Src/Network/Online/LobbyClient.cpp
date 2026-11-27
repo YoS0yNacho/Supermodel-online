@@ -267,8 +267,8 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
     std::vector<uint8_t> output=Frame("HEL1", {greeting.begin(), greeting.end()});
     if(route.native)hello.insert(hello.end(),route.key.begin(),route.key.end());
     const auto registration=Frame(Srally2Research::LobbyHello,hello);output.insert(output.end(),registration.begin(),registration.end());
-    // OLV1: send our Supermodel version so the relay can compare with the repo.
-    {
+    // OLV1 belongs to the central directory. Older creator rooms reject it.
+    if(!route.native) {
       const std::string sv=SupermodelVersion();
       std::vector<uint8_t> vbody;Put(vbody,1);Text(vbody,sv.c_str(),64);
       const auto olv1=Frame("OLV1",vbody);output.insert(output.end(),olv1.begin(),olv1.end());

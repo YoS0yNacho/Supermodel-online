@@ -82,7 +82,9 @@ async def check(count, latency, stream=False, udp=True, mixed=False):
             ninth = await lobby('Ninth car')
             ninth.send(b'OLJ1',struct.pack('<I', room))
             assert b'full' in await ninth.until(b'OLE1')
-        opts = 2 | (3 << 2) | (1 << 5)
+        # Daytona 1 pit-stop bypass is valid, synchronized and frozen on launch.
+        # Other games' validation is covered by DaytonaRoomOptionsTest.
+        opts = 2 | (3 << 2) | (1 << 5) | 4096
         for wrong in (0,1,2|4<<2,2|3<<5,opts|2048,opts|8192):
             host.send(b'ORO1',struct.pack('<II',room,wrong)); assert b'valid room options' in await host.until(b'OLE1')
         seats[-1].send(b'ORO1',struct.pack('<II',room,opts))
