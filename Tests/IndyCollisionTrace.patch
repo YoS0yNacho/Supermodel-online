@@ -1,0 +1,674 @@
+diff --git a/Src/CPU/I960/I960.h b/Src/CPU/I960/I960.h
+index 47f48ed..0644519 100644
+--- a/Src/CPU/I960/I960.h
++++ b/Src/CPU/I960/I960.h
+@@ -82,6 +82,7 @@ public:
+   void Reset();                     // MAME device_reset (reads the boot record from the bus)
+   int  Run(int cycles);             // returns the cycles used
+   int  CyclesRun() const { return m_inRun ? m_cyclesRequested - m_icount : 0; }   // so far in the current Run()
++  bool HasDelayedCallback() const { return bool(m_delayFn); } // diagnostic fixture completeness
+
+   // Called by the bus during a read or write that can't complete (e.g. an
+   // empty FIFO): the instruction is retried on the next Run(), the rest of
+diff --git a/Src/Model2/Model2.cpp b/Src/Model2/Model2.cpp
+index 8ac017f..60e5fb5 100644
+--- a/Src/Model2/Model2.cpp
++++ b/Src/Model2/Model2.cpp
+@@ -31,6 +31,8 @@
+  */
+
+ #include "Model2.h"
++#include "../../Tests/IndyLocalCollisionHistory.h"
++#include "../../Tests/IndyFrameInputs.h"
+ #include "Network/Online/Indy500.h"
+ #include "Network/Games/Indy500/RelayEeprom.h"
+ #include "Network/Games/Srallyc/RelayEeprom.h"
+@@ -1186,6 +1188,20 @@ bool CModel2::Burst(UINT32 addr)
+   return false;
+ }
+
++static uint32_t g_wlogIP = 0;
++static uint32_t g_wlogFrame = 0;
++static FILE* g_wlog = nullptr;
++static FILE* g_indyLab = nullptr;
++static FILE* g_fixtureIO = nullptr;
++static FILE* g_fixtureComm = nullptr;
++static int g_fixtureSliceBudget = 0;
++static int64_t g_fixtureSliceStart = 0;
++static IndyLocalCollisionLab::History g_liveCollisionHistory;
++// Lab input scheduler: separate from guest/network state, per process only.
++static bool g_indyScriptRunning = false;
++static uint64_t g_indyScriptStart = 0;
++static unsigned g_indyScriptActor = 0;
++
+ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+ {
+   if (addr < 0x00200000)
+@@ -1206,6 +1222,74 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+   if (addr >= 0x00500000 && addr < 0x00600000)
+   {
+     const uint32_t native=Get32(m_workRAM, addr - 0x00500000);
++    if (g_indyLab && std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") &&
++        (!m_comm.IndyOnline() || !m_indyRoleConfigured || !IndyMotionRaceActive() ||
++         Get32(m_workRAM,INDY_RACE_COUNT)!=2 || Get32(m_workRAM,INDY_LOCAL_ACTOR)>=2))
++      g_liveCollisionHistory.Clear();
++    // LAB ONLY: use actual local physics history for local collision reads.
++    // It is isolated from native actor storage, remote inputs and transport.
++    if (g_indyLab && std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") &&
++        !std::getenv("SUPERMODEL_INDY_LAB_LOCAL_POSE") &&
++        !std::getenv("SUPERMODEL_INDY_LAB_COLLISION_READS") && m_comm.IndyOnline() &&
++        m_indyRoleConfigured && m_running==CPU_I960 && mask==0xffffffff &&
++        IndyMotionRaceActive() && Get32(m_workRAM,INDY_RACE_COUNT)==2 &&
++        Get32(m_program,0xac4e8)==0x90b43400 && Get32(m_program,0xac4fc)==0x90bc3400 &&
++        Get32(m_program,0xac504)==0x90ac3400 && Get32(m_program,0xac510)==0x908c3400 &&
++        Get32(m_program,0xac2ac)==0x90bd3400 && Get32(m_program,0xac2bc)==0x90b53400 &&
++        Get32(m_program,0xac2c4)==0x908d3400 && Get32(m_program,0xac2cc)==0x90953400) {
++      const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++      if (local<2) {
++        const uint32_t base=0x53c7a0+local*0x1e4, pc=m_i960.GetPIP();
++        const bool x=pc==0xac4e8 || pc==0xac504 || pc==0xac2ac || pc==0xac2c4;
++        const bool z=pc==0xac4fc || pc==0xac510 || pc==0xac2bc || pc==0xac2cc;
++        const bool history=pc==0xac504 || pc==0xac510 || pc==0xac2c4 || pc==0xac2cc;
++        const unsigned field=history ? (x?0x144:0x148) : (x?0x124:0x12c);
++        if ((x || z) && addr==base+field) {
++          const unsigned off=base-0x500000;
++          const IndyLocalCollisionLab::Vec now{IndyFloat(Get32(m_workRAM,off+0x0c)),
++                                                IndyFloat(Get32(m_workRAM,off+0x14))};
++          const auto pose=g_liveCollisionHistory.Step(m_frameNumber,local,now);
++          if (pose.valid) {
++            const auto p=history?pose.previous:pose.now;
++            const uint32_t replacement=IndyFloatBits(x?p.x:p.z);
++            std::fprintf(g_indyLab,"L %llu %06x %u %08x %08x %u\n",(unsigned long long)m_frameNumber,pc,local,native,replacement,pose.reset);
++            return replacement;
++          }
++        }
++      }
++    }
++    // LAB ONLY: change only local-player collision detector/response reads.
++    // Shift the native history by the same amount, preserving its delta; this
++    // is a hypothesis, not a validated treatment of resets/packet holes.
++    if (g_indyLab && std::getenv("SUPERMODEL_INDY_LAB_COLLISION_READS") &&
++        !std::getenv("SUPERMODEL_INDY_LAB_LOCAL_POSE") && !std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") && m_comm.IndyOnline() &&
++        m_indyRoleConfigured && m_running==CPU_I960 && mask==0xffffffff &&
++        IndyMotionRaceActive() && Get32(m_workRAM,INDY_RACE_COUNT)==2 &&
++        Get32(m_program,0xac4e8)==0x90b43400 && Get32(m_program,0xac4fc)==0x90bc3400 &&
++        Get32(m_program,0xac504)==0x90ac3400 && Get32(m_program,0xac510)==0x908c3400 &&
++        Get32(m_program,0xac2ac)==0x90bd3400 && Get32(m_program,0xac2bc)==0x90b53400 &&
++        Get32(m_program,0xac2c4)==0x908d3400 && Get32(m_program,0xac2cc)==0x90953400) {
++      const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++      if (local<2) {
++        const uint32_t base=0x53c7a0+local*0x1e4, pc=m_i960.GetPIP();
++        const bool x=pc==0xac4e8 || pc==0xac504 || pc==0xac2ac || pc==0xac2c4;
++        const bool z=pc==0xac4fc || pc==0xac510 || pc==0xac2bc || pc==0xac2cc;
++        const bool history=pc==0xac504 || pc==0xac510 || pc==0xac2c4 || pc==0xac2cc;
++        const unsigned cached=x?0x124:0x12c, current=x?0x0c:0x14;
++        if ((x || z) && addr==base+(history?(x?0x144:0x148):cached)) {
++          const unsigned off=base-0x500000;
++          const float now=IndyFloat(Get32(m_workRAM,off+current));
++          const float raw=IndyFloat(native), last=IndyFloat(Get32(m_workRAM,off+cached));
++          if (std::isfinite(now) && std::abs(now)<8192 && std::isfinite(raw) && std::isfinite(last)) {
++            const float delta=last-raw;
++            const float chosen=history ? now-(std::abs(delta)<8.0f?delta:0.0f) : now;
++            const uint32_t replacement=IndyFloatBits(chosen);
++            std::fprintf(g_indyLab,"Q %u %06x %u %08x %08x\n",g_wlogFrame,pc,local,native,replacement);
++            return replacement;
++          }
++        }
++      }
++    }
+     if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 && mask==0xffffffff)
+     {
+       const uint32_t pc=m_i960.GetPIP();
+@@ -1274,8 +1358,13 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+     return GeoRead((addr & 0x3fff) >> 2);
+   if (addr >= 0x00804000 && addr < 0x00808000)
+     return 0xffffffff;                                // geo_prg_r
+-  if (addr >= 0x00884000 && addr < 0x00888000)
+-    return FIFOPop(m_fifoOut, CPU_I960, CPU_COPRO);     // copro_fifo_r
++  if (addr >= 0x00884000 && addr < 0x00888000) {
++    const bool empty=m_fifoOut.values.empty();
++    const uint32_t v=FIFOPop(m_fifoOut, CPU_I960, CPU_COPRO);
++    if (g_fixtureIO && m_running==CPU_I960)
++      std::fprintf(g_fixtureIO,"R %08x %08x %08x %08x %u\n",m_i960.GetPIP(),addr,mask,v,unsigned(empty));
++    return v;
++  }
+
+   switch (addr)
+   {
+@@ -1374,6 +1463,9 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+       unsigned o = a - 0x01a00000;
+       const uint32_t native=m_comm.ReadShared(o) | (uint32_t(m_comm.ReadShared(o + 1)) << 8) |
+         (uint32_t(m_comm.ReadShared(o + 2)) << 16) | (uint32_t(m_comm.ReadShared(o + 3)) << 24);
++      if (g_fixtureComm)
++        std::fprintf(g_fixtureComm,"%c %08x %08x %08x %08x\n",
++          m_running==CPU_I960?'R':'X',m_running==CPU_I960?m_i960.GetPIP():0,addr,mask,native);
+       // SGT observation only: preserve native read data and all wire semantics.
+       // Online launch is program-CRC gated. g9/g11 hold copier source/destination.
+       if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured && m_running==CPU_I960 &&
+@@ -1413,6 +1505,8 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+     }
+     if (a == 0x01a04000)
+     {
++      if (g_fixtureComm) std::fprintf(g_fixtureComm,"X %08x %08x %08x %08x\n",
++        m_running==CPU_I960?m_i960.GetPIP():0,addr,mask,0u);
+       uint32_t d = 0;
+       if (mask & 0x000000ff)
+         d |= m_comm.ReadCN();
+@@ -1475,8 +1569,85 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+   return 0;
+ }
+
++#include <cstdio>
++#include <cstring>
++#include <execinfo.h>
+ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+ {
++  // LAB ONLY: substitute the current local physics coordinate for the local
++  // ring echo at the two verified pose-copy stores. Never affect remote cars.
++  if (g_indyLab && std::getenv("SUPERMODEL_INDY_LAB_LOCAL_POSE") &&
++      !std::getenv("SUPERMODEL_INDY_LAB_COLLISION_READS") && !std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") &&
++      m_comm.IndyOnline() && m_indyRoleConfigured && m_running==CPU_I960 &&
++      mask==0xffffffff && IndyMotionRaceActive() && Get32(m_workRAM,INDY_RACE_COUNT)==2 &&
++      Get32(m_program,0xab37c)==0x92992124 && Get32(m_program,0xab3ac)==0x9299212c) {
++    const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++    if (local<2) {
++      const unsigned base=0x53c7a0+local*0x1e4;
++      unsigned source=0;
++      if (g_wlogIP==0xab37c && addr==base+0x124) source=0x0c;
++      if (g_wlogIP==0xab3ac && addr==base+0x12c) source=0x14;
++      if (source) {
++        const unsigned replacement=Get32(m_workRAM,base-0x500000+source);
++        std::fprintf(g_indyLab,"R %u %06x %u %08x %08x %08x\n",g_wlogFrame,g_wlogIP,local,data,replacement,m_i960.GetReg(20));
++        data=replacement;
++      }
++    }
++  }
++  if (g_wlog && addr >= 0x0053c7a0 && addr < 0x0053e000)
++    std::fprintf(g_wlog, "W %u %06x %06x %08x %08x\n", g_wlogFrame, g_wlogIP, addr, data, mask);
++  if (g_indyLab && m_running==CPU_I960 && IndyMotionRaceActive() &&
++      Get32(m_workRAM,INDY_RACE_COUNT)==2) {
++    const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++    if (local<2 && addr >= 0x53c7a0+local*0x1e4 && addr < 0x53c7a0+(local+1)*0x1e4) {
++      const unsigned a=0x3c7a0+local*0x1e4, b=0x3c7a0+(1-local)*0x1e4;
++      const float dx=IndyFloat(Get32(m_workRAM,a+0x124))-IndyFloat(Get32(m_workRAM,b+0x124));
++      const float dz=IndyFloat(Get32(m_workRAM,a+0x12c))-IndyFloat(Get32(m_workRAM,b+0x12c));
++      if (dx*dx+dz*dz<100.0f)
++        std::fprintf(g_indyLab,"C %u %06x %u %03x %08x %08x\n",g_wlogFrame,g_wlogIP,local,addr-(0x53c7a0+local*0x1e4),data,mask);
++    }
++  }
++  if (g_indyLab && m_running==CPU_I960 && IndyMotionRaceActive() && mask==0xffffffff &&
++      ((g_wlogIP==0x20ec4 && addr==0x53c59c) || (g_wlogIP==0x20ed0 && addr==0x53c5a4))) {
++    std::fprintf(g_indyLab,"I %u %06x %08x %08x %08x %u\n",g_wlogFrame,g_wlogIP,addr,
++      Get32(m_workRAM,addr-0x500000),data,Get32(m_workRAM,0x440b0));
++    std::fflush(g_indyLab);
++  }
++  if (g_indyLab && m_running==CPU_I960 && g_wlogIP==0xac338 &&
++      addr==0x5440b0 && mask==0xffffffff && data==1 && IndyMotionRaceActive()) {
++    const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++    const uint32_t candidate=m_i960.GetReg(16);
++    const bool actor=(candidate>=0x53c7a0 && candidate<0x53c7a0+32*0x1e4 &&
++                      (candidate-0x53c7a0)%0x1e4==0);
++    const unsigned other=actor ? (candidate-0x53c7a0)/0x1e4 : 999;
++    if (local<8) {
++      const unsigned ofs=0x3c7a0+local*0x1e4;
++      const unsigned po=actor ? candidate-0x500000 : 0;
++      const float lx=IndyFloat(Get32(m_workRAM,ofs+0x124));
++      const float lz=IndyFloat(Get32(m_workRAM,ofs+0x12c));
++      const float px=IndyFloat(Get32(m_workRAM,ofs+0x0c));
++      const float pz=IndyFloat(Get32(m_workRAM,ofs+0x14));
++      const float ox=actor?IndyFloat(Get32(m_workRAM,po+0x124)):0;
++      const float oz=actor?IndyFloat(Get32(m_workRAM,po+0x12c)):0;
++      std::fprintf(g_indyLab,"H %u %u %u %08x %.6f %.6f %.6f %.6f %.6f %.6f\n",
++        g_wlogFrame,local,other,candidate,lx,lz,px,pz,ox,oz);
++      std::fflush(g_indyLab);
++    }
++  }
++  if (g_indyLab && g_wlogIP == 0xaa71c && mask == 0xffffffff && data == 30 &&
++      addr >= 0x53c7a0 && addr < 0x53c7a0 + 13*0x1e4 && (addr-0x53c7a0)%0x1e4 == 0x104) {
++    const unsigned actor=(addr-0x53c7a0)/0x1e4;
++    const unsigned ofs=0x3c7a0+actor*0x1e4;
++    const unsigned partner=Get32(m_workRAM,ofs+0xfc);
++    const unsigned local=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++    const unsigned players=Get32(m_workRAM,INDY_RACE_COUNT);
++    const float x=IndyFloat(Get32(m_workRAM,ofs+0x124));
++    const float z=IndyFloat(Get32(m_workRAM,ofs+0x12c));
++    const float px=partner<13?IndyFloat(Get32(m_workRAM,0x3c7a0+partner*0x1e4+0x124)):0;
++    const float pz=partner<13?IndyFloat(Get32(m_workRAM,0x3c7a0+partner*0x1e4+0x12c)):0;
++    std::fprintf(g_indyLab,"T %u %u %u %u %u %u %.6f %.6f %.6f %.6f\n",g_wlogFrame,actor,partner,local,players,IndyMotionRaceActive(),x,z,px,pz);
++    std::fflush(g_indyLab);
++  }
+   if (addr < 0x00200000)
+     return;                                           // ROM
+   if (m_extra != Extra::None && ExtraWrite(addr, data, mask))
+@@ -1526,6 +1697,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+   }
+   if (addr >= 0x00880000 && addr < 0x00884000)
+   {
++    if (g_fixtureIO && m_running==CPU_I960)
++      std::fprintf(g_fixtureIO,"W %08x %08x %08x %08x 0\n",m_i960.GetPIP(),addr,mask,data);
+     // copro_function_port_w
+     uint32_t d = (data & 0x800fffff) | ((((addr & 0x3fff) >> 4) & 0xff) << 23);
+     FIFOPush(m_fifoIn, d, CPU_I960, CPU_COPRO);
+@@ -1533,6 +1706,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+   }
+   if (addr >= 0x00884000 && addr < 0x00888000)
+   {
++    if (g_fixtureIO && m_running==CPU_I960)
++      std::fprintf(g_fixtureIO,"W %08x %08x %08x %08x 0\n",m_i960.GetPIP(),addr,mask,data);
+     CoproFIFOWrite(data);
+     return;
+   }
+@@ -1720,12 +1895,17 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+     if (a < 0x01a04000)
+     {
+       unsigned o = a - 0x01a00000;
++      if (g_fixtureComm)
++        std::fprintf(g_fixtureComm,"%c %08x %08x %08x %08x\n",
++          m_running==CPU_I960?'W':'X',m_running==CPU_I960?m_i960.GetPIP():0,addr,mask,data);
+       for (unsigned b = 0; b < 4; b++)
+         if (mask & (0xffu << (b * 8)))
+           m_comm.WriteShared(o + b, uint8_t(data >> (b * 8)));
+     }
+     else if (a == 0x01a04000)
+     {
++      if (g_fixtureComm) std::fprintf(g_fixtureComm,"X %08x %08x %08x %08x\n",
++        m_running==CPU_I960?m_i960.GetPIP():0,addr,mask,data);
+       if (mask & 0x000000ff)
+         m_comm.WriteCN(uint8_t(data));
+       if (mask & 0x00ff0000)
+@@ -2032,6 +2212,38 @@ void CModel2::UpdateInputs(void)
+   uint8_t accel = m_inputs->accelerator ? (uint8_t) m_inputs->accelerator->value : 0;
+   uint8_t brake = m_inputs->brake ? (uint8_t) m_inputs->brake->value : 0;
+
++  // Frame-scheduled analogue input for a lab trace only. It does not write
++  // game RAM and cannot make two networked emulators deterministic.
++  const char *script = std::getenv("SUPERMODEL_INDY_LAB_INPUT_SCRIPT");
++  if (g_indyLab && script && m_comm.IndyOnline() && m_indyRoleConfigured &&
++      Get32(m_workRAM,INDY_MODE)==5 && Get32(m_workRAM,INDY_SUBMODE)==7 &&
++      Get32(m_workRAM,INDY_PLAYING)==1 &&
++      (Get32(m_workRAM,INDY_CAR_PHASE)==4 ||
++       (g_indyScriptRunning && Get32(m_workRAM,INDY_CAR_PHASE)==5)) &&
++      Get32(m_workRAM,INDY_RACE_COUNT)==2 && Get32(m_workRAM,INDY_LOCAL_ACTOR)<2) {
++    static const std::string text(script);
++    static std::vector<IndyFrameInputs::Segment> segments;
++    static const bool parsed=IndyFrameInputs::Parse(text,segments);
++    if (parsed) {
++      const unsigned actor=Get32(m_workRAM,INDY_LOCAL_ACTOR);
++      if (!g_indyScriptRunning || g_indyScriptActor!=actor || m_frameNumber<g_indyScriptStart) {
++        g_indyScriptRunning=true; g_indyScriptStart=m_frameNumber; g_indyScriptActor=actor;
++      }
++      const uint64_t rf=m_frameNumber-g_indyScriptStart;
++      const auto command=IndyFrameInputs::At(segments,actor,rf);
++      steer=(uint8_t)command.steer; accel=(uint8_t)command.accel; brake=(uint8_t)command.brake;
++      const unsigned own=0x3c7a0+actor*0x1e4, peer=0x3c7a0+(1-actor)*0x1e4;
++      std::fprintf(g_indyLab,"B %llu %llu %llu %u %u %u %u %.6f %.6f %.6f %.6f\n",
++        (unsigned long long)m_frameNumber,(unsigned long long)IndyAuditUs(),(unsigned long long)rf,
++        actor,unsigned(steer),unsigned(accel),unsigned(brake),
++        IndyFloat(Get32(m_workRAM,own+0x0c)),IndyFloat(Get32(m_workRAM,own+0x14)),
++        IndyFloat(Get32(m_workRAM,peer+0x124)),IndyFloat(Get32(m_workRAM,peer+0x12c)));
++    } else {
++      static bool logged=false;
++      if (!logged) { std::fprintf(g_indyLab,"BAD_INPUT_SCRIPT\n"); std::fflush(g_indyLab); logged=true; }
++    }
++  } else g_indyScriptRunning=false;
++
+   switch (m_layout)
+   {
+   case Layout::Fighting:
+@@ -2689,6 +2901,7 @@ void CModel2::RunLine(void)
+     if (cpu == CPU_I960)
+     {
+       int cycles = (int) std::max<int64_t>(1, (limit - m_time[cpu] + I960_TIME - 1) / I960_TIME);
++      g_fixtureSliceBudget = cycles; g_fixtureSliceStart = m_time[CPU_I960];
+       int done = m_i960.Run(cycles);
+       if (m_indyEntryAbort) { m_running = CPU_NONE; return; }
+       m_time[cpu] += int64_t(std::max(done, 1)) * I960_TIME;
+@@ -2872,6 +3085,7 @@ bool CModel2::DaytonaEntryInstruction()
+
+ bool CModel2::IndyEntryInstruction()
+ {
++  if (g_fixtureComm) std::fprintf(g_fixtureComm,"X 00000000 00000004 00000000 00000000\n");
+   constexpr unsigned G4 = 20;
+   if (m_i960.GetReg(G4) != 2) return true; // the ROM hasn't finished its animation yet
+   if (Get32(m_workRAM,INDY_MODE) != 5 || Get32(m_workRAM,INDY_SUBMODE) != 6 ||
+@@ -2957,6 +3171,7 @@ bool CModel2::IndyMotionRaceActive() const
+
+ void CModel2::ClearIndyMotion()
+ {
++  g_liveCollisionHistory.Clear(); // lab state must not cross reset, load or session boundary
+   m_indyActors={};
+   m_indyDraw={};
+   m_indyUdpPeers={};
+@@ -3751,6 +3966,10 @@ bool CModel2::PrepareSrallycRelayRole()
+
+ void CModel2::RunFrame(void)
+ {
++  if (g_indyLab && std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") &&
++      (!m_comm.IndyOnline() || !m_indyRoleConfigured || !IndyMotionRaceActive() ||
++       Get32(m_workRAM,INDY_RACE_COUNT)!=2 || Get32(m_workRAM,INDY_LOCAL_ACTOR)>=2))
++    g_liveCollisionHistory.Clear();
+   if (m_comm.Sgt24hOnline() && !m_sgt24hRoleConfigured && !PrepareSgt24hRelayRole()) return;
+   if (m_comm.IndyOnline() && !m_indyRoleConfigured && !PrepareIndyRelayRole()) return;
+   if (m_comm.SrallycOnline() && !m_srallycRoleConfigured && !PrepareSrallycRelayRole()) return;
+@@ -3775,6 +3994,7 @@ void CModel2::RunFrame(void)
+       }
+       // No motion bytes are omitted before native play or for special states.
+       // During the race clock a recovering seat can still confirm UDP liveness.
++      if (g_fixtureComm) std::fprintf(g_fixtureComm,"X 00000000 00000001 00000000 00000000\n");
+       m_comm.Tick(indyRace,indySlots);
+       if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured &&
+           std::getenv("SUPERMODEL_SGT_SIM_TRACE"))
+@@ -3833,6 +4053,31 @@ void CModel2::RunFrame(void)
+       }
+       // The geometrizer starts a frame: in 60 Hz mode, or on even frames
+       m_vblankFrame = (uint32_t) m_frameNumber;
++      g_wlogFrame = (uint32_t)m_frameNumber;
++      if (g_indyLab && m_frameNumber % 10 == 0) {
++        std::fprintf(g_indyLab,"S %u %u %u %u %u %u %u %u %u\n",g_wlogFrame,
++          Get32(m_workRAM,INDY_MODE),Get32(m_workRAM,INDY_SUBMODE),
++          Get32(m_workRAM,INDY_CAR_PHASE),Get32(m_workRAM,INDY_PLAYING),
++          Get32(m_workRAM,INDY_LOCAL_ACTOR),Get32(m_workRAM,INDY_RACE_COUNT),
++          IndyNativeRoster(),IndyMotionRaceActive());
++        for (unsigned ai=0; ai<13; ++ai) {
++          const unsigned o=0x3c7a0+ai*0x1e4;
++          std::fprintf(g_indyLab,"V %u %u %.6f %.6f %u %u\n",g_wlogFrame,ai,
++            IndyFloat(Get32(m_workRAM,o+0x124)),IndyFloat(Get32(m_workRAM,o+0x12c)),
++            Get32(m_workRAM,o+4), Get32(m_workRAM,o+0xfc));
++        }
++        std::fflush(g_indyLab);
++      }
++      if (g_wlog) {
++        g_wlogFrame = (uint32_t) m_frameNumber;
++        for (int ai = 0; ai < 13; ++ai) {
++          uint32_t o = 0x3c7a0 + ai * 0x1e4;
++          float x, z;
++          std::memcpy(&x, &m_workRAM[o + 0x124], 4);
++          std::memcpy(&z, &m_workRAM[o + 0x12c], 4);
++          std::fprintf(g_wlog, "P %u %d %.4f %.4f\n", g_wlogFrame, ai, x, z);
++        }
++      }
+       if ((m_videoControl & 1) == 0 || (m_vblankFrame & 1) == 0)
+       {
+         if (m_geoLLE)
+@@ -3937,8 +4182,206 @@ void CModel2::RenderFrame(void)
+   EndFrameVideo();
+ }
+
++// Diagnostic PC histogram (SUPERMODEL_I960_PCHIT=<file>): written on SIGTERM.
++#include <csignal>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
++namespace I960PcHit {
++  static std::vector<uint32_t> hits(0x1000000 / 4, 0);
++  static const char* path = nullptr;
++  static void Dump() {
++    if (!path) return;
++    FILE* f = std::fopen(path, "w");
++    if (!f) return;
++    for (size_t i = 0; i < hits.size(); ++i)
++      if (hits[i]) std::fprintf(f, "%06zx %u\n", i * 4, hits[i]);
++    std::fclose(f);
++  }
++  static void OnSignal(int sig) { Dump(); std::signal(sig, SIG_DFL); std::raise(sig); }
++  static std::vector<uint8_t>* ram = nullptr;
++  static int snapN = 0;
++  static const char* snapBase = nullptr;
++  static void Snapshot(int) {
++    if (!snapBase || !ram) return;
++    char name[512];
++    std::snprintf(name, sizeof name, "%s_%04d.pc", snapBase, snapN);
++    FILE* f = std::fopen(name, "w");
++    if (f) {
++      for (size_t i = 0; i < hits.size(); ++i)
++        if (hits[i]) std::fprintf(f, "%06zx %u\n", i * 4, hits[i]);
++      std::fclose(f);
++    }
++    std::snprintf(name, sizeof name, "%s_%04d.ram", snapBase, snapN);
++    f = std::fopen(name, "wb");
++    if (f) {
++      // actor table (0x3c000-0x3e000) and the flag area (0x44000-0x44800), work RAM offsets
++      if (ram->size() >= 0x44800) {
++        std::fwrite(ram->data() + 0x3c000, 1, 0x2000, f);
++        std::fwrite(ram->data() + 0x44000, 1, 0x800, f);
++      }
++      std::fclose(f);
++    }
++    ++snapN;
++  }
++  // Replay fixture only; file contents include copyrighted guest program and
++  // guest RAM. Keep local and do not check captured files into the repository.
++  static int fixtureN=0;
++  static bool fixtureWaiting=false;
++  static uint32_t fixtureReturn=0, fixtureOuterReturn=0;
++  static uint64_t fixtureLast=0, fixtureOuterFrame=0;
++  static uint64_t fixtureStartFrame=0, fixtureLastAttempt=0;
++  static uint32_t fixtureDetectorReturn=0, fixtureCandidate=0;
++  static unsigned fixtureActor=0;
++  static bool fixturePeerSeen=false, fixtureFlagSeen=false, fixtureReturned=false;
++  static bool fixturePhysicsRead=false, fixturePhysicsCall=false, fixtureX=false, fixtureZ=false;
++  static bool fixtureProgramSaved=false;
++  static std::function<void(CBlockFile*)> fixtureSaveDevices;
++  static void SaveFixture(const std::string &file, CI960 &cpu,
++                          std::vector<uint8_t> &work, std::vector<uint8_t> &main,
++                          uint64_t frame, unsigned actor, const IndyLocalCollisionLab::Sample &pose) {
++    CBlockFile b;
++    if (Result::OKAY!=b.Create(file,"Indy collision fixture","lab data; do not distribute")) return;
++    b.NewBlock("Fixture metadata", "v1");
++    uint32_t version=1, returnPC=fixtureReturn, valid=pose.valid, reset=pose.reset;
++    b.Write(version); b.Write(frame); b.Write(actor); b.Write(returnPC);
++    b.Write(valid); b.Write(reset); b.Write(pose.now.x); b.Write(pose.now.z);
++    b.Write(pose.previous.x); b.Write(pose.previous.z);
++    b.NewBlock("Fixture main RAM", "");
++    uint32_t size=main.size(); b.Write(size); b.Write(main.data(),size);
++    b.NewBlock("Fixture work RAM", "");
++    size=work.size(); b.Write(size); b.Write(work.data(),size);
++    cpu.SaveState(&b,"Fixture i960");
++    if (std::getenv("SUPERMODEL_INDY_LAB_SHARC_FIXTURE") && fixtureSaveDevices) fixtureSaveDevices(&b);
++    b.Close();
++  }
++  static void Install(CI960& cpu, std::vector<uint8_t>& workRAM, std::vector<uint8_t>& mainRAM,
++                      std::vector<uint8_t>& program, uint64_t &frameNumber,
++                      std::function<void(CBlockFile*)> saveDevices) {
++    fixtureSaveDevices=std::move(saveDevices);
++    ram = &workRAM;
++    if (const char* lp = std::getenv("SUPERMODEL_INDY_LAB_STATE")) g_indyLab = std::fopen(lp, "w");
++    if (const char* wp = std::getenv("SUPERMODEL_I960_WLOG")) g_wlog = std::fopen(wp, "w");
++    snapBase = std::getenv("SUPERMODEL_I960_SNAP");
++    if (snapBase) std::signal(SIGUSR1, Snapshot);
++
++    path = std::getenv("SUPERMODEL_I960_PCHIT");
++    if (!path) return;
++    std::signal(SIGTERM, OnSignal);
++    std::signal(SIGINT, OnSignal);
++    cpu.SetTraceCallback([&cpu,&workRAM,&mainRAM,&program,&frameNumber](uint32_t ip) {
++      g_wlogIP = ip; if (ip < 0x1000000) hits[ip >> 2]++;
++      const char *base=std::getenv("SUPERMODEL_INDY_LAB_FIXTURE");
++      if (!base || !g_indyLab || !std::getenv("SUPERMODEL_INDY_LAB_LIVE_HISTORY") ||
++          std::getenv("SUPERMODEL_INDY_LAB_LOCAL_POSE") || std::getenv("SUPERMODEL_INDY_LAB_COLLISION_READS")) return;
++      const bool peerOnly=std::getenv("SUPERMODEL_INDY_LAB_FIXTURE_PEER")!=nullptr;
++      const bool response=std::getenv("SUPERMODEL_INDY_LAB_FIXTURE_RESPONSE")!=nullptr;
++      const bool requirePeer=response || std::getenv("SUPERMODEL_INDY_LAB_FIXTURE_REQUIRE_PEER")!=nullptr;
++      if (peerOnly && requirePeer) return; // distinct entry semantics; do not mix modes
++      auto discard=[&](const char *why) {
++        if (g_fixtureIO) { std::fclose(g_fixtureIO); g_fixtureIO=nullptr; }
++        if (g_fixtureComm) { std::fclose(g_fixtureComm); g_fixtureComm=nullptr; }
++        std::remove((std::string(base)+std::to_string(fixtureN)+".in").c_str());
++        std::remove((std::string(base)+std::to_string(fixtureN)+".io").c_str());
++        std::remove((std::string(base)+std::to_string(fixtureN)+".comm").c_str());
++        std::fprintf(g_indyLab,"FIXTURE_REJECT %d %llu %s\n",fixtureN,(unsigned long long)frameNumber,why);
++        std::fflush(g_indyLab); fixtureWaiting=false;
++      };
++      if (fixtureWaiting && requirePeer) {
++        if (frameNumber!=fixtureStartFrame) { discard("frame_changed"); return; }
++        if (ip==0xac264 && cpu.GetReg(16)==0x53c7a0+(1-fixtureActor)*0x1e4) {
++          fixturePeerSeen=true; fixtureCandidate=cpu.GetReg(16);
++          std::fprintf(g_indyLab,"FIXTURE_PEER %d %llu %u %08x\n",fixtureN,(unsigned long long)frameNumber,fixtureActor,fixtureCandidate);
++          std::fflush(g_indyLab);
++        }
++        if (ip==0xac340 && fixturePeerSeen && Get32(workRAM,0x440b0)==1) fixtureFlagSeen=true;
++        if (ip==fixtureDetectorReturn) {
++          if (!fixturePeerSeen || !fixtureFlagSeen || Get32(workRAM,0x440b0)!=1) { discard("no_selected_peer_flag"); return; }
++          fixtureReturned=true;
++          std::fprintf(g_indyLab,"FIXTURE_DETECTOR_RETURN %d %llu %06x\n",fixtureN,(unsigned long long)frameNumber,ip);
++          std::fflush(g_indyLab);
++        }
++        if (response && fixtureReturned) {
++          // Refuse to attribute a later flag to this detector if a second
++          // detector call occurs first, even within the same frame.
++          if (ip==0xac230) { discard("detector_reentered"); return; }
++          if (ip==0x21dc8) {
++            if (Get32(workRAM,0x440b0)!=1) { discard("flag_changed"); return; }
++            fixturePhysicsRead=true;
++          }
++          if (ip==0x21e28 && fixturePhysicsRead) fixturePhysicsCall=true;
++          if (ip==0x20ec4 && fixturePhysicsCall) fixtureX=true;
++          if (ip==0x20ed0 && fixtureX) fixtureZ=true;
++        }
++      }
++      if (fixtureWaiting && ip==fixtureReturn) {
++        if (requirePeer && (!fixturePeerSeen || !fixtureFlagSeen || !fixtureReturned ||
++            (response && (!fixturePhysicsRead || !fixturePhysicsCall || !fixtureX || !fixtureZ)))) {
++          discard("incomplete_peer_response_path"); return;
++        }
++        if (g_fixtureIO) { std::fclose(g_fixtureIO); g_fixtureIO=nullptr; }
++        if (g_fixtureComm) {
++          std::fprintf(g_fixtureComm,"E 00000002 00000000 00000000 00000000\n");
++          std::fclose(g_fixtureComm); g_fixtureComm=nullptr;
++        }
++        const IndyLocalCollisionLab::Sample unused{};
++        SaveFixture(std::string(base)+std::to_string(fixtureN)+".out",cpu,workRAM,mainRAM,frameNumber,0,unused);
++        if (response) std::fprintf(g_indyLab,"FIXTURE_RESPONSE %d %llu candidate=%08x path=21dc8,21e28,20ec4,20ed0\n",fixtureN,(unsigned long long)frameNumber,fixtureCandidate);
++        std::fprintf(g_indyLab,"FIXTURE_END %d %llu %06x\n",fixtureN,(unsigned long long)frameNumber,ip);
++        std::fflush(g_indyLab); fixtureWaiting=false; ++fixtureN;
++      }
++      if (ip==0xac230) { fixtureOuterReturn=cpu.GetReg(CI960::REG_RIP); fixtureOuterFrame=frameNumber; }
++      if (peerOnly && (frameNumber<fixtureOuterFrame || frameNumber-fixtureOuterFrame>1)) return;
++      if (ip!=(peerOnly?0xac264:0xac230) || fixtureWaiting || fixtureN>=(requirePeer?1:4) ||
++          (fixtureN && frameNumber-fixtureLast<20) || (requirePeer && fixtureLastAttempt==frameNumber) ||
++          Get32(workRAM,INDY_MODE)!=5 || Get32(workRAM,INDY_SUBMODE)!=7 ||
++          Get32(workRAM,INDY_CAR_PHASE)!=4 || Get32(workRAM,INDY_PLAYING)!=1 ||
++          Get32(workRAM,INDY_RACE_COUNT)!=2) return;
++      const unsigned actor=Get32(workRAM,INDY_LOCAL_ACTOR);
++      if (actor>=2) return;
++      if (peerOnly && cpu.GetReg(16)!=0x53c7a0+(1-actor)*0x1e4) return;
++      const unsigned own=0x3c7a0+actor*0x1e4, peer=0x3c7a0+(1-actor)*0x1e4;
++      const IndyLocalCollisionLab::Vec now{IndyFloat(Get32(workRAM,own+0x0c)),IndyFloat(Get32(workRAM,own+0x14))};
++      const float dx=now.x-IndyFloat(Get32(workRAM,peer+0x124)), dz=now.z-IndyFloat(Get32(workRAM,peer+0x12c));
++      if (!peerOnly && dx*dx+dz*dz>144) return; // proximity selects a fixture, not proof of contact
++      fixtureDetectorReturn=peerOnly ? fixtureOuterReturn : cpu.GetReg(CI960::REG_RIP);
++      if (!fixtureDetectorReturn || fixtureDetectorReturn>=0x200000 || fixtureDetectorReturn==0xac264) return;
++      fixtureReturn=response ? 0x20ed8 : fixtureDetectorReturn;
++      auto shadow=g_liveCollisionHistory;
++      const auto pose=shadow.Step(frameNumber,actor,now);
++      if (!pose.valid) return;
++      if (!fixtureProgramSaved) {
++        FILE* f=std::fopen((std::string(base)+"program.bin").c_str(),"wb");
++        if (!f) return;
++        const auto bytes=std::fwrite(program.data(),1,program.size(),f); std::fclose(f);
++        if (bytes!=program.size()) return;
++        fixtureProgramSaved=true;
++      }
++      fixtureActor=actor; fixtureStartFrame=frameNumber; fixtureLastAttempt=frameNumber;
++      fixturePeerSeen=fixtureFlagSeen=fixtureReturned=false;
++      fixturePhysicsRead=fixturePhysicsCall=fixtureX=fixtureZ=false; fixtureCandidate=0;
++      SaveFixture(std::string(base)+std::to_string(fixtureN)+".in",cpu,workRAM,mainRAM,frameNumber,actor,pose);
++      g_fixtureIO=std::fopen((std::string(base)+std::to_string(fixtureN)+".io").c_str(),"w");
++      if (!g_fixtureIO) { std::fprintf(g_indyLab,"FIXTURE_IO_OPEN_FAILED\n"); std::fflush(g_indyLab); return; }
++      if (std::getenv("SUPERMODEL_INDY_LAB_COMM_FIXTURE")) {
++        g_fixtureComm=std::fopen((std::string(base)+std::to_string(fixtureN)+".comm").c_str(),"w");
++        if (!g_fixtureComm) {
++          std::fclose(g_fixtureIO); g_fixtureIO=nullptr;
++          std::remove((std::string(base)+std::to_string(fixtureN)+".in").c_str());
++          std::remove((std::string(base)+std::to_string(fixtureN)+".io").c_str());
++          std::fprintf(g_indyLab,"FIXTURE_COMM_OPEN_FAILED\n"); std::fflush(g_indyLab); return;
++        }
++        std::fprintf(g_fixtureComm,"B 00000002 00000000 00000000 00000000\n");
++      }
++      std::fprintf(g_indyLab,"FIXTURE_BEGIN %d %llu %u %06x %.6f\n",fixtureN,(unsigned long long)frameNumber,actor,fixtureReturn,std::sqrt(dx*dx+dz*dz));
++      std::fflush(g_indyLab); fixtureWaiting=true; fixtureLast=frameNumber;
++    });
++  }
++}
++
+ void CModel2::Reset(void)
+ {
++  g_indyScriptRunning=false; // lab input timeline cannot survive reset/load
+   m_sgt24hDecoded={};
+   m_sgt24hDraws={};
+   m_sgt24hUdp={};
+@@ -4005,6 +4448,50 @@ void CModel2::Reset(void)
+   m_uartClockFrac = 0;
+
+   m_i960.Reset();
++  I960PcHit::Install(m_i960, m_workRAM, m_ram, m_program, m_frameNumber, [this](CBlockFile *b) {
++    // Capture a quiescent SHARC plus FIFO/scheduler state while i960 is paused
++    // at an instruction boundary. No extra ROMs are stored in this block.
++    m_sharc.SaveState(b,"Fixture SHARC");
++    b->NewBlock("Fixture devices", "v1");
++    uint32_t version=1, count=0;
++    b->Write(version);
++    const int64_t i960Now=I960Now(); b->Write(i960Now); b->Write(m_time[CPU_COPRO]); b->Write(m_lineEnd);
++    b->Write(m_halted); b->Write(m_emptyTriggered); b->Write(m_fullTriggered); b->Write(m_coproHeld); b->Write(m_coproCtl);
++    auto fifo=[&](const CFIFO &f) {
++      uint32_t limit=uint32_t(f.size); b->Write(limit);
++      count=uint32_t(f.values.size()); b->Write(count); for (uint32_t x:f.values) b->Write(x);
++      count=uint32_t(f.extra.size()); b->Write(count); for (uint32_t x:f.extra) b->Write(x);
++    };
++    fifo(m_fifoIn); fifo(m_fifoOut);
++    count=uint32_t(m_bufferRAM.size()); b->Write(count); b->Write(m_bufferRAM.data(),count*4);
++    // Extra timing inputs for a future validated scheduler replay. These do
++    // not make the asynchronous replayer scheduler-faithful by themselves.
++    b->NewBlock("Fixture timing", "v2");
++    uint32_t versionTiming=2; b->Write(versionTiming);
++    count=uint32_t(m_waitStateRAM.size()); b->Write(count); b->Write(m_waitStateRAM.data(),count);
++    b->Write(m_timerVal); b->Write(m_timerOrig); b->Write(m_timerRun); b->Write(m_timerStart);
++    b->Write(m_intReq); b->Write(m_intEna); b->Write(m_line); b->Write(m_uartClockFrac);
++    const int elapsed=m_i960.CyclesRun(); b->Write(elapsed);
++    // Snapshot happens inside Run(), not at the start of a new time slice.
++    // Its original remaining budget is needed to reproduce the next switch.
++    b->Write(g_fixtureSliceStart); b->Write(g_fixtureSliceBudget);
++    const bool inI960 = m_running==CPU_I960;
++    const bool delayed = m_i960.HasDelayedCallback();
++    b->Write(inI960); b->Write(delayed);
++    // UART can advance at each completed scan line and may raise an IRQ.
++    m_uart.SaveState(b, "Fixture UART");
++    if (std::getenv("SUPERMODEL_INDY_LAB_COMM_FIXTURE")) {
++      // Raw comm board save plus the effective guest-visible view. SaveState
++      // alone omits the Indy UDP guest overlay. Private lab data only.
++      m_comm.SaveState(b);
++      b->NewBlock("Fixture comm view", "v1");
++      uint32_t commVersion=2, commSize=0x4000;
++      b->Write(commVersion); b->Write(commSize);
++      std::vector<uint8_t> view(commSize);
++      for (unsigned i=0;i<commSize;++i) view[i]=m_comm.ReadShared(i);
++      b->Write(view.data(),commSize);
++    }
++  });
+   m_tgp.Reset();
+   m_tgpx4.Reset();          // held (m_coproHeld) until the i960 boots it
+   if (m_model2b)
+@@ -4026,6 +4513,7 @@ void CModel2::Reset(void)
+     m_m1SoundBoard->Reset();
+   m_ioBoardBootFrames = IO_BOARD_BOOT_FRAMES;
+   m_gearSel = 0;
++  if (g_fixtureComm) std::fprintf(g_fixtureComm,"X 00000000 00000002 00000000 00000000\n");
+   m_comm.Reset();
+   if (m_wheelBoard)
+     m_wheelBoard->Reset();
+@@ -4161,6 +4649,7 @@ void CModel2::SaveState(CBlockFile *SaveState)
+
+ void CModel2::LoadState(CBlockFile *SaveState)
+ {
++  g_indyScriptRunning=false; // lab input timeline cannot survive reset/load
+   m_sgt24hDecoded={};
+   m_sgt24hDraws={};
+   m_sgt24hUdp={};
+@@ -4278,6 +4767,7 @@ void CModel2::LoadState(CBlockFile *SaveState)
+   m_tiles.LoadState(SaveState);
+   m_video3d.LoadState(SaveState);
+   m_uart.LoadState(SaveState, "Model 2 UART");
++  if (g_fixtureComm) std::fprintf(g_fixtureComm,"X 00000000 00000003 00000000 00000000\n");
+   m_comm.LoadState(SaveState);
+   m_eeprom.LoadState(SaveState);
+   if (m_extra != Extra::None && Result::OKAY == SaveState->FindBlock("Model 2 protection"))
