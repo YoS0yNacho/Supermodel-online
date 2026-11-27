@@ -154,13 +154,12 @@ index 8ac017f..60e5fb5 100644
        uint32_t d = 0;
        if (mask & 0x000000ff)
          d |= m_comm.ReadCN();
-@@ -1475,8 +1569,85 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
+@@ -1475,8 +1569,84 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
    return 0;
  }
 
 +#include <cstdio>
 +#include <cstring>
-+#include <execinfo.h>
  void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
  {
 +  // LAB ONLY: substitute the current local physics coordinate for the local
@@ -240,7 +239,7 @@ index 8ac017f..60e5fb5 100644
    if (addr < 0x00200000)
      return;                                           // ROM
    if (m_extra != Extra::None && ExtraWrite(addr, data, mask))
-@@ -1526,6 +1697,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+@@ -1526,6 +1696,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
    }
    if (addr >= 0x00880000 && addr < 0x00884000)
    {
@@ -249,7 +248,7 @@ index 8ac017f..60e5fb5 100644
      // copro_function_port_w
      uint32_t d = (data & 0x800fffff) | ((((addr & 0x3fff) >> 4) & 0xff) << 23);
      FIFOPush(m_fifoIn, d, CPU_I960, CPU_COPRO);
-@@ -1533,6 +1706,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+@@ -1533,6 +1705,8 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
    }
    if (addr >= 0x00884000 && addr < 0x00888000)
    {
@@ -258,7 +257,7 @@ index 8ac017f..60e5fb5 100644
      CoproFIFOWrite(data);
      return;
    }
-@@ -1720,12 +1895,17 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
+@@ -1720,12 +1894,17 @@ void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
      if (a < 0x01a04000)
      {
        unsigned o = a - 0x01a00000;
@@ -276,7 +275,7 @@ index 8ac017f..60e5fb5 100644
        if (mask & 0x000000ff)
          m_comm.WriteCN(uint8_t(data));
        if (mask & 0x00ff0000)
-@@ -2032,6 +2212,38 @@ void CModel2::UpdateInputs(void)
+@@ -2032,6 +2211,38 @@ void CModel2::UpdateInputs(void)
    uint8_t accel = m_inputs->accelerator ? (uint8_t) m_inputs->accelerator->value : 0;
    uint8_t brake = m_inputs->brake ? (uint8_t) m_inputs->brake->value : 0;
 
@@ -315,7 +314,7 @@ index 8ac017f..60e5fb5 100644
    switch (m_layout)
    {
    case Layout::Fighting:
-@@ -2689,6 +2901,7 @@ void CModel2::RunLine(void)
+@@ -2689,6 +2900,7 @@ void CModel2::RunLine(void)
      if (cpu == CPU_I960)
      {
        int cycles = (int) std::max<int64_t>(1, (limit - m_time[cpu] + I960_TIME - 1) / I960_TIME);
@@ -323,7 +322,7 @@ index 8ac017f..60e5fb5 100644
        int done = m_i960.Run(cycles);
        if (m_indyEntryAbort) { m_running = CPU_NONE; return; }
        m_time[cpu] += int64_t(std::max(done, 1)) * I960_TIME;
-@@ -2872,6 +3085,7 @@ bool CModel2::DaytonaEntryInstruction()
+@@ -2872,6 +3084,7 @@ bool CModel2::DaytonaEntryInstruction()
 
  bool CModel2::IndyEntryInstruction()
  {
@@ -331,7 +330,7 @@ index 8ac017f..60e5fb5 100644
    constexpr unsigned G4 = 20;
    if (m_i960.GetReg(G4) != 2) return true; // the ROM hasn't finished its animation yet
    if (Get32(m_workRAM,INDY_MODE) != 5 || Get32(m_workRAM,INDY_SUBMODE) != 6 ||
-@@ -2957,6 +3171,7 @@ bool CModel2::IndyMotionRaceActive() const
+@@ -2957,6 +3170,7 @@ bool CModel2::IndyMotionRaceActive() const
 
  void CModel2::ClearIndyMotion()
  {
@@ -339,7 +338,7 @@ index 8ac017f..60e5fb5 100644
    m_indyActors={};
    m_indyDraw={};
    m_indyUdpPeers={};
-@@ -3751,6 +3966,10 @@ bool CModel2::PrepareSrallycRelayRole()
+@@ -3751,6 +3965,10 @@ bool CModel2::PrepareSrallycRelayRole()
 
  void CModel2::RunFrame(void)
  {
@@ -350,7 +349,7 @@ index 8ac017f..60e5fb5 100644
    if (m_comm.Sgt24hOnline() && !m_sgt24hRoleConfigured && !PrepareSgt24hRelayRole()) return;
    if (m_comm.IndyOnline() && !m_indyRoleConfigured && !PrepareIndyRelayRole()) return;
    if (m_comm.SrallycOnline() && !m_srallycRoleConfigured && !PrepareSrallycRelayRole()) return;
-@@ -3775,6 +3994,7 @@ void CModel2::RunFrame(void)
+@@ -3775,6 +3993,7 @@ void CModel2::RunFrame(void)
        }
        // No motion bytes are omitted before native play or for special states.
        // During the race clock a recovering seat can still confirm UDP liveness.
@@ -358,7 +357,7 @@ index 8ac017f..60e5fb5 100644
        m_comm.Tick(indyRace,indySlots);
        if (m_comm.Sgt24hOnline() && m_sgt24hRoleConfigured &&
            std::getenv("SUPERMODEL_SGT_SIM_TRACE"))
-@@ -3833,6 +4053,31 @@ void CModel2::RunFrame(void)
+@@ -3833,6 +4052,31 @@ void CModel2::RunFrame(void)
        }
        // The geometrizer starts a frame: in 60 Hz mode, or on even frames
        m_vblankFrame = (uint32_t) m_frameNumber;
@@ -390,7 +389,7 @@ index 8ac017f..60e5fb5 100644
        if ((m_videoControl & 1) == 0 || (m_vblankFrame & 1) == 0)
        {
          if (m_geoLLE)
-@@ -3937,8 +4182,206 @@ void CModel2::RenderFrame(void)
+@@ -3937,8 +4181,208 @@ void CModel2::RenderFrame(void)
    EndFrameVideo();
  }
 
@@ -414,7 +413,7 @@ index 8ac017f..60e5fb5 100644
 +  static std::vector<uint8_t>* ram = nullptr;
 +  static int snapN = 0;
 +  static const char* snapBase = nullptr;
-+  static void Snapshot(int) {
++  [[maybe_unused]] static void Snapshot(int) {
 +    if (!snapBase || !ram) return;
 +    char name[512];
 +    std::snprintf(name, sizeof name, "%s_%04d.pc", snapBase, snapN);
@@ -475,7 +474,9 @@ index 8ac017f..60e5fb5 100644
 +    if (const char* lp = std::getenv("SUPERMODEL_INDY_LAB_STATE")) g_indyLab = std::fopen(lp, "w");
 +    if (const char* wp = std::getenv("SUPERMODEL_I960_WLOG")) g_wlog = std::fopen(wp, "w");
 +    snapBase = std::getenv("SUPERMODEL_I960_SNAP");
++#if defined(SIGUSR1)
 +    if (snapBase) std::signal(SIGUSR1, Snapshot);
++#endif
 +
 +    path = std::getenv("SUPERMODEL_I960_PCHIT");
 +    if (!path) return;
@@ -597,7 +598,7 @@ index 8ac017f..60e5fb5 100644
    m_sgt24hDecoded={};
    m_sgt24hDraws={};
    m_sgt24hUdp={};
-@@ -4005,6 +4448,50 @@ void CModel2::Reset(void)
+@@ -4005,6 +4449,50 @@ void CModel2::Reset(void)
    m_uartClockFrac = 0;
 
    m_i960.Reset();
@@ -648,7 +649,7 @@ index 8ac017f..60e5fb5 100644
    m_tgp.Reset();
    m_tgpx4.Reset();          // held (m_coproHeld) until the i960 boots it
    if (m_model2b)
-@@ -4026,6 +4513,7 @@ void CModel2::Reset(void)
+@@ -4026,6 +4514,7 @@ void CModel2::Reset(void)
      m_m1SoundBoard->Reset();
    m_ioBoardBootFrames = IO_BOARD_BOOT_FRAMES;
    m_gearSel = 0;
@@ -656,7 +657,7 @@ index 8ac017f..60e5fb5 100644
    m_comm.Reset();
    if (m_wheelBoard)
      m_wheelBoard->Reset();
-@@ -4161,6 +4649,7 @@ void CModel2::SaveState(CBlockFile *SaveState)
+@@ -4161,6 +4650,7 @@ void CModel2::SaveState(CBlockFile *SaveState)
 
  void CModel2::LoadState(CBlockFile *SaveState)
  {
@@ -664,7 +665,7 @@ index 8ac017f..60e5fb5 100644
    m_sgt24hDecoded={};
    m_sgt24hDraws={};
    m_sgt24hUdp={};
-@@ -4278,6 +4767,7 @@ void CModel2::LoadState(CBlockFile *SaveState)
+@@ -4278,6 +4768,7 @@ void CModel2::LoadState(CBlockFile *SaveState)
    m_tiles.LoadState(SaveState);
    m_video3d.LoadState(SaveState);
    m_uart.LoadState(SaveState, "Model 2 UART");

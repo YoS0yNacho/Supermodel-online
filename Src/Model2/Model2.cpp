@@ -1624,7 +1624,6 @@ uint32_t CModel2::ReadDword(uint32_t addr, uint32_t mask)
 
 #include <cstdio>
 #include <cstring>
-#include <execinfo.h>
 void CModel2::WriteDword(uint32_t addr, uint32_t data, uint32_t mask)
 {
   // LAB ONLY: substitute the current local physics coordinate for the local
@@ -4269,7 +4268,7 @@ namespace I960PcHit {
   static std::vector<uint8_t>* ram = nullptr;
   static int snapN = 0;
   static const char* snapBase = nullptr;
-  static void Snapshot(int) {
+  [[maybe_unused]] static void Snapshot(int) {
     if (!snapBase || !ram) return;
     char name[512];
     std::snprintf(name, sizeof name, "%s_%04d.pc", snapBase, snapN);
@@ -4330,7 +4329,9 @@ namespace I960PcHit {
     if (const char* lp = std::getenv("SUPERMODEL_INDY_LAB_STATE")) g_indyLab = std::fopen(lp, "w");
     if (const char* wp = std::getenv("SUPERMODEL_I960_WLOG")) g_wlog = std::fopen(wp, "w");
     snapBase = std::getenv("SUPERMODEL_I960_SNAP");
+#if defined(SIGUSR1)
     if (snapBase) std::signal(SIGUSR1, Snapshot);
+#endif
 
     path = std::getenv("SUPERMODEL_I960_PCHIT");
     if (!path) return;
