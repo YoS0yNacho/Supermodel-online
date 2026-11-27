@@ -12,6 +12,7 @@
 #include <cstdarg>
 Result ErrorLog(const char* fmt,...) { va_list a;va_start(a,fmt);vfprintf(stderr,fmt,a);va_end(a);fputc('\n',stderr);return Result::FAIL; }
 void InfoLog(const char*,...) {}
+std::string SupermodelVersion() { return "test-version"; }
 void DebugLog(const char*,...) {}
 template<class F> void Wait(F f) {
   const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(12);
@@ -19,7 +20,7 @@ template<class F> void Wait(F f) {
 }
 enum class Model2Rate { Native, Hz60, LegacyRelay };
 void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,bool probeBoth=false,
-                bool daytona=false,bool tryDaytona=false,Model2Rate rate=Model2Rate::Native,bool sgt=false,bool trySgt=false) {
+                bool daytona=false,bool tryDaytona=false,Model2Rate rate=Model2Rate::Native,bool sgt=false,bool trySgt=false,bool noCpu=false,bool oldNoCpuRelay=false) {
   const unsigned game=sgt?Sgt24hOnline::Game:daytona?DaytonaOnline::Game:rally?SrallycOnline::Game:Indy500Online::Game;
   const uint64_t guid=sgt?Sgt24hOnline::Guid:daytona?DaytonaOnline::Guid:rally?SrallycOnline::Guid:Indy500Online::Guid;
   const size_t payloadSize=sgt?Sgt24hOnline::PayloadSize:daytona?DaytonaOnline::PayloadSize:rally?SrallycOnline::PayloadSize:Indy500Online::PayloadSize;
@@ -35,8 +36,10 @@ void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,b
     Wait([&]{return seats.back()->Get().connected;});
     const auto view=seats.back()->Get();
     assert(view.indy500Relay && view.srallycRelay==(rally||daytona) && view.daytonaRelay==daytona);
-    assert(view.sgt24hRelay==sgt);
+    assert(view.sgt24hRelay==(sgt || (trySgt && noCpu)));
     assert(view.model2VideoRelay==(rate!=Model2Rate::LegacyRelay));
+    if(noCpu) assert(view.indyNoCpuRelay && !oldNoCpuRelay);
+    if(oldNoCpuRelay) assert(!view.indyNoCpuRelay);
   }
   auto& master=*seats[0];
   master.Create(game,"Native Model 2 cabinets");
@@ -47,6 +50,7 @@ void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,b
   }
   uint32_t options=roomOptions && !sgt ? NativeRoomSettings::WithMode(NativeRoomSettings::WithDifficulty(NativeRoomSettings::Defaults(game),(rally||daytona)?3:4),rally?2:1) : 0;
   if(rate==Model2Rate::Hz60) options|=NativeRoomSettings::Video60;
+  if(noCpu) options|=NativeRoomSettings::RealPlayers;
   if(roomOptions) master.SetRoomOptions(room,options);
   for (auto& seat : seats) Wait([&]{
     const auto view=seat->Get();
@@ -60,7 +64,7 @@ void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,b
   for(unsigned i=count;i-- > 0;) {
     auto& seat=*seats[i];Wait([&]{return seat.Get().launch;});const auto a=seat.Get();
     assert(a.game==game&&a.index==i&&a.count==count);
-    assert(a.gameEndpoint==endpoint&&a.roomOptions==options&&!a.carNumber);
+    assert(a.gameEndpoint==endpoint&&a.roomOptions==options&&a.carNumber==(game==DaytonaOnline::Game ? i+1 : 0));
     seat.Disconnect();
     servers[i]=std::make_shared<CNetServer>(0,"Model 2 test cabinet",false);
     assert(servers[i]->Start());
@@ -88,16 +92,20 @@ void TestModel2(uint16_t port,unsigned count,bool roomOptions,bool rally=false,b
 }
 int main(int argc,char**argv) {
   const std::string mode=argc>2?argv[2]:"";
-  assert(argc==2 || (argc==3 && (mode=="pre-sgt24h" || mode=="legacy-indy" || mode=="pre-srallyc" || mode=="pre-daytona" || mode=="pre-model2-video")));
+  assert(argc==2 || (argc==3 && (mode=="pre-sgt24h" || mode=="legacy-indy" || mode=="pre-srallyc" || mode=="pre-daytona" || mode=="pre-model2-video" || mode=="pre-indy-nocpu" || mode=="indy-nocpu")));
   uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
   if(argc==3) {
     constexpr auto legacy=Model2Rate::LegacyRelay;
-    if(mode=="pre-sgt24h") TestModel2(port,2,true,false,true,true,false,Model2Rate::Native,false,true);
+    if(mode=="indy-nocpu") { TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,false,true); TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,true,true); }
+    else if(mode=="pre-indy-nocpu") TestModel2(port,2,true,false,true,true,false,Model2Rate::Native,true,false,false,true);
+    else if(mode=="pre-sgt24h") TestModel2(port,2,true,false,true,true,false,Model2Rate::Native,false,true);
     else if(mode=="pre-model2-video") TestModel2(port,2,true,false,true,true,false,legacy);
     else if(mode=="pre-daytona") TestModel2(port,2,true,true,true,false,true,legacy);
     else TestModel2(port,2,mode=="pre-srallyc",false,true,false,true,legacy);
     return 0;
   }
+  TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,false,true);
+  TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,true,true);
   for(unsigned n:{2u,3u,4u}) TestModel2(port,n,true,false,true,true,false,Model2Rate::Native,true);
   {
     std::string defHost; uint16_t defPort=0;

@@ -168,6 +168,8 @@ public:
   bool IndyUdpActive() const; // legacy IPU1 presentation-only lane
   bool IndyRaceUdpEnabled() const { return m_indyRaceUdp; }
   struct IndyMotionSource { uint32_t tick=0; uint64_t sampleUs=0; };
+  IndyPoseUdp::Selection IndyRaceDrawPick(unsigned row,const IndyMotion::Sample& native,
+                                          uint16_t state,uint64_t now) const;
   IndyMotionSource IndyRemoteMotion(unsigned row,unsigned slot) const
   {
     return row<m_indyAppliedMotion.size() && slot<IndyRaceUdp::Slots ? m_indyAppliedMotion[row][slot] : IndyMotionSource{};

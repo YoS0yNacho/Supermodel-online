@@ -19,7 +19,7 @@ constexpr uint32_t SecretCars=1, Hornet=1, Enabled=2, NoCollisions=256, RealPlay
 constexpr uint32_t AllBits=8191; // Model 3 only
 constexpr uint32_t IndyHandicap=1u<<11;
 constexpr uint32_t SrallycSettingsBits=Enabled|28u|224u;
-constexpr uint32_t IndySettingsBits=Enabled|28u|224u|IndyHandicap;
+constexpr uint32_t IndySettingsBits=Enabled|28u|224u|IndyHandicap|RealPlayers;
 constexpr uint32_t DaytonaSettingsBits=Enabled|28u|224u|RealPlayers|NoCollisions|NoPitstop;
 inline constexpr bool Model2Game(unsigned game){return game==Sgt24hOnline::Game || game==Indy500Online::Game || game==SrallycOnline::Game || game==DaytonaOnline::Game;}
 inline bool HasIndyHandicap(uint32_t options){return (options&IndyHandicap)!=0;}
@@ -31,7 +31,7 @@ inline unsigned BaseGame(unsigned game){return game==6?4:game==8?3:game;}
 inline bool SupportsSecretCars(unsigned game){return BaseGame(game)==3;}
 inline bool SupportsRaceModifiers(unsigned game){return BaseGame(game)<4 || game==DaytonaOnline::Game;}
 inline bool HasSecretCars(unsigned game,uint32_t options){return SupportsSecretCars(game) && (options&SecretCars);}
-inline bool HasRealPlayers(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&RealPlayers);}
+inline bool HasRealPlayers(unsigned game,uint32_t options){return (game==Indy500Online::Game || SupportsRaceModifiers(game)) && (options&RealPlayers);}
 inline bool HasNoCollisions(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&NoCollisions);}
 inline bool HasNoPitstop(unsigned game,uint32_t options){return SupportsRaceModifiers(game) && (options&NoPitstop);}
 // Game 7 (dirtdvls) has no native settings: like Le Mans 24 only Video60 applies.

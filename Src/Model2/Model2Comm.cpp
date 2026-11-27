@@ -1326,6 +1326,19 @@ bool CModel2Comm::ReceiveDaytonaEntry(const std::vector<uint8_t>& frame)
   return true;
 }
 
+IndyPoseUdp::Selection CModel2Comm::IndyRaceDrawPick(unsigned row,const IndyMotion::Sample& native,
+                                                        uint16_t state,uint64_t now) const
+{
+  // Do not change primary selection or native traffic. During TCP fallback,
+  // expose a validated sample solely to the draw pipeline.
+  if (!m_indyOnline || !m_indyRaceUdp || m_indyPrimary || !m_indyRaceDrove ||
+      !m_indyUdpRace || now<m_indyPauseUdpUntil || row>=m_linkCount ||
+      (m_indyGuestWriteRows&(1u<<row)) || !native.peer ||
+      native.peer>m_linkCount || native.peer==m_linkID) return {};
+  const auto& peer=m_indyPeers[native.peer-1];
+  return IndyRaceUdp::PickDraw(native,state,m_indyUdpRace,peer.sample,peer.sampleUs,now);
+}
+
 bool CModel2Comm::IndyUdpActive() const
 {
   return m_indyOnline && !m_indyRaceUdp && m_link && m_link->UdpActive();

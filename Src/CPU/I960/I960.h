@@ -82,6 +82,7 @@ public:
   void Reset();                     // MAME device_reset (reads the boot record from the bus)
   int  Run(int cycles);             // returns the cycles used
   int  CyclesRun() const { return m_inRun ? m_cyclesRequested - m_icount : 0; }   // so far in the current Run()
+  bool HasDelayedCallback() const { return bool(m_delayFn); } // diagnostic fixture completeness
 
   // Called by the bus during a read or write that can't complete (e.g. an
   // empty FIFO): the instruction is retried on the next Run(), the rest of

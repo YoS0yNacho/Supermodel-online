@@ -132,6 +132,24 @@ inline bool Continuous(const Known& previous,const Sample& sample,unsigned slot)
          (delta || sample.cars[slot].bytes==previous.motion.bytes);
 }
 
+// Draw-only use of a recent race-UDP sample while reliable native motion is
+// active. The caller independently established the native source mapping.
+inline IndyPoseUdp::Selection PickDraw(const IndyMotion::Sample& native,uint16_t state,Race race,
+                                      const Sample& remote,uint64_t sampleUs,uint64_t now)
+{
+  const uint32_t gap=remote.tick-native.tick;
+  if (!race || remote.race.epoch!=race.epoch || remote.race.serial!=race.serial ||
+      remote.race.roster!=race.roster || remote.race.course!=race.course ||
+      !sampleUs || now<sampleUs || now-sampleUs>LeaveFreshUs ||
+      !native.peer || native.peer!=remote.peer || native.slot>=Slots ||
+      !(remote.mask&(1u<<native.slot)) || !gap || gap>IndyPoseUdp::MaxNewerTicks)
+    return {};
+  const auto& motion=remote.cars[native.slot];
+  const auto pose=motion.Pose();
+  if (!motion || motion.state!=state || !IndyPoseUdp::Aligned(pose,native.pose,gap)) return {};
+  return {{pose,remote.tick,native.peer,native.slot},gap,now-sampleUs};
+}
+
 // The ordered TCP row still governs a car's state (and may contain a real
 // reset/correction). A recent, continuous UDP position can lead that row;
 // a periodic full row is not a reason to jump back to its older position.

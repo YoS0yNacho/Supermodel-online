@@ -91,8 +91,23 @@ public:
     if (!s.peer || s.peer>MaxSeats || s.slot>=MaxActors || !ValidPosition(raw.p)) { Clear(); return raw; }
     if (!m_valid || s.peer!=m_last.peer || s.slot!=m_last.slot || frame<m_frame || frame-m_frame>9)
       return Seed(s,frame);
-    // A display list may request the same actor several times per vblank.
-    if (frame==m_frame) return s.tick==m_last.tick && Same(raw,m_last.pose) ? m_shown : raw;
+    // The game can render the same car more than once within a vblank,
+    // sometimes after receiving a newer, continuous network sample. Do not
+    // advance twice or snap back to the native sample: hold the already shown
+    // pose, bounded against the newly received native pose. Leave m_last alone
+    // so the next frame incorporates the newest sample exactly once.
+    if (frame==m_frame)
+    {
+      const uint32_t dt=s.tick-m_last.tick;
+      const Vec delta=raw.p-m_last.pose.p;
+      if ((!dt && !Same(raw,m_last.pose)) || int32_t(dt)<0 || dt>8 ||
+          (dt && delta.Length()>3.5*dt)) return Seed(s,frame);
+      Vec shift=m_shown.p-raw.p;
+      const double distance=shift.Length();
+      if (distance>MaxShift) shift=shift*(MaxShift/distance);
+      const int yaw=std::clamp(YawDelta(m_shown.yaw,raw.yaw),-MaxYawShift,MaxYawShift);
+      return {raw.p+shift,uint16_t(int(raw.yaw)+yaw)};
+    }
     const double step=double(frame-m_frame);
     const uint32_t dt=s.tick-m_last.tick;  // unsigned wrap; backwards ticks reset below
     const Vec delta=raw.p-m_last.pose.p;

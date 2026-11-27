@@ -131,7 +131,7 @@ class Blend
 public:
   void Clear() { *this={}; }
   unsigned Weight() const { return m_weight; }
-  Pose Step(Sample native,Pose tcp,const Pose* udp,uint64_t frame)
+  Pose Step(Sample native,Pose tcp,const Pose* udp,uint64_t frame,bool ease=false)
   {
     if (!m_valid || frame!=m_frame)
     {
@@ -142,8 +142,15 @@ public:
       if (udp)
       {
         const auto bounded=Bound(native.pose,*udp);
-        m_offset=bounded.p-tcp.p;
-        m_yaw=IndyMotion::YawDelta(bounded.yaw,tcp.yaw);
+        const Vec target=bounded.p-tcp.p;
+        const int yaw=IndyMotion::YawDelta(bounded.yaw,tcp.yaw);
+        if (ease)
+        {
+          if (!m_weight) { m_offset={}; m_yaw=0; }
+          m_offset=m_offset+(target-m_offset)*0.25;
+          m_yaw+=int(std::lround((yaw-m_yaw)*0.25));
+        }
+        else { m_offset=target; m_yaw=yaw; }
         if (m_weight<4) ++m_weight;
       }
       else if (m_weight) --m_weight;

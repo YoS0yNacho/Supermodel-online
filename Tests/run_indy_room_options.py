@@ -49,6 +49,7 @@ async def main():
     rules = 2 | (4 << 2) | (1 << 5)  # Hardest / Long / Handicap Off
     default = 2 | (2 << 2) | (1 << 11)
     valid = {0, *(2 | d << 2 | m << 5 | h << 11 for d in range(5) for m in range(2) for h in range(2))}
+    valid |= {v | 512 for v in valid if v & 2}
     valid |= {v | relay.VIDEO60_OPTION for v in valid}
     assert {v for v in range(1 << 14) if online.valid_room_options(game, v)} == valid
     assert not online.valid_room_options(3, rules | (1 << 11))
@@ -97,7 +98,7 @@ async def main():
         master.send(b'OLQ1')
         await await_view(master, room, (default, 1))
         # Known Model 3 flags, invalid fields, and non-master changes must fail.
-        for invalid in (1, 1 << 11, rules | 256, rules | 512, 2 | 5 << 2, 2 | 2 << 5, 1 << 31):
+        for invalid in (1, 1 << 11, rules | 256, 512, 2 | 5 << 2, 2 | 2 << 5, 1 << 31):
             master.send(b'ORO1', struct.pack('<II', room, invalid))
             assert b'valid room options' in await master.until(b'OLE1')
         guest.send(b'ORO1', struct.pack('<II', room, rules))

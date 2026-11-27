@@ -164,7 +164,14 @@ The native Indy frame size and cabinet timing are unchanged.
    Updated rooms start with Normal / Normal / On. If an unmodified room
    includes a client without Indy room-options support, the game uses each
    cabinet's settings. Nondefault choices require every client to support
-   Indy room options.
+   Indy room options. The optional **Real players only (no CPU cars)** setting
+   is off by default. The room master can enable it before Start Link; it is
+   applied to every linked cabinet for that session. Only racers who actually
+   start participate, even if other cabinets remain in the room. Both the
+   relay and every cabinet must be updated; incompatible clients cannot join a
+   players-only room. The patch is specific to Indy 500 Rev A and does not
+   modify the ROM file or offline NVRAM. It is experimental: see the validation
+   limitations below.
 3. The creator clicks **Start Link**. Current clients automatically apply
    native cabinet IDs from the relay: Link 1 is **MASTER** and Link 2 through N
    are **SLAVE**. Standalone saves and fresh installs work without editing the
@@ -181,6 +188,19 @@ fan-out of the native ring, adaptive tick rate, self-hosting, Model 3 race
 modifiers. The relay needs inbound TCP and, optionally, UDP on that same port
 for the race-motion lane below. Keep it on a private network or VPN.
 The room's emulated video rate defaults to 57.524 Hz.
+
+The Indy-specific players-only patch selects an existing game initialization
+path that removes the non-player cars from the active list. The local test
+used one, two and three actual racers in 2–3 linked cabinets, at 100 ms
+simulated one-way latency, plus a two-player default-on-CPU control. It did
+not validate all 4–8-seat rosters, every course, a complete finish/results
+sequence, WAN play, reset/rejoin, or long races. If the exact program guard
+fails, a requested players-only session fails rather than silently adding CPU
+cars. Change the option only before launch; all clients and the relay need the
+updated code. A running relay must be restarted to load the new Python code.
+ROM-free checks: `python3 Tests/run_indy_no_cpu_options.py`,
+`python3 Tests/run_indy_room_options.py`, and
+`c++ -std=c++17 -ISrc Tests/IndyNoCpuRoomTest.cpp -o /tmp/indy-no-cpu-test && /tmp/indy-no-cpu-test`.
 
 The relay routes the native `FF`/`FE` handshake and each ordered data + `FC`
 pair over TCP. The native payloads are 3,585 bytes after decoding. In a room of N seats the wire goes `1 → N → … → 2 → 1`: `FE`
@@ -253,8 +273,14 @@ special car states use full native motion on TCP.
 
 A lost UDP sample does not block playout. Stale or unusable samples cause
 automatic full TCP fallback; the race can return to UDP after the lane is
-healthy again. The ring must still be connected. Compatible older clients
-keep full TCP movement in mixed rooms and may use the older pose feed.
+healthy again. When race UDP is not primary but recent compatible snapshots
+are still arriving, the draw path can blend a bounded newer pose after checking
+race, peer, slot, state, age and geometry. It eases the extra correction and
+fades it out on loss; close to the local car, rendering still returns toward the
+native collision pose. This affects drawing only, not the native receive rows,
+collision inputs or reliable traffic. It is disabled with prediction or UDP.
+The ring must still be connected. Compatible older clients keep full TCP
+movement in mixed rooms and may use the older pose feed.
 `-no-indy-udp` (or the existing `IndyPoseUdp = false` setting) opts a client
 out; `--tcp-only` on the relay disables UDP for every room.
 

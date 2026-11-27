@@ -1600,7 +1600,7 @@ INDY500_HELLO = b'Supermodel Online (indy500)'
 RELAY_HELLO = b'Supermodel Online lobby v1 (indy500)'
 INDY500_ROOM_HELLO = b'Supermodel Online (indy500 room options)'
 INDY500_ROOM_RELAY_HELLO = b'Supermodel Online lobby v1 (indy500 room options)'
-INDY500_SETTINGS_BITS = 2 | 28 | 224 | (1 << 11)
+INDY500_SETTINGS_BITS = 2 | 28 | 224 | 512 | (1 << 11)
 INDY500_DEFAULT_OPTIONS = 2 | (2 << 2) | (1 << 11)  # Normal, Normal, Handicap On
 GAMES = [("daytona2", 0x5bf177da34878), ("dayto2pe", 0x5bf177da34875),
          ("scud", 0x5bf177da34876), ("scudplus", 0x5bf177da34877),
@@ -1858,6 +1858,8 @@ class Hub:
                 # Pre-Video60 clients never see bit 1024 (they cannot join such a room anyway).
                 options = room.effective_options()
                 shown = options if supports_room_video(room.game, c) else options & ~VIDEO60_OPTION
+                if room.game == INDY500_GAME and not c.get('indy_nocpu_capable'):
+                    shown &= ~512  # older Indy clients reject unknown options even while browsing
                 self.send(c, b'ORO1', struct.pack('<II', room.id, shown))
             if c.get('ping_capable'):
                 # Each member's RTT to this host (what it reported in its last OLQ2); 0 = not measured yet.
@@ -1949,6 +1951,9 @@ class Hub:
             return False
         if room.game in MODEL2_GAMES and room.options & VIDEO60_OPTION and not all(supports_room_video(room.game, m) for m in room.members):
             self.error(room.members[0], 'Update all room members before starting a 60 Hz Model 2 room.')
+            return False
+        if room.game == INDY500_GAME and room.options & 512 and not all(m.get('indy_nocpu_capable') for m in room.members):
+            self.error(room.members[0], 'Update every cabinet before starting an INDY 500 real-players-only room.')
             return False
         if room.game == INDY500_GAME and room.options and not all_native(room):
             self.error(room.members[0], 'Update all cabinet clients before starting with INDY 500 room settings.')
@@ -2096,6 +2101,9 @@ class Hub:
                 return
             if value and not all(m.get('options_capable') for m in room.members):
                 self.error(c, 'Update all room members before enabling room options.')
+                return
+            if indy and value & 512 and not all(m.get('indy_nocpu_capable') for m in room.members):
+                self.error(c, 'Update all room members before enabling INDY 500 real players only.')
                 return
             if room.game == 0 and value & 1 and not all(m.get('hornet_capable') for m in room.members):
                 self.error(c, 'Update all room members before enabling Hornet.')
@@ -2255,6 +2263,9 @@ class Hub:
                         return
                     self.handoff(c, room)
                     return
+                if room.game == INDY500_GAME and room.options & 512 and not c.get('indy_nocpu_capable'):
+                    self.error(c, 'Update this client: INDY 500 real players only is enabled.')
+                    return
                 if room.game == INDY500_GAME and room.options and not c.get('indy_room_capable'):
                     self.error(c, 'Update this client: INDY 500 room settings are enabled.')
                     return
@@ -2306,7 +2317,8 @@ class Hub:
 
     async def control(self, reader, writer, body, host_capable=False, full_host_capable=False,
                       room_host_capable=False, indy_available=False, indy_room=False, srallyc_available=False,
-                      daytona_flags=None, model2_video_flags=None, sgt24h_available=False, sgt24h_flags=None):
+                      daytona_flags=None, model2_video_flags=None, sgt24h_available=False, sgt24h_flags=None,
+                      indy_nocpu=False):
         if len(body) != HELLO.size:
             raise ValueError('lobby hello size')
         version, mask, enabled, name = HELLO.unpack(body)
@@ -2341,6 +2353,7 @@ class Hub:
         c['daytona_capable'] = daytona_capable
         c['sgt24h_capable'] = sgt24h_capable
         c['indy_room_capable'] = indy_available and indy_room and (enabled & 6) == 6
+        c['indy_nocpu_capable'] = indy_nocpu and c['indy_room_capable'] and model2_video
         c['hornet_capable'] = bool(enabled & 16)  # course-selection semantics; old car shortcut is not compatible
         c['race_capable'] = bool(enabled & 32)
         c['star_capable'] = bool(enabled & 64)  # accepts RLS1: the relay fans ring segments out, the client does not forward
@@ -2357,9 +2370,11 @@ class Hub:
         self.next_client += 1
         self.clients[c['id']] = c
         if sgt24h_capable:
-            greeting = (b'Supermodel Online lobby v1 SGT24H2 ' + bytes((ord('0')+sgt24h_flags,))) if sgt24h_flags is not None else SGT24H_RELAY_HELLO
+            prefix = b'Supermodel Online lobby v1 SGT24H3 ' if c['indy_nocpu_capable'] else b'Supermodel Online lobby v1 SGT24H2 '
+            greeting = (prefix + bytes((ord('0')+sgt24h_flags,))) if sgt24h_flags is not None else SGT24H_RELAY_HELLO
         elif model2_video:
-            greeting = MODEL2_VIDEO_RELAY_HELLO + bytes((ord('0') + model2_video_flags,))
+            prefix = b'Supermodel Online lobby v1 M2VIDEO2 ' if c['indy_nocpu_capable'] else MODEL2_VIDEO_RELAY_HELLO
+            greeting = prefix + bytes((ord('0') + model2_video_flags,))
         elif daytona_capable:
             greeting = DAYTONA_RELAY_HELLO + bytes((ord('0') + daytona_flags,))
         elif srallyc_capable:
@@ -2480,9 +2495,11 @@ class Hub:
                 self.directory_advertisement(writer, second[1])
                 await writer.drain()
             elif second[0] == b'OEH6':
-                sgt_flags = next((i for i in range(8) if first[1] == b'Supermodel Online SGT24H2 ' + bytes((ord('0')+i,))), None)
+                sgt_new = next((i for i in range(8) if first[1] == b'Supermodel Online SGT24H3 ' + bytes((ord('0')+i,))), None)
+                video_new = next((i for i in range(1, 8) if first[1] == b'Supermodel Online M2VIDEO2 ' + bytes((ord('0')+i,))), None)
+                sgt_flags = sgt_new if sgt_new is not None else next((i for i in range(8) if first[1] == b'Supermodel Online SGT24H2 ' + bytes((ord('0')+i,))), None)
                 flags = next((i for i in range(4) if first[1] == DAYTONA_HELLO + bytes((ord('0') + i,))), None)
-                video_flags = next((i for i in range(1, 8) if first[1] == MODEL2_VIDEO_HELLO + bytes((ord('0') + i,))), None)
+                video_flags = video_new if video_new is not None else next((i for i in range(1, 8) if first[1] == MODEL2_VIDEO_HELLO + bytes((ord('0') + i,))), None)
                 indy = bool(flags is not None and flags & 1)
                 rally = bool(flags is not None and flags & 2)
                 await self.control(reader, writer, second[1], True, True, True,
@@ -2490,7 +2507,8 @@ class Hub:
                                    indy_room=indy or first[1] in (INDY500_ROOM_HELLO, BOTH_MODEL2_HELLO),
                                    srallyc_available=rally or first[1] in (SRALLYC_HELLO, BOTH_MODEL2_HELLO),
                                    daytona_flags=flags, model2_video_flags=sgt_flags if sgt_flags is not None else video_flags,
-                                   sgt24h_available=first[1] == SGT24H_HELLO or sgt_flags is not None, sgt24h_flags=sgt_flags)
+                                   sgt24h_available=first[1] == SGT24H_HELLO or sgt_flags is not None, sgt24h_flags=sgt_flags,
+                                   indy_nocpu=bool((sgt_new is not None and sgt_new & 1) or (video_new is not None and video_new & 1)))
             elif second[0] == b'RLC1':
                 await self.chat_session(reader, writer, second[1])
             elif second[0] in (b'RLJ2', b'RLJ3') and len(second[1]) == JOIN2.size:

@@ -1754,6 +1754,7 @@ Util::Config::Node DefaultConfig()
   config.Set("NetPredictionSmoothing", unsigned(1), "Network");
   config.Set("IndyPrediction", true, "Network");
   config.Set("IndyPoseUdp", true, "Network");
+  config.Set("IndyLocalCollision", true, "Network"); // experimental, can be disabled
   config.Set("SrallycPrediction", true, "Network");
   config.Set("SrallycPoseUdp", true, "Network");
   config.Set("DaytonaPrediction", true, "Network");
@@ -2103,6 +2104,7 @@ static void Help(void)
   puts("  -scudplus-16            Scud Race Plus 16-player research ROM patch (test rigs; the Online tab sets it per room)");
   puts("  -net-smoothing=<n>      Remote car correction blend: 0 fixed, 1 error-proportional, 2 extra smooth [Default: 1]");
   puts("  -no-indy-prediction     Draw unpredicted remote cars in INDY 500 Online");
+  puts("  -no-indy-local-collision  Disable experimental local self-pose for Indy collision reads (default on)");
   puts("  -no-srallyc-prediction  Draw native remote cars in Sega Rally Championship Rev C Online");
   puts("  -no-srallyc-udp         Keep Rev C motion prediction on TCP only");
   puts("  -no-daytona-prediction Draw native remote cars in original Daytona Rev A Online");
@@ -2201,6 +2203,8 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
   { // -option
     { "-indy-prediction",     { "IndyPrediction",    true  } },
     { "-no-indy-prediction",  { "IndyPrediction",    false } },
+    { "-indy-local-collision", { "IndyLocalCollision", true } },
+    { "-no-indy-local-collision", { "IndyLocalCollision", false } },
     { "-indy-udp",           { "IndyPoseUdp",       true  } },
     { "-no-indy-udp",        { "IndyPoseUdp",       false } },
     { "-srallyc-prediction",    { "SrallycPrediction", true  } },

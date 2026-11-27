@@ -65,6 +65,8 @@
 #include "Model3/93C46.h"
 #include "CPU/I960/I960.h"
 #include "Network/Games/Indy500/Motion.h"
+#include "Network/Games/Indy500/LocalCollision.h"
+#include "Network/Games/Indy500/AiLocalCollision.h"
 #include <cstdio>
 #include "CPU/MB86233/MB86233.h"
 #include "CPU/SHARC/SHARC.h"
@@ -270,6 +272,7 @@ private:
     IndyMotion::Predictor predictor, udpPredictor;
     IndyPoseUdp::Blend udpBlend;
     IndyMotion::Sample sample{};
+    IndyPoseUdp::Selection racePick{};
     uint64_t frame=0;
     double lead=0;
   };
@@ -286,6 +289,11 @@ private:
   std::array<IndyActorMotion,IndyMotion::MaxActors> m_indyActors{};
   IndyDrawMotion m_indyDraw;
   bool m_indyMotionEnabled=false, m_indyMotionActive=false;
+  bool m_indyLocalCollisionEnabled=false; // armed only after revision/session verification
+  IndyLocalCollision::Input m_indyLocalCollision;
+  bool m_indyAiLocalCollisionEnabled=false;
+  bool m_indyNoCpuEnabled=false;
+  IndyAiLocalCollision::Inputs m_indyAiLocalCollision;
   std::array<IndyPoseUdp::Received,IndyMotion::MaxSeats> m_indyUdpPeers{};
   uint64_t m_indyUdpFrameUs=0;
   uint32_t m_indyUdpSentTick=0;

@@ -434,6 +434,12 @@ void OnlineGui::DrawRoomOptionsDialog(const Online::Snapshot& s,bool requestOpen
             bool handicap=NativeRoomSettings::HasIndyHandicap(settings);
             if(ImGui::Checkbox("Handicap",&handicap))
               client.SetRoomOptions(room->id,(settings&~NativeRoomSettings::IndyHandicap)|(handicap?NativeRoomSettings::IndyHandicap:0u));
+            bool realPlayers=NativeRoomSettings::HasRealPlayers(room->game,settings);
+            ImGui::BeginDisabled(!s.indyNoCpuRelay);
+            if(ImGui::Checkbox("Real players only (no CPU cars)",&realPlayers))
+              client.SetRoomOptions(room->id,(settings&~NativeRoomSettings::RealPlayers)|(realPlayers?NativeRoomSettings::RealPlayers:0u));
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("Experimental: requires updated relay and every cabinet.");
           }
           ImGui::EndDisabled();
           if(room->master!=s.self)ImGui::TextDisabled("Only the room master can change these settings.");

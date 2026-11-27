@@ -44,7 +44,7 @@ struct ChatMessage {
 };
 struct Snapshot {
   bool connecting = false, connected = false, launch = false, hostedRoom = false;
-  bool sgt24hRelay = false, indy500Relay = false, srallycRelay = false, daytonaRelay = false, model2VideoRelay = false;
+  bool sgt24hRelay = false, indy500Relay = false, srallycRelay = false, daytonaRelay = false, model2VideoRelay = false, indyNoCpuRelay = false;
   uint32_t self = 0, room = 0, game = 0, index = 0, count = 0, roomOptions = 0, carNumber = 0;
   uint32_t pingMs = 0; // own smoothed RTT to the lobby host (relay or creator), 0 = not measured
   std::string status = "Not connected", error, endpoint, ticket, gameEndpoint;
