@@ -9,6 +9,7 @@
 #include "Network/Games/CorrectionSmoothing.h"
 #include "Network/Games/Daytona2/BootScene.h"
 #include "Network/Games/Daytona2/MixReverse.h"
+#include "Network/Games/Daytona2/MixReverseStartTime.h"
 #include "Network/Online/AdaptiveTickRate.h"
 // ROM-free tests of the real HLE board and TCP transport. GPL-3.0-or-later.
 #include "Supermodel.h"
@@ -221,7 +222,39 @@ int main(int argc, char** argv)
     assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::UnexpectedInstruction);
     put(MR::Address, MR::Original); put(MR::Address + 4, 0x3c600010u);  // wrong brake load
     assert(Apply("dayto2pe", ram.data(), ram.size()) == MR::Result::UnexpectedInstruction);
-    std::cout << "PASS mix-reverse: dayto2pe MIX course accepts Reverse after one verified word\n";
+    namespace MRT = Daytona2MixReverseStartTime;
+    std::vector<uint8_t> timeRam(0x800000, 0);
+    auto putTime32 = [&](uint32_t addr, uint32_t value) { std::memcpy(&timeRam[addr], &value, 4); };
+    auto getTime32 = [&](uint32_t addr) { uint32_t value; std::memcpy(&value, &timeRam[addr], 4); return value; };
+    auto putTime8 = [&](uint32_t addr, uint8_t value) { timeRam[addr ^ 3] = value; };
+    assert(MRT::Apply("daytona2", timeRam.data(), timeRam.size()) == MRT::Result::WrongGame);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), 0x1000) == MRT::Result::NotReady);
+    putTime8(MRT::CourseAddress, 0); putTime8(MRT::RaceModeAddress, 0);
+    putTime32(MRT::ReverseAddress, 1); putTime32(MRT::ElapsedAddress, 0);
+    putTime32(MRT::RemainingAddress, 3420);
+    std::vector<uint8_t> expectedTimeRam = timeRam;
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::Applied);
+    assert(getTime32(MRT::RemainingAddress) == 3420 + MRT::ExtraFrames);
+    const uint32_t expectedRemaining = 3420 + MRT::ExtraFrames;
+    std::memcpy(&expectedTimeRam[MRT::RemainingAddress], &expectedRemaining, 4);
+    assert(timeRam == expectedTimeRam);  // only the initial remaining-time word changes
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotInitialTime);
+
+    // No repeated bonus at a checkpoint, nor any change to another course,
+    // direction, or race mode.
+    putTime32(MRT::ElapsedAddress, 600); putTime32(MRT::RemainingAddress, 900);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotInitialTime);
+    assert(getTime32(MRT::RemainingAddress) == 900);
+    putTime32(MRT::ElapsedAddress, 0); putTime32(MRT::RemainingAddress, 3420);
+    putTime8(MRT::CourseAddress, 1);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotEligible);
+    putTime8(MRT::CourseAddress, 0); putTime32(MRT::ReverseAddress, 0);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotEligible);
+    putTime32(MRT::ReverseAddress, 1); putTime8(MRT::RaceModeAddress, 1);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotEligible);
+    putTime8(MRT::RaceModeAddress, 0); putTime32(MRT::ElapsedAddress, 3);
+    assert(MRT::Apply("dayto2pe", timeRam.data(), timeRam.size()) == MRT::Result::NotInitialTime);
+    std::cout << "PASS mix-reverse: scoped initial-time bonus applies once; checkpoint and other modes unchanged\n";
     return 0;
   }
   if (scenario == "predict-rubberband")

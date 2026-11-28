@@ -33,19 +33,19 @@ public:
  bool Armed()const{return armed;}
  unsigned Status()const{return failed?3u:started?2u:1u;}
  bool Configure(const Config& c){
-  if(failed || stop || !bound || c.game>=9 || c.tick<5 || c.tick>60 || c.members.size()<2 || c.members.size()>Capacity(c.game))return false;
+  if(failed || stop || !bound || c.game>=10 || c.tick<5 || c.tick>60 || c.members.size()<2 || c.members.size()>Capacity(c.game))return false;
   for(size_t i=0;i<c.members.size();++i){bool a=false,b=false;for(unsigned j=0;j<16;++j){a|=c.members[i].ticket[j]!=0;b|=c.members[i].cookie[j]!=0;}if(!a||!b)return false;
    for(size_t j=0;j<i;++j)if(c.members[i].ticket==c.members[j].ticket || c.members[i].cookie==c.members[j].cookie)return false;
   }
   std::lock_guard<std::mutex> l(mutex);if(configReady)return false;config=c;configReady=true;return true;
  }
  bool HostRoom(const PlayerRoom::Settings& value){
-  std::lock_guard<std::mutex> l(mutex);if(roomReady||configReady||!bound||failed||stop||value.game>=9||value.tick<5||value.tick>60||!value.id||value.port!=port)return false;
+  std::lock_guard<std::mutex> l(mutex);if(roomReady||configReady||!bound||failed||stop||value.game>=10||value.tick<5||value.tick>60||!value.id||value.port!=port)return false;
   roomSettings=value;roomReady=true;return true;
  }
- static unsigned Capacity(unsigned game){return game<2?16:game==4?Srally2Research::StockCapacity:game==5?6:game==7?4:game==8?ScudResearch::Capacity:8;}
- static uint64_t Guid(unsigned game){static const uint64_t g[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,Srally2Research::StockGuid,0x5bf177da3487a,Srally2Research::Guid,0x5bf177da3487c,ScudResearch::Guid};return game<9?g[game]:0;}
- static size_t Segment(unsigned game){static const size_t s[]={848,848,1024,1024,2048,3264,2048,3584,1024};return game<9?s[game]:0;}
+ static unsigned Capacity(unsigned game){return game<2?16:game==4?Srally2Research::StockCapacity:game==5?6:game==7?4:game==8?ScudResearch::Capacity:game==Indy500Online::Game?Indy500Online::Cabinets:8;}
+ static uint64_t Guid(unsigned game){static const uint64_t g[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,Srally2Research::StockGuid,0x5bf177da3487a,Srally2Research::Guid,0x5bf177da3487c,ScudResearch::Guid,Indy500Online::Guid};return game<10?g[game]:0;}
+ static size_t Segment(unsigned game){static const size_t s[]={848,848,1024,1024,2048,3264,2048,3584,1024,Indy500Online::PayloadSize};return game<10?s[game]:0;}
 private:
  using Socket=RelayUpnp::Socket;static constexpr Socket Bad=RelayUpnp::Bad;
  using Clock=std::chrono::steady_clock;
@@ -98,7 +98,7 @@ private:
   }
  }
  static bool Nonzero(const uint8_t* p,size_t n){for(size_t i=0;i<n;++i)if(p[i])return true;return false;}
- Conn* Target(const Conn& c){if(c.index<0)return nullptr;size_t n=peers.size(),i=size_t(c.index);return c.channel==0?peers[(i+1)%n].channels[1]:peers[(i+n-1)%n].channels[0];}
+ Conn* Target(const Conn& c){if(c.index<0)return nullptr;size_t n=peers.size(),i=size_t(c.index);if(guid==Indy500Online::Guid)return c.channel==0?peers[(i+n-1)%n].channels[1]:peers[(i+1)%n].channels[0];return c.channel==0?peers[(i+1)%n].channels[1]:peers[(i+n-1)%n].channels[0];}
  void Fail(){failed=true;for(auto& c:connections){if(c->fd!=Bad){RelayUpnp::Close(c->fd);c->fd=Bad;}}for(auto& p:peers){p.hello=0;p.channels[0]=p.channels[1]=nullptr;}}
  bool Message(Conn& c,const std::vector<uint8_t>& packet){
   const auto id=Read(packet.data()+4);const size_t n=packet.size();
@@ -111,7 +111,7 @@ private:
   }
   if(c.index<0 && room && (room->Registered(c.id) || id==Srally2Research::LobbyHelloId || id==0x31434c52))return room->Message(c.id,c.ip,packet);
   if(c.index<0){
-   if(!armed || started || failed || id!=0x334a4c52 || n!=56 || Read(packet.data()+8)!=1 || Read(packet.data()+12)>1 || !Nonzero(packet.data()+16,16))return false;
+   if(!armed || started || failed || (id!=0x334a4c52&&(id!=0x324a4c52||guid!=Indy500Online::Guid)) || n!=56 || Read(packet.data()+8)!=1 || Read(packet.data()+12)>1 || !Nonzero(packet.data()+16,16))return false;
    uint64_t g=0;std::memcpy(&g,packet.data()+32,8);if(g!=guid)return false;
    for(size_t i=0;i<peers.size();++i){auto& p=peers[i];if(std::memcmp(packet.data()+40,p.auth.ticket.data(),16))continue;
     unsigned ch=Read(packet.data()+12);if(p.channels[ch] || (p.channels[ch^1] && (p.ip!=c.ip || std::memcmp(p.nonce.data(),packet.data()+16,16))))return false;
@@ -128,11 +128,11 @@ private:
   if(!armed || started || failed)return;
   for(auto& p:peers)if(!p.channels[0]||!p.channels[1])return;
   for(size_t i=0;i<peers.size();++i)for(unsigned ch=0;ch<2;++ch){auto& c=*peers[i].channels[ch];auto target=Target(c);if(!target || !c.Queue(target->hello)){Fail();return;}
-   std::vector<uint8_t> b;Put(b,1);Put(b,tick);if(!c.Queue(Frame("RLT1",b))){Fail();return;}
-   if(adaptive){b.clear();Put(b,1);Put(b,1);Put(b,controller.cap);Put(b,controller.floor);if(!c.Queue(Frame("RLT2",b))){Fail();return;}}
-   if(ch==0){b.clear();Put(b,1);Put(b,port);Put(b,uint32_t(i));Put(b,uint32_t(peers.size()));b.insert(b.end(),peers[i].auth.cookie.begin(),peers[i].auth.cookie.end());if(!c.Queue(Frame("RLU1",b))){Fail();return;}}
+   std::vector<uint8_t> b;if(guid!=Indy500Online::Guid){Put(b,1);Put(b,tick);if(!c.Queue(Frame("RLT1",b))){Fail();return;}}
+   if(adaptive&&guid!=Indy500Online::Guid){b.clear();Put(b,1);Put(b,1);Put(b,controller.cap);Put(b,controller.floor);if(!c.Queue(Frame("RLT2",b))){Fail();return;}}
+   if(ch==0&&guid!=Indy500Online::Guid){b.clear();Put(b,1);Put(b,port);Put(b,uint32_t(i));Put(b,uint32_t(peers.size()));b.insert(b.end(),peers[i].auth.cookie.begin(),peers[i].auth.cookie.end());if(!c.Queue(Frame("RLU1",b))){Fail();return;}}
    b.clear();Put(b,1);Put(b,uint32_t(i));Put(b,uint32_t(peers.size()));Put(b,ch);if(!c.Queue(Frame("RLA1",b))){Fail();return;}
-  }started=true;windowStartUs=0;std::fprintf(stderr,"Player host: TCP ring and UDP gameplay started for %u cabinets; central server carries no gameplay%s.\n",unsigned(peers.size()),adaptive?"; adaptive tick rate":"");
+  }started=true;windowStartUs=0;if(guid==Indy500Online::Guid)std::fprintf(stderr,"Player host: native INDY 500 TCP ring started for %u cabinets; central server carries no gameplay.\n",unsigned(peers.size()));else std::fprintf(stderr,"Player host: TCP ring and UDP gameplay started for %u cabinets; central server carries no gameplay%s.\n",unsigned(peers.size()),adaptive?"; adaptive tick rate":"");
  }
  void PollUdp(){
   for(unsigned budget=0;budget<128;++budget){uint8_t bytes[1201];sockaddr_in address{};
@@ -182,7 +182,7 @@ private:
    }}
    if(room){room->Pump(armed,started,failed);if(room->Closed()){Fail();break;}}
    if(!armed){std::lock_guard<std::mutex> l(mutex);if(configReady){tick=config.tick;segment=Segment(config.game);guid=Guid(config.game);
-     adaptive=!config.members.empty();for(auto& member:config.members)adaptive=adaptive&&member.adaptive;controller.Reset(tick);currentTick=tick;for(auto& member:config.members){Peer p;p.auth=member;p.credit=double(RelayUdp::MaxEncodedSize+3*RelayUdp::HeaderSize)*tick/4+RelayUdp::MaxEncodedSize;peers.push_back(p);}armTime=Now();armed=true;}}
+     adaptive=guid!=Indy500Online::Guid&&!config.members.empty();for(auto& member:config.members)adaptive=adaptive&&member.adaptive;controller.Reset(tick);currentTick=tick;for(auto& member:config.members){Peer p;p.auth=member;p.credit=double(RelayUdp::MaxEncodedSize+3*RelayUdp::HeaderSize)*tick/4+RelayUdp::MaxEncodedSize;peers.push_back(p);}armTime=Now();armed=true;}}
    PollUdp();StartIfReady();{const auto loopNow=Now();NoteLoop(loopNow);AdaptTick(loopNow);}
    fd_set read,write;FD_ZERO(&read);FD_ZERO(&write);FD_SET(tcp,&read);Socket largest=tcp;
    for(auto& p:connections){auto& c=*p;if(c.fd==Bad)continue;auto target=started?Target(c):nullptr;

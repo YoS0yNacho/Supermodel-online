@@ -50,7 +50,7 @@ public:
    // AsyncNet flag plus capability bits 2..256 (options, native, adaptive tick,
    // Hornet, race, star, ping, Video60). Newer-than-known bits are rejected so
    // the owner never hosts a client it cannot serve.
-   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~Model3GameMask)==0&&(Read(b+8)&1)&&!(Read(b+8)&~HelloCapabilityMask)&&state==0&&!closed){
+   if(kind==Srally2Research::LobbyHello&&n==60&&Read(b)==1&&(Read(b+4)&~(Model3GameMask|(settings.game==Indy500Online::Game?Indy500Bit:0u)))==0&&(Read(b+8)&1)&&!(Read(b+8)&~HelloCapabilityMask)&&state==0&&!closed){
     bool owner=std::memcmp(b+44,settings.owner.data(),16)==0;
     if(!(Read(b+4)&(1u<<settings.game))||(!owner&&(!order.size()||!Zero(b+44)))||(owner&&ownerId)||order.size()>=Capacity())return false;
     if(owner&&ntohl(ip)!=0x7f000001)return false;
@@ -144,7 +144,7 @@ private:
  static bool Zero(const uint8_t* p){for(unsigned i=0;i<16;++i)if(p[i])return false;return true;}
  static Token Random(){std::random_device r;Token t{};do{for(unsigned i=0;i<16;i+=4){auto x=r();for(unsigned j=0;j<4;++j)t[i+j]=uint8_t(x>>(j*8));}}while(Zero(t.data()));return t;}
  bool AllNative()const{if(state)return frozenNative;for(auto member:order)if(!clients.at(member).nativeCapable)return false;return !order.empty();}
- unsigned Capacity()const{return settings.game<2?16:settings.game==4?Srally2Research::StockCapacity:settings.game==5?6:settings.game==7?4:settings.game==8?ScudResearch::Capacity:8;}
+ unsigned Capacity()const{return settings.game<2?16:settings.game==4?Srally2Research::StockCapacity:settings.game==5?6:settings.game==7?4:settings.game==8?ScudResearch::Capacity:settings.game==Indy500Online::Game?Indy500Online::Cabinets:8;}
  uint32_t Car(uint32_t id)const{auto i=std::find(order.begin(),order.end(),id);return i==order.end()?0:uint32_t(i-order.begin()+1);}
  void Error(uint32_t id,const std::string& text){Bytes b;Text(b,text,160);send(id,Frame("OLE1",b));}
  void Snapshot(uint32_t id){auto it=clients.find(id);if(it==clients.end())return;Bytes b;Put(b,1);Put(b,it->second.number);Put(b,settings.id);send(id,Frame("OLB1",b));b.clear();

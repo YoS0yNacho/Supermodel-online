@@ -38,7 +38,7 @@ using Socket = int;
 constexpr Socket Bad = -1;
 void Close(Socket s) { close(s); }
 #endif
-struct Route {std::string host;uint16_t port=0;std::array<uint8_t,16> key{};bool native=false;};
+struct Route {std::string host;uint16_t port=0;std::array<uint8_t,16> key{};bool native=false;uint32_t game=0;};
 struct SocketOwner { Socket socket = Bad; ~SocketOwner() { if (socket != Bad) Close(socket); } };
 void Put(std::vector<uint8_t>& b, uint32_t x) { for (int i=0;i<4;++i) b.push_back(uint8_t(x>>(8*i))); }
 uint32_t U32(const std::vector<uint8_t>& b, size_t p) {
@@ -246,10 +246,11 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
   constexpr const char* model2VideoHello="Supermodel Online M2VIDEO1 ";
   constexpr const char* model2VideoReply="Supermodel Online lobby v1 M2VIDEO1 ";
   for(;;) try {
+    const bool hostedIndy=route.native&&route.game==Indy500Online::Game;
     SocketOwner owner;
     if(!OpenNonblockingSocket(s->stop,route.host,route.port,owner)) return;
     Socket fd=owner.socket;
-    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&Online::Model3GameMask); Put(hello,(enabled?1u:0u)|510u)/*2 options, 4 native, 8 adaptive tick rate, 16 Hornet, 32 race, 64 star fan-out, 128 ping, 256 Video60 room option*/; Text(hello,name,32);
+    std::vector<uint8_t> hello; Put(hello,1); Put(hello,available&(Online::Model3GameMask|(hostedIndy?Online::Indy500Bit:0u))); Put(hello,(enabled?1u:0u)|510u)/*2 options, 4 native, 8 adaptive tick rate, 16 Hornet, 32 race, 64 star fan-out, 128 ping, 256 Video60 room option*/; Text(hello,name,32);
     const bool hasIndy = !route.native && (available & Online::Indy500Bit);
     const bool requestIndyRoom = hasIndy && tryIndyRoomOptions;
     const bool requestSrallyc = !route.native && (available & Online::SrallycBit) && trySrallyc;
@@ -370,7 +371,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Room r; r.id=U32(b,0);r.game=U32(b,4);r.state=U32(b,8);uint32_t count=U32(b,12);r.master=U32(b,16);r.name=String(b,20,64);
           Require(r.id&&r.game<Online::GameCount&&r.state<=3&&count>=1&&count<=Online::MaxPlayers(r.game)&&b.size()==84+count*36);
           for(uint32_t i=0;i<count;++i) r.members.push_back({U32(b,84+i*36),String(b,88+i*36,32)});
-          Require(r.game!=Indy500Online::Game || (indy500Relay && (available & Online::Indy500Bit)));
+          Require(r.game!=Indy500Online::Game || ((indy500Relay || hostedIndy) && (available & Online::Indy500Bit)));
           Require(r.game!=SrallycOnline::Game || srallycRelay);
           Require(r.game!=Sgt24hOnline::Game || sgt24hRelay);
           Require(r.game!=DaytonaOnline::Game || daytonaRelay);
@@ -389,7 +390,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           std::lock_guard<std::mutex> lock(s->mutex);Require(s->view.room==hostRoom);s->view.playerHost=host;
         } else if(kind=="OHD1") {
           Require(!route.native && admitted && !collecting && b.size()==100);
-          Route next;next.native=true;next.host=std::to_string(b[16])+"."+std::to_string(b[17])+"."+std::to_string(b[18])+"."+std::to_string(b[19]);auto port=U32(b,12);Require(port>=1024&&port<=65535);next.port=uint16_t(port);std::memcpy(next.key.data(),b.data()+84,16);
+          Route next;next.native=true;next.game=U32(b,4);Require(next.game<Online::GameCount);next.host=std::to_string(b[16])+"."+std::to_string(b[17])+"."+std::to_string(b[18])+"."+std::to_string(b[19]);auto port=U32(b,12);Require(port>=1024&&port<=65535);next.port=uint16_t(port);std::memcpy(next.key.data(),b.data()+84,16);
           if(host){
             Require(U32(b,0)==hostRoom);PlayerRoom::Settings settings;settings.id=hostRoom;settings.game=U32(b,4);settings.tick=s->hostTick.load();settings.port=next.port;settings.title=String(b,20,64);settings.owner=next.key;
 #ifdef _WIN32
@@ -432,7 +433,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           if(collecting && !pending.rooms.empty())
           {
             auto& room=pending.rooms.back();Require(optRoom==room.id && !room.optionsSupported);
-            Require(room.game!=Indy500Online::Game || indyRoomRelay);
+            Require(room.game!=Indy500Online::Game || indyRoomRelay || hostedIndy);
             Require(room.game!=SrallycOnline::Game || srallycRelay);
             Require(room.game!=Sgt24hOnline::Game || sgt24hRelay);
             Require(room.game!=DaytonaOnline::Game || daytonaRelay);
@@ -447,7 +448,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
             std::lock_guard<std::mutex> l(s->mutex);
             const auto roomIt=std::find_if(s->view.rooms.begin(),s->view.rooms.end(),[&](const Room& r){return r.id==optRoom;});
             Require(roomIt!=s->view.rooms.end() && roomIt->optionsSupported);
-            Require(roomIt->game!=Indy500Online::Game || indyRoomRelay);
+            Require(roomIt->game!=Indy500Online::Game || indyRoomRelay || hostedIndy);
             Require(roomIt->game!=SrallycOnline::Game || srallycRelay);
             Require(roomIt->game!=Sgt24hOnline::Game || sgt24hRelay);
             Require(roomIt->game!=DaytonaOnline::Game || daytonaRelay);
@@ -462,7 +463,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           uint32_t used=0;
           for(unsigned i=0;i<count;++i){const auto car=U32(b,16+8*i);Require(U32(b,12+8*i)==room.members[i].id && car<=NativeRoomSettings::CarLimit(room.game));
             if(car){Require(!(used&(1u<<(car-1))));used|=1u<<(car-1);}room.members[i].carNumber=car;}
-          Require(room.game!=Indy500Online::Game || indyRoomRelay);
+          Require(room.game!=Indy500Online::Game || indyRoomRelay || hostedIndy);
           Require(room.game!=SrallycOnline::Game || srallycRelay);
           Require(room.game!=Sgt24hOnline::Game || sgt24hRelay);
           Require(room.game!=DaytonaOnline::Game || daytonaRelay);
@@ -481,7 +482,7 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           std::lock_guard<std::mutex> l(s->mutex);
           if(s->view.room!=pending.room) s->view.roomChat.clear();
           s->view.rooms=std::move(pending.rooms);s->view.self=pending.self;s->view.room=pending.room;s->view.pingMs=pingMs;
-          s->view.indyNoCpuRelay=indyNoCpuRelay;s->view.sgt24hRelay=sgt24hRelay;s->view.indy500Relay=indy500Relay;s->view.srallycRelay=srallycRelay;s->view.daytonaRelay=daytonaRelay;s->view.model2VideoRelay=model2VideoRelay;s->view.hostedRoom=route.native;s->view.connected=true;s->view.connecting=false;s->view.status=route.native?"Connected to creator (central: discovery only)":"Connected";
+          s->view.indyNoCpuRelay=indyNoCpuRelay||hostedIndy;s->view.sgt24hRelay=sgt24hRelay;s->view.indy500Relay=indy500Relay||hostedIndy;s->view.srallycRelay=srallycRelay;s->view.daytonaRelay=daytonaRelay;s->view.model2VideoRelay=model2VideoRelay;s->view.hostedRoom=route.native;s->view.connected=true;s->view.connecting=false;s->view.status=route.native?"Connected to creator (central: discovery only)":"Connected";
         } else if(kind=="OLM1") {
           Require(b.size()==204&&!collecting);
           ChatMessage msg;
@@ -500,10 +501,10 @@ void LobbyClient::Worker(std::shared_ptr<State> s,std::string serverHost,uint16_
           Require(b.size()==(withHost?40u:32u)+(withNative?8u:withOptions?4u:0u)&&admitted&&enabled);uint32_t game=U32(b,4),index=U32(b,8),count=U32(b,12);
           const uint32_t roomOptions=withOptions?U32(b,withHost?40:32):0, carNumber=withNative?U32(b,withHost?44:36):0;
           Require(NativeRoomSettings::Valid(game,roomOptions) && carNumber<=NativeRoomSettings::CarLimit(game));
-          Require(game!=Indy500Online::Game || !NativeRoomSettings::HasRealPlayers(game,roomOptions) || indyNoCpuRelay);
+          Require(game!=Indy500Online::Game || !NativeRoomSettings::HasRealPlayers(game,roomOptions) || indyNoCpuRelay || hostedIndy);
           Require(!Model2RelayGame(game) || !NativeRoomSettings::HasVideo60(roomOptions) || model2VideoRelay);
           Require(game<Online::GameCount&&(available&(1u<<game))&&count>=2&&count<=Online::MaxPlayers(game)&&index<count);
-          Require(game!=Indy500Online::Game || (indy500Relay && !withHost && (!withOptions || indyRoomRelay)));
+          Require(game!=Indy500Online::Game || (hostedIndy || (indy500Relay && (!withOptions || indyRoomRelay))));
           Require(game!=SrallycOnline::Game || (srallycRelay && !withHost && withNative && !route.native));
           Require(game!=Sgt24hOnline::Game || (sgt24hRelay && !withHost && withNative && !route.native));
           Require(game!=DaytonaOnline::Game || (daytonaRelay && !withHost && withNative && !route.native));

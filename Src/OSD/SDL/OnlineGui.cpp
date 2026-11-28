@@ -337,14 +337,15 @@ void OnlineGui::DrawCreateDialog(const std::string& dir,const Online::Snapshot& 
       const bool daytona = unsigned(game) == DaytonaOnline::Game;
       const bool sgt = unsigned(game) == Sgt24hOnline::Game;
       const bool model2 = Online::Model2RelayGame(unsigned(game));
-      if(model2) {
+      if(model2 && !indy) {
         ImGui::Text("Hosting: Central relay (TCP ring, 2-%u seats)", Online::MaxPlayers(unsigned(game)));
-        if((indy && !s.indy500Relay) || (rally && !s.srallycRelay) || (daytona && !s.daytonaRelay) || (sgt && !s.sgt24hRelay)) ImGui::TextDisabled("This relay needs an update for %s.", Online::Titles[game]);
+        if((rally && !s.srallycRelay) || (daytona && !s.daytonaRelay) || (sgt && !s.sgt24hRelay)) ImGui::TextDisabled("This relay needs an update for %s.", Online::Titles[game]);
       } else {
         ImGui::SetNextItemWidth(300.0f*scale);
         ImGui::Combo("Hosting",&udpHosting,"Central relay\0Self-host room + TCP/UDP (try UPnP)\0");
+        if(indy && udpHosting) ImGui::TextWrapped("Self-host uses the creator's native TCP ring. INDY 500 relay-only race-motion UDP is not used in self-hosted rooms.");
       }
-      const bool selfHost = !model2 && udpHosting != 0;
+      const bool selfHost = (!model2 || indy) && udpHosting != 0;
       if(selfHost) {
         ImGui::SetNextItemWidth(110.0f*scale);
         ImGui::InputInt("Host TCP/UDP port",&udpPort,0,0);

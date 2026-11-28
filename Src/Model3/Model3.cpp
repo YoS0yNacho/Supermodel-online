@@ -223,6 +223,7 @@
 #include "Network/Games/Daytona2/RaceOptions.h"
 #include "Network/Games/Daytona2/Collision.h"
 #include "Network/Games/Daytona2/MixReverse.h"
+#include "Network/Games/Daytona2/MixReverseStartTime.h"
 #include "Network/Games/Srally2/ResearchBuild.h"
 #include "Network/Games/Srally2/PpcEntryPackingResearch.h"
 #include "Network/Games/Scud/SixteenPlayerResearch.h"
@@ -2178,6 +2179,12 @@ void CModel3::RunMainBoardFrame(void)
     {
       m_mixReverseWarned = true;
       InfoLog("Daytona USA 2 Power Edition: car-select program not recognized, MIX Reverse left alone");
+    }
+    if (result == Daytona2MixReverse::Result::Applied || result == Daytona2MixReverse::Result::AlreadyApplied)
+    {
+      const auto timeResult = Daytona2MixReverseStartTime::Apply(m_game.name.c_str(), ram, 0x800000);
+      if (timeResult == Daytona2MixReverseStartTime::Result::Applied)
+        InfoLog("Daytona USA 2 Power Edition: added 60 seconds to initial MIX Reverse race time");
     }
   }
   if ((m_game.name == "daytona2" || m_game.name == "dayto2pe") &&

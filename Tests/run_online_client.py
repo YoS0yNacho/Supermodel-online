@@ -32,13 +32,14 @@ if __name__=='__main__':
     p.add_argument('--pre-indy-nocpu-relay', type=Path, help='previous relay for players-only capability fallback')
     p.add_argument("--indy-nocpu-only", action="store_true")
     p.add_argument("--self-host-only", action="store_true")
+    p.add_argument("--indy-self-host-only", action="store_true")
     a=p.parse_args()
     binary=ROOT/'build/online-client-test';binary.parent.mkdir(exist_ok=True)
     cmd=['g++','-std=c++17','-Wall','-Wextra','-Werror','-g','-O1','-pthread','-ISrc','-ISrc/OSD','-ISrc/OSD/SDL','-ISrc/Util','Tests/OnlineClientTest.cpp','Src/Network/Online/LobbyClient.cpp','Src/Model3/NetBoardLink.cpp','Src/Network/NetServer.cpp','Src/Network/TCPConnection.cpp','Src/Util/Format.cpp','Src/OSD/Thread.cpp']
     cmd+=shlex.split(subprocess.check_output(['sdl2-config','--cflags','--libs'],text=True))+['-lSDL2_net','-o',str(binary)]
     if a.sanitize:cmd+=['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-pie','-no-pie']
     subprocess.run(cmd,cwd=ROOT,check=True)
-    asyncio.run(run(binary, extra=("self-host-only",) if a.self_host_only else ("indy-nocpu",) if a.indy_nocpu_only else ()))
+    asyncio.run(run(binary, extra=("indy-self-host-only",) if a.indy_self_host_only else ("self-host-only",) if a.self_host_only else ("indy-nocpu",) if a.indy_nocpu_only else ()))
     for endpoint, mode in ((a.legacy_indy_relay, 'legacy-indy'), (a.pre_srallyc_relay, 'pre-srallyc'), (a.pre_daytona_relay, 'pre-daytona'),
                            (a.pre_model2_video_relay, 'pre-model2-video'), (a.pre_sgt24h_relay, 'pre-sgt24h'), (a.pre_indy_nocpu_relay, 'pre-indy-nocpu')):
         if endpoint:

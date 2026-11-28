@@ -57,9 +57,9 @@ async def test(players, fallback, latency, jitter):
         master = await lobby('Master')
         legacy_client = await lobby('Model 3 only', indy=False)
         title = online.fixed('INDY 500 lobby prototype test', 64)
-        for kind, mode in ((b'OLC2', 1), (b'OLC3', 2), (b'OLC4', 3)):
+        for kind, mode in ((b'OLC2', 1), (b'OLC3', 2)):
             master.send(kind, online.CREATE2.pack(game, title, mode, 1971))
-            assert b'central TCP' in await master.until(b'OLE1')
+            assert b'full creator-hosted' in await master.until(b'OLE1')
         room = await master.create(game)
         # Legacy HELLO and ROM masks must continue to discover and create the
         # original games, without receiving an unknown game ID in OLR1.

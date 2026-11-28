@@ -116,18 +116,19 @@ void TestSelfHostVersionCompatibility() {
 }
 void TestSelfHost(uint16_t port,unsigned game) {
   const std::string endpoint="127.0.0.1:"+std::to_string(port);
-  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c,0x5bf177da3487d};
-  const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584,1024};
+  const uint64_t guids[]={0x5bf177da34878,0x5bf177da34875,0x5bf177da34876,0x5bf177da34877,0x5bf177da34879,0x5bf177da3487a,0x5bf177da3487b,0x5bf177da3487c,0x5bf177da3487d,Indy500Online::Guid};
+  const size_t sizes[]={848,848,1024,1024,2048,3264,2048,3584,1024,Indy500Online::PayloadSize};
   {
     // Self-hosted room (Hosting = "Self-host room + TCP/UDP"): after the relay's
     // reachability test the creator is handed off to its own PlayerHost
     // (127.0.0.1), joiners are redirected to the creator and the central relay
-    // only lists the room. The hosted room must accept the current GUI HELLO:
-    // all nine ROM mask bits and capability bits up to 256 (60 Hz video).
+    // only lists the room. The hosted room must accept the current GUI HELLO, including the native Indy game bit.
+    // Model 3 ROM bits and capability bits up to 256 (60 Hz video) remain unchanged.
     const uint16_t hostPort=uint16_t(20000+(port*7+game*71)%30000);
-    Online::LobbyClient master,slave;
-    master.Connect(endpoint,"Self Host",Online::GameMaskAll,true);slave.Connect(endpoint,"Self Guest",Online::GameMaskAll,true);
-    Wait([&]{return master.Get().connected&&slave.Get().connected;});
+    Online::LobbyClient master,slave,third;
+    const bool indy=game==Indy500Online::Game;const unsigned memberCount=indy?3:2;
+    master.Connect(endpoint,"Self Host",Online::GameMaskAll,true);slave.Connect(endpoint,"Self Guest",Online::GameMaskAll,true);if(indy)third.Connect(endpoint,"Self Guest 2",Online::GameMaskAll,true);
+    Wait([&]{return master.Get().connected&&slave.Get().connected&&(!indy||third.Get().connected);});
     master.Create(game,"self-host regression",true,hostPort,20);
     // Handoff completes only after the host answered the TCP+UDP probe: the creator must
     // end up connected to its own room, not "Disconnected" with an error.
@@ -137,47 +138,50 @@ void TestSelfHost(uint16_t port,unsigned game) {
     Wait([&]{for(const auto& r:slave.Get().rooms)if(r.id==hosted.room&&r.udpMode==3&&!r.hostChecking)return true;return false;});
     slave.Join(hosted.room);
     Wait([&]{const auto v=slave.Get();assert(v.error.empty());return v.connected&&v.hostedRoom&&v.room==hosted.room;});
-    Wait([&]{return master.Get().rooms.size()==1&&master.Get().rooms[0].members.size()==2&&slave.Get().rooms.size()==1&&slave.Get().rooms[0].members.size()==2;});
+    if(indy){third.Join(hosted.room);Wait([&]{const auto v=third.Get();assert(v.error.empty());return v.connected&&v.hostedRoom&&v.room==hosted.room;});}
+    Wait([&]{return master.Get().rooms.size()==1&&master.Get().rooms[0].members.size()==memberCount&&slave.Get().rooms.size()==1&&slave.Get().rooms[0].members.size()==memberCount&&(!indy||(third.Get().rooms.size()==1&&third.Get().rooms[0].members.size()==memberCount));});
     assert(master.Get().rooms[0].members[0].name=="Self Host"&&master.Get().rooms[0].members[1].name=="Self Guest");
     master.SendChat("Hosted lobby chat");
     Wait([&]{return !slave.Get().roomChat.empty()&&slave.Get().roomChat.back().text=="Hosted lobby chat"&&slave.Get().roomChat.back().car==1;});
     const uint32_t chosen=NativeRoomSettings::Defaults(game) |
-      (NativeRoomSettings::SupportsNoCollisions(game)?NativeRoomSettings::NoCollisions:0u);
-    if(NativeRoomSettings::SupportsNoCollisions(game)) {
+      (NativeRoomSettings::SupportsNoCollisions(game)?NativeRoomSettings::NoCollisions:0u) |
+      (indy?NativeRoomSettings::RealPlayers:0u);
+    if(NativeRoomSettings::SupportsNoCollisions(game)||indy) {
       master.SetRoomOptions(hosted.room,chosen);
-      for(auto* client : {&master,&slave}) Wait([&]{
-        const auto view=client->Get();
-        return view.rooms.size()==1 && view.rooms[0].options==chosen;
-      });
+      for(auto* client : {&master,&slave}) Wait([&]{const auto view=client->Get();return view.rooms.size()==1&&view.rooms[0].options==chosen;});
+      if(indy)Wait([&]{const auto view=third.Get();return view.rooms.size()==1&&view.rooms[0].options==chosen;});
     }
     slave.Start(hosted.room);Wait([&]{return !slave.Get().error.empty();});assert(!slave.Get().launch);
     master.Start(hosted.room);
-    Wait([&]{return master.Get().launch&&slave.Get().launch;});
-    const auto a=master.Get(),b=slave.Get();
-    assert(a.game==game&&b.game==game&&a.index==0&&b.index==1&&a.count==2&&b.count==2&&a.ticket!=b.ticket);
-    if(NativeRoomSettings::SupportsNoCollisions(game))
-      assert(a.roomOptions==chosen && b.roomOptions==chosen && NativeRoomSettings::HasNoCollisions(game,a.roomOptions));
-    assert(a.gameEndpoint=="127.0.0.1:"+std::to_string(hostPort)&&b.gameEndpoint==a.gameEndpoint);
+    Wait([&]{return master.Get().launch&&slave.Get().launch&&(!indy||third.Get().launch);});
+    const auto a=master.Get(),b=slave.Get(),c=third.Get();
+    assert(a.game==game&&b.game==game&&a.index==0&&b.index==1&&a.count==memberCount&&b.count==memberCount&&a.ticket!=b.ticket);
+    if(indy)assert(c.game==game&&c.index==2&&c.count==memberCount&&c.ticket!=a.ticket&&c.ticket!=b.ticket);
+    if(NativeRoomSettings::SupportsNoCollisions(game))assert(a.roomOptions==chosen&&b.roomOptions==chosen&&NativeRoomSettings::HasNoCollisions(game,a.roomOptions));
+    if(indy)assert(a.roomOptions==chosen&&b.roomOptions==chosen&&c.roomOptions==chosen&&NativeRoomSettings::HasRealPlayers(game,a.roomOptions));
+    assert(a.gameEndpoint=="127.0.0.1:"+std::to_string(hostPort)&&b.gameEndpoint==a.gameEndpoint&&(!indy||c.gameEndpoint==a.gameEndpoint));
     const auto host=a.playerHost; // Main.cpp keeps the creator's host alive for the session
-    master.Disconnect();slave.Disconnect();
-    auto s0=std::make_shared<CNetServer>(0,"Self-host master",false),s1=std::make_shared<CNetServer>(0,"Self-host slave",false);
-    assert(s0->Start()&&s1->Start());
-    CNetBoardLink l0(s0,"127.0.0.1",hostPort,true,guids[game],a.ticket),l1(s1,"127.0.0.1",hostPort,true,guids[game],b.ticket);
-    assert(l0.Connect()&&l1.Connect());
-    Wait([&]{return l0.RelayIndex()>=0&&l1.RelayIndex()>=0;});
-    assert(l0.RelayIndex()==0&&l1.RelayIndex()==1&&l0.RelayCount()==2&&l1.RelayCount()==2);
+    master.Disconnect();slave.Disconnect();if(indy)third.Disconnect();
+    auto s0=std::make_shared<CNetServer>(0,"Self-host master",false),s1=std::make_shared<CNetServer>(0,"Self-host slave",false),s2=std::make_shared<CNetServer>(0,"Self-host slave 2",false);
+    assert(s0->Start()&&s1->Start()&&(!indy||s2->Start()));
+    CNetBoardLink l0(s0,"127.0.0.1",hostPort,true,guids[game],a.ticket),l1(s1,"127.0.0.1",hostPort,true,guids[game],b.ticket),l2(s2,"127.0.0.1",hostPort,true,guids[game],c.ticket);
+    assert(l0.Connect()&&l1.Connect()&&(!indy||l2.Connect()));
+    if(indy)Wait([&]{return l0.RelayIndex()>=0&&l1.RelayIndex()>=0&&l2.RelayIndex()>=0;});else Wait([&]{return l0.RelayIndex()>=0&&l1.RelayIndex()>=0;});
+    assert(l0.RelayIndex()==0&&l1.RelayIndex()==1&&l0.RelayCount()==memberCount&&l1.RelayCount()==memberCount);
+    if(indy)assert(l2.RelayIndex()==2&&l2.RelayCount()==memberCount);
     std::vector<uint8_t> payload(sizes[game],0x5A),received;
-    l0.Send(payload.data(),payload.size());Wait([&]{return l1.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);
-    l1.Send(payload.data(),payload.size());Wait([&]{return l0.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);
-    std::cout<<"PASS self-hosted room: probe -> creator/joiner handoff -> hosted lobby/chat -> Start Link -> creator-hosted two-channel link: "<<Online::Games[game]<<std::endl;
+    if(indy){l0.Send(payload.data(),payload.size());Wait([&]{return l2.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);l2.Send(payload.data(),payload.size());Wait([&]{return l1.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);}
+    else{l0.Send(payload.data(),payload.size());Wait([&]{return l1.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);l1.Send(payload.data(),payload.size());Wait([&]{return l0.TryReceive(received)==CNetBoardLink::ReceiveResult::Data;});assert(received==payload);}
+    std::cout<<"PASS self-hosted room: creator/joiner handoff -> hosted lobby/options/chat -> launch -> creator-hosted native ring: "<<Online::Games[game]<<std::endl;
   }
 }
 int main(int argc,char**argv) {
   const std::string mode=argc>2?argv[2]:"";
-  assert(argc==2 || (argc==3 && (mode=="pre-sgt24h" || mode=="legacy-indy" || mode=="pre-srallyc" || mode=="pre-daytona" || mode=="pre-model2-video" || mode=="pre-indy-nocpu" || mode=="indy-nocpu" || mode=="self-host-only")));
+  assert(argc==2 || (argc==3 && (mode=="pre-sgt24h" || mode=="legacy-indy" || mode=="pre-srallyc" || mode=="pre-daytona" || mode=="pre-model2-video" || mode=="pre-indy-nocpu" || mode=="indy-nocpu" || mode=="self-host-only" || mode=="indy-self-host-only")));
   uint16_t port=uint16_t(std::stoi(argv[1]));std::string endpoint="127.0.0.1:"+std::to_string(port);
   TestSelfHostVersionCompatibility();
-  if(mode=="self-host-only") { for(unsigned game : {0u,1u,7u,8u}) TestSelfHost(port,game); return 0; }
+  if(mode=="indy-self-host-only") { TestSelfHost(port,Indy500Online::Game); return 0; }
+  if(mode=="self-host-only") { for(unsigned game : {0u,1u,7u,8u,Indy500Online::Game}) TestSelfHost(port,game); return 0; }
   if(argc==3) {
     constexpr auto legacy=Model2Rate::LegacyRelay;
     if(mode=="indy-nocpu") { TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,false,true); TestModel2(port,2,true,false,false,false,false,Model2Rate::Native,false,true,true); }

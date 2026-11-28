@@ -2216,8 +2216,8 @@ class Hub:
                 if game >= len(GAMES) or not c['mask'] & (1 << game):
                     self.error(c, 'This exact ROM (and required parent) is not available locally.')
                     return
-                if game == INDY500_GAME and mode:
-                    self.error(c, 'INDY 500 requires the central TCP ring (UDP motion is optional and relay-only).')
+                if game == INDY500_GAME and mode in (1, 2):
+                    self.error(c, 'INDY 500 supports full creator-hosted TCP rooms only (mode 3). Choose Central relay or full self-host.')
                     return
                 if game == SGT24H_GAME and mode:
                     self.error(c, 'Super GT 24h requires the central TCP relay.')

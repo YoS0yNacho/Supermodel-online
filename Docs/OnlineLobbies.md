@@ -902,6 +902,10 @@ in Mirror + Reverse like the other courses.
   behaviour; ROM set, NVRAM and config are untouched.
 - Grand Prix / Endurance keep refusing Reverse (a different test on the game
   mode byte), as in the original.
+- MIX Reverse receives 3,452 frames (just over 60 seconds at the game's 57.52416 Hz
+  frame rate) in its initial race-time counter only. This is gated to course 0,
+  normal race mode, the Reverse flag, and the initial timer window. The independent
+  checkpoint-time addition path is unchanged, so later segments are not lengthened.
 
 ROM-free coverage: `python3 Tests/run_async_netboard.py --only mix-reverse`.
 Verified on the 2-cabinet relay rig: normal, Mirror, Reverse and Mirror +
